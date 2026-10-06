@@ -23,7 +23,7 @@ import { connect as sshConnect } from 'edgeport/ssh';
 import { connect as sftpConnect } from 'edgeport/sftp';
 import { credentialFingerprint, decryptField, encryptField, generateMasterKey } from './crypto';
 import { getHost, listHosts, nowIso, rulesForHost, slugify, type HostRow, type SourceRuleRow } from './db';
-import { renderIndexPage } from './ui';
+import { LOCALES, pickLocale, renderIndexPage, type Locale } from './ui';
 // Wrangler's default bundling treats `.sql` as a `Text` module, so this is a plain string at
 // runtime. Importing the migration file keeps the CLI path and the in-Worker path on one schema.
 import initSchemaSql from '../migrations/0001_init.sql';
@@ -59,8 +59,12 @@ function json(body: unknown, status = 200): Response {
 	});
 }
 
-function requireMasterKey(env: Env): string {
-	if (!env.SSH_MASTER_KEY) {
+/** Narrows a `?lang=` value to a supported locale, so an unknown tag falls back to negotiation. */
+function isLocale(value: string | null): value is Locale {
+	return value !== null && (LOCALES as readonly string[]).includes(value);
+}
+
+function requireMasterKey(env: Env): string {	if (!env.SSH_MASTER_KEY) {
 		throw new HttpError(
 			503,
 			'SSH_MASTER_KEY is not set on this deployment, so stored credentials cannot be read or written. Generate one at GET /api/master-key and set it as a secret.',
@@ -427,8 +431,13 @@ export default {
 
 		try {
 			if (path === '/' && method === 'GET') {
-				return new Response(renderIndexPage(), {
-					headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
+				// The server picks the initial locale from Accept-Language so the first paint is already
+				// in the reader's language; the client can then switch instantly without a reload.
+				// `?lang=` overrides it, which is what makes a locale linkable.
+				const requested = url.searchParams.get('lang');
+				const locale = isLocale(requested) ? requested : pickLocale(request.headers.get('accept-language'));
+				return new Response(renderIndexPage(locale), {
+					headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', vary: 'Accept-Language' },
 				});
 			}
 
