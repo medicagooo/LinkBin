@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "linkbin-ssh-probe",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-04",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  "r2_buckets": [
+    {
+      "binding": "PROBE_BUCKET",
+      "bucket_name": "linkbin-ssh-probe"
+    }
+  ],
+  "vars": {
+    "PROBE_HOST": "",
+    "PROBE_PORT": "22",
+    "PROBE_USER": ""
+  }
+}

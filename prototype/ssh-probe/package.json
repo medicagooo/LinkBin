@@ -1,0 +1,18 @@
+{
+  "name": "ssh-probe",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Disposable prototype: can a Cloudflare Worker connect to a real VPS over SSH and read a file? Never merged to main.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "dependencies": {
+    "edgeport": "^1.0.6"
+  },
+  "devDependencies": {
+    "wrangler": "^4.147.0"
+  }
+}
