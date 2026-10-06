@@ -5,35 +5,36 @@
     "Files at designated paths on multiple VPS hosts are collected into non-filesystem durable storage.",
     "Other devices can discover and download those files.",
     "Storage stack is Cloudflare Workers + D1 (metadata) + R2 (file bodies).",
-    "Synchronisation is scheduled, incremental, and content-hash deduplicated: only new or changed files are pushed.",
-    "Data flow is VPS-side agent push -> Worker ingest API -> R2 write -> D1 metadata write -> consumer download.",
+    "Synchronisation is scheduled, incremental, and content-hash deduplicated: only new or changed files are transferred.",
+    "Collection channel is Worker-direct SSH (decision D14): nothing is installed on the host; the Worker reaches it over cloudflare:sockets. This supersedes the earlier VPS-agent-push design (D3).",
+    "Hosts, their credentials, and the directories to collect from are runtime DATA added through the web UI, so adding a machine needs no redeploy; the only deployment secret is SSH_MASTER_KEY (D32).",
     "No multi-statement atomicity may be assumed on D1; use object-level atomicity, idempotent writes, and compensating actions."
   ],
   "constraints": [
-    "Cloudflare Workers have no long-lived process and cannot open SSH/SFTP sessions, so the Worker cannot initiate collection; the VPS side must push.",
-    "The VPS-side agent runs on machines outside this repository's control; once the ingest API ships it must stay backward compatible.",
-    "Authorization: code writes, local commits, and pushes to a remote PR are allowed; deploying to VPS or mutating live Cloudflare resources is NOT authorized.",
+    "The SSH channel has no official Cloudflare support and cannot be verified locally (wrangler dev refuses outbound connections to private addresses), so the ssh-probe experiment must return a running answer before flow step 3 (D14, D27).",
+    "A Worker isolate has 128 MB of memory and no long-lived process, so large-file ingest must be chunked with the session state held in D1 (D8).",
+    "Authorization, current as of 2026-10-07: code writes, commits and PR pushes are allowed; deploying THIS Worker to the user's own Cloudflare account is allowed and was exercised (events e023, e024). Deploying anything to a VPS remains NOT authorized.",
+    "The deployed UI has NO authentication: anyone who can reach it can manage hosts and their stored credentials, and the /probe routes connect to a stored host. The user was shown this and accepted it on 2026-10-07 as a private-tool risk (D35). It must go behind Cloudflare Access or gain an API token before broader use.",
     "web_fetch is unavailable on this machine, so platform limits must never be asserted from memory.",
     "Node/pnpm/Python are not on PATH; use DSH-bundled runtimes."
   ],
   "acceptance": [
-    "A VPS-side agent can push a designated file and it becomes retrievable by a second device.",
-    "Re-running the sync with no file changes produces no new objects (idempotent, hash-deduplicated).",
+    "A file at a designated path on a remote host is collected and becomes retrievable by a second device.",
+    "Re-running collection with no file changes produces no new objects (idempotent, hash-deduplicated).",
     "A changed file produces a new version while the previous version remains resolvable.",
-    "Metadata in D1 lets a consumer find a file by VPS/path without knowing the R2 object key.",
-    "Documented partial-failure and recovery behaviour for an interrupted push."
+    "Metadata in D1 lets a consumer find a file by host and path without knowing the R2 object key.",
+    "Documented partial-failure and recovery behaviour for an interrupted collection."
   ],
   "status": "active",
   "integration": "unmerged",
   "evidence": [
-    "git refs/heads/main = c9af21c46da3782bb1e935a1088c3e71d038100c (step-0 bootstrap commit)",
-    "D:\\proj\\LinkBin\\.scratch\\vps-file-hub\\STATE.md (phase 0 complete, scenario card)",
-    "D:\\proj\\LinkBin\\docs\\agents\\issue-tracker.md",
-    "D:\\proj\\LinkBin\\docs\\agents\\domain.md",
-    "D:\\proj\\LinkBin\\docs\\agents\\triage-labels.md",
-    "D:\\proj\\LinkBin\\AGENTS.md"
+    "git refs/heads/main = 3880cd5f8aa4fd5f55d53149bd66de651335a505 (the revision that was deployed)",
+    "D:\\proj\\LinkBin\\.scratch\\vps-file-hub\\STATE.md (current phase and decisions D1-D35)",
+    "Live deployment 2026-10-07: Worker \"linkbin\", version 1c7a2112-eaaa-42bd-8768-fcfeb935b657, https://linkbin.cyc-xiaochen.workers.dev ; D1 database linkbin-db provisioned; R2 bucket linkbin-files created; schema applied (12 statements; tables hosts, source_rules, objects, multipart_sessions)",
+    "Verified live: GET /api/status -> schema.ready=true, masterKeySet=true, r2Bound=true; GET /api/master-key -> \"set and well formed (32 bytes)\"",
+    "D:\\proj\\LinkBin\\docs\\research\\cloudflare-platform-limits.md"
   ],
-  "next": "Run flow step 1 (grill-with-docs) to close open questions Q1-Q7 in STATE.md, then write GLOSSARY.md and the first ADR.",
+  "next": "Add a real host through the deployed UI and run the /probe routes against it to settle the ssh-probe question (see .branch-records/ssh-probe/state.json), then record the verdict in STATE.md before starting flow step 3 (to-spec).",
   "created_at": "2026-10-07T02:44:25+08:00",
-  "updated_at": "2026-10-07T02:44:25+08:00"
+  "updated_at": "2026-10-07T03:58:00+08:00"
 }

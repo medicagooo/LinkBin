@@ -22,9 +22,11 @@
 
 ## 当前阶段
 
-**第 0 步 · setup-matt-pocock-skills —— 已完成。**
+**第 0 步 `setup` 已完成；第 1 步 `grill-with-docs` 进行中（已锁定 D1–D35）；分叉 A `prototype` 已建并已部署到真实 Cloudflare，等待真机 SSH 结论。**
 
-下一步是 **第 1 步 `grill-with-docs`**（想法 → 共识）。第 1–3 步必须保持在**同一个不断开的上下文窗口**里。
+**2026-10-07 更新（本次会话）**：Worker `linkbin` 已用 CLI 部署上线，D1/R2 已自动供给，`SSH_MASTER_KEY` 已设置，schema 已应用。**SSH 通道的真机验证是现在唯一的阻塞项**——它无法在本机验证（`wrangler dev` 拒绝连内网地址），所以"部署"就是这道验证的前置，而不是跳过流程。
+
+按 §2.3，**在 ssh-probe 给出可运行答案之前，仍不得进入第 3 步 `to-spec`。**
 
 ## 已完成（产物 + 证据）
 
@@ -36,7 +38,8 @@
 - [x] **架构因果核实** → Cloudflare Workers 无长驻进程、不能主动建 SSH/SFTP 长连接，故"worker 拉取 vps"在实现上必须变为 **VPS 侧 agent 主动推送**（协议层必然，非文档依赖）。**⚠️ 此条结论已被 D14 修正**：用户选择 Worker 直连 SSH，采集方向回到"Worker 主动拉取"；协议层事实不变（无官方 SSH 客户端），风险改由 `prototype` 前置承担。
 - [x] **第 1 步 grill（第 1–2 轮，未完）** → `GLOSSARY.md`（已建，含"非关系数据库"术语退役）、`docs/adr/0001-d1-for-metadata-r2-for-bytes.md`、`docs/adr/0002-chunked-ingest-multipart-state-in-d1.md`；锁定 D14–D20。
 - [x] **工具链可运行性（子 agent 实证）** → Node v24.21.0 / pnpm 11.7.0 可用；**npm 不存在**；wrangler **4.147.0 实测运行**；本地 D1+R2 仿真完整可用（含 R2 分片与范围读）；`@cloudflare/vitest-plugin` 提供全离线 TDD。→ D19、D20。
-- [ ] **分叉 A · prototype（下一步）** → 验证 Worker 能否真的建起 SSH 连接、列目录、读文件。**这是进入第 3 步的前置。**
+- [x] **分叉 A · prototype 已建成并已部署到真实 Cloudflare（2026-10-07）** → probe 路由 `GET /probe/exec`、`GET /probe/list`、`GET /probe/read` 与 `POST /api/hosts/test` 已随主 Worker 上线。**仍未取得真机结论**：需要一个真实主机凭据才能跑。**这仍是进入第 3 步的前置。**
+- [ ] **分叉 A · 真机验证（唯一的下一步）** → 在 UI 添加主机 → 跑 probe → 从 `wrangler tail` 或 Workers Logs 读实测 CPU → 把 PASS/FAIL 回写本文件。
 - [ ] 第 3 步 to-spec → `.scratch/vps-file-hub/spec.md`
 
 ## 已锁定决策（不可回退 / 改动需重开）
@@ -76,6 +79,10 @@
 - **D33 目录规则的"统一 + 分开"用数据模型表达，不用优先级标志**。`source_rules.host_id` 为 `NULL` = **全局规则**（对所有主机生效）；非 NULL = **该主机专属**。收集时两者**并集**，且**排除先于包含求值**——因此"全局收 `/var/log/*.log`"+"某机排除 `/var/log/noisy.log`"的行为符合直觉，**无需引入覆盖/优先级语义**。
 - **D34 无 CLI 的部署必须能自建表**。因部署走 Workers Builds（GitHub），发布物旁边**没有 CLI**，故 Worker 自带 `POST /api/admin/apply-schema`：把 `migrations/0001_init.sql` 作为 `Text` 模块导入（wrangler 默认把 `.sql` 映射为字符串），**用 `db.batch()` 分批应用**（D1 唯一有原子保证的单元），每条语句均为 `CREATE ... IF NOT EXISTS` 故**可重复执行**。**schema 因此只有一份真源**，CLI 路径与 Worker 路径共用同一文件。
 - **D35 当前 UI 无鉴权（已知限制，必须显式处理）**。任何能访问 Worker 的人都能管理主机与加密凭据。**上线前必须置于 Cloudflare Access 之下或加入 API token**；在补上之前只能当私人工具用。此限制已写入 [README.md](README.md)。
+- **D36 部署已实际执行，且走的是 CLI 路径而非 D28 的 Workers Builds（2026-10-07，用户明示授权）**。执行：`wrangler r2 bucket create linkbin-files` → `wrangler deploy --secrets-file .env.deploy` → `POST /api/admin/apply-schema`。产出：Worker **`linkbin`**，版本 `1c7a2112-eaaa-42bd-8768-fcfeb935b657`，`https://linkbin.cyc-xiaochen.workers.dev`；D1 **`linkbin-db`**（自动供给）；R2 **`linkbin-files`**；`masterKeySet=true`、`r2Bound=true`、schema ready（12 条语句 / 4 张表）。**这不推翻 D28**——D28 仍是既定的发布路径，事后可在仪表盘把仓库连到这个已存在的 Worker 上。**两条实测与文档不符，必须记录**：① 官方 changelog 称 CLI 部署会把资源 ID 回写配置文件，**实测未回写**（`git diff` 只有我自己的编辑），故仓库保持无账号资源 ID，符合用户要求；② 因此 `database_id` 只能从 `wrangler d1 list` 取，且 `wrangler d1 execute|migrations --remote` 在本仓库不可用（本仓库不需要，走 Worker 内 apply-schema）。
+- **D37 用户对"部署"的授权已变更（2026-10-07）**。此前（D6/授权边界）为"可部署：否"。用户本次明确授权**部署本项目 Worker 到自己的 Cloudflare 账号**并已执行。**部署到任何 VPS 仍然明确不授权。** 另：用户知情并接受当前无鉴权 UI 的风险。
+- **D38 资源命名与"不写死 ID"的落地方式（用户指定）**。`r2_buckets` 写死 `bucket_name: "linkbin-files"`——名字即 bucket 的身份，写死它使后续部署绑定同一个 bucket 而非另建一个；`d1_databases` 写死 `database_name: "linkbin-db"` 但**故意不写 `database_id`**。依据：官方 changelog 原话 "resources will stay linked across future deploys even without adding the resource IDs to the config file"（[Automatic resource provisioning, 2025-10-24](https://developers.cloudflare.com/changelog/post/2025-10-24-automatic-resource-provisioning/)）。目的：公开仓库里不带账号相关资源 ID。
+- **⚠️ D39 `/probe*` 是无鉴权的远程命令执行与任意文件读取入口（高危，必须显式处理）**。`src/index.ts` 的 probe 路由在**未鉴权**时可被任何人调用。若把 `PROBE_HOST`/`PROBE_USER`/`PROBE_PASSWORD` 设为变量，则**任何人**访问 `/probe/exec` 即可在目标机执行命令、访问 `/probe/read` 即可读取该机任意文件并写入 R2。**故一律不设置 `PROBE_*`**，探针只经"UI 添加主机 → 测完立即删除该行"驱动。**在补上鉴权（D35）之前，这条必须当作未修复的暴露面看待。**
 
 ## 未决问题（阻塞项）
 
@@ -89,25 +96,30 @@
 - **Q3（阻塞 spec）** 元数据模型：需要哪些字段（VPS 标识 / 路径 / 大小 / 内容哈希 / mtime / 版本代际 / 软删）。**已被研究加上硬约束**：行 ≤2 MB、≤100 列、SQL 语句 ≤100 KB、每调用 ≤1000 次查询，且**必须含分片会话表**（D8）。
 - **Q4（阻塞 spec）** 消费端形态与下载授权路径。**已被研究收窄为二选一**（D11）：预签名 URL（7 天上限、不支持自定义域名）vs 公开 bucket + WAF/Access。另需定：纯 HTTP 下载是否够，还是要 Web 浏览/搜索界面。
 - **Q5 ✅ 已解决** 平台硬限值已核实并落盘：`docs/research/cloudflare-platform-limits.md`（943 行、31 个唯一官方 URL、11 处显式"unverified"标注、11 节 Design implications）。**遗留未核实项 10 条**（真机 SFTP 可行性、cron 投递保证、Worker 内预签名等），需要时按该文件 §10 逐条处理，**禁止凭记忆补数字**。
-- **Q6** Cloudflare 账号侧凭据与资源就绪情况：R2 bucket、D1 database 是否已创建；`wrangler` 认证方式；**D1 是 Free（500 MB / 50 查询每调用）还是 Paid（10 GB / 1000 查询）——这直接决定可行性**。→ 影响 `wizard` 叠加项。
+- **Q6 ✅ 大部分已解决（2026-10-07）** 账号侧已核实：wrangler **4.147.0** 已安装，OAuth 登录态有效（账号 `cyc_xiaochen@outlook.com`，token 含 `workers:write`/`d1:write`/`k2.write`），**无需用户重新登入**。资源已就绪：D1 **`linkbin-db`**、R2 **`linkbin-files`**、Worker **`linkbin`**。**D1 的 database_id 故意不写入本仓库**（D38）——需要时用 `wrangler d1 list` 取。**遗留一项未核实**：该 D1 是 Free 还是 Paid 套餐（决定每调用 50 还是 1000 次查询）——未核实，需要时查仪表盘。
 - **Q7** 上游 VPS 清单与要采集的具体路径（数量、总量级、单文件最大体积）。→ 由用户提供。**单文件体积直接决定 Q2 走哪条路**。
 
 ## 授权边界
 
-- 可写代码：**是**　可推 PR：**是**　可部署：**否**
+- 可写代码：**是**　可推 PR：**是**　可部署（本项目 Worker → 用户自己的 CF 账号）：**是（2026-10-07 起，见 D37）**　可部署到 VPS：**否**
 - 其他约束：
-  - 不部署到任何 VPS，不动 Cloudflare 线上资源（建 bucket/database 属外部状态变更，需单独确认）。
+  - **不部署到任何 VPS。** Cloudflare 线上资源（D1/R2/Worker）的创建与部署已于 2026-10-07 获用户明确授权并执行（D36）；此后的新增资源或破坏性操作**仍需单独说明目标与影响**。
+  - 公开仓库内**不得出现账号相关资源 ID**（D38）。
   - `web_fetch` 不可用时**禁止凭记忆写平台限值**，一律标注"未核实"。
   - D1 无事务（D5）。
   - VPS 侧 agent 部署在本仓库控制之外的机器上，ingest API 一旦发布须保持向后兼容。
 
 ## 下一个动作（精确到可执行）
 
-- **动作**：执行**第 1 步 `grill-with-docs`**——读 `C:\Users\medic\.agents\skills\grilling\SKILL.md` 与 `C:\Users\medic\.agents\skills\grill-with-docs\SKILL.md`，就 "VPS 文件汇聚与关联下载" 拷问用户：**一轮 3–5 个问题、每题附推荐答案**，优先关闭 Q1–Q4、Q7。随结论落盘 `GLOSSARY.md` 与 `docs/adr/`（首个 ADR 应固化 D2/D3）。
-- **前置**：
-  1. 采纳后台 research 子 agent 的结论（或确认其"未核实"标注），把结果写入 `docs/research/cloudflare-platform-limits.md`。
-  2. 用 §1.2 叠加项评估是否需要 `prototype`（若 Q2 的直传路径"必须跑起来才知道"）。
-- **验证方式**：设计树每个分支都有结论、**没有任何问题悬在 Q1–Q7 上**；`GLOSSARY.md` 与 `docs/adr/` 已按懒创建原则在术语/决策真正确立时才建。
+- **动作**：**在已上线的 Worker 上跑真机 SSH 探针**——打开 `https://linkbin.cyc-xiaochen.workers.dev`，在 UI 里添加测试主机（label / address / port / username / 密码），然后：
+  1. `POST /api/hosts/test` 带 `{"id":"<host-id>"}` —— 拿连接耗时与规则求值；
+  2. `GET /probe/list?path=/etc` 与 `GET /probe/read?path=/etc/hostname` —— 拿 SFTP 列目录与文件读取；
+  3. **并行开一个 `wrangler tail linkbin`** 读实测 CPU 时间（判据是 CPU 而非"请求成功"）；
+  4. **测完立即删除该主机行**（`POST /api/hosts/delete`）。
+  然后按 `acceptance` 判 PASS/FAIL，回写本文件 D14 段落与 `.branch-records/ssh-probe/state.json`。
+- **⛔ 绝对不要设置 `PROBE_HOST`/`PROBE_USER`/`PROBE_PASSWORD` 变量**（见 D39：那会把无鉴权的远程命令执行入口直接暴露到公网）。
+- **前置**：需要一个真实可 SSH 的主机凭据（来自用户，Q7）。本机无法替代——`wrangler dev` 拒绝连内网地址。
+- **验证方式**：拿到实测 CPU 数值 + `sha256` 与独立计算的哈希一致 → PASS；`exceededCpu`/错误 1102 / 算法协商失败 / 哈希不符 → FAIL。**两种结果都是有效结论，都必须落盘。**
 
 ## 环境硬事实（下一个会话直接用，不要重测）
 
@@ -116,7 +128,11 @@
 | 项目根 | `D:\proj\LinkBin` |
 | git 身份 | **本机全局与本地均未设置**；提交使用仓库本地身份 `DSH <dsh@local>`（可用 `git config user.name/user.email` 覆盖） |
 | gh | 账号 `medicagooo`，SSH 协议，scope 含 `repo`/`workflow` |
-| 远端 | `origin` = `git@github.com:medicagooo/LinkBin.git`，**PUBLIC**，默认分支 `main`；`origin/main` = `cf8c415`（2026-10-07 核实一致） |
+| 远端 | `origin` = `git@github.com:medicagooo/LinkBin.git`，**PUBLIC**，默认分支 `main` |
+| **已部署的 Worker** | `linkbin` → `https://linkbin.cyc-xiaochen.workers.dev`；版本 `1c7a2112-eaaa-42bd-8768-fcfeb935b657`；CF 账号 `f969e0e82bb0b477458e214ce501180c`（`cyc_xiaochen@outlook.com`） |
+| 线上资源 | D1 `linkbin-db`；R2 `linkbin-files`；secret `SSH_MASTER_KEY`（值只在 `.env.deploy`，**git-ignored**） |
+| wrangler | `D:\proj\LinkBin\node_modules\wrangler\bin\wrangler.js`（4.147.0）；OAuth 登录态在 `%APPDATA%\xdg.config\.wrangler\config\default.toml` |
+| ⚠️ 探针红线 | **不要设置 `PROBE_*` 变量**（D39）；测完立即删除主机行 |
 | **⚠️ 仓库为公开** | 任何推送内容全球可见。**凭据、VPS 主机清单、内网路径、`.dev.vars` 一律不得入库**（`.gitignore` 已兜底，但需人工复核）。摄取 API 鉴权（Q6 相关）因此是**必需项而非可选项** |
 | skill 目录 | `C:\Users\medic\.agents\skills`（36 个） |
 | DSH 运行时 | Node：`C:\Users\medic\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe`；pnpm：同树 `pnpm\bin\pnpm.mjs`；Python：同树 `python\python.exe`（DSH 自带，**非**系统 Python） |
@@ -128,10 +144,13 @@
 |---|---|---|---|
 | 2026-10-07 02:44 | DSH (deepseek-flash) | 按 §0.2 启动：扫盘确认空仓库 → §1 场景判定为 S1 → 用户确认场景与授权 → 用户改定 Cloudflare 架构（D1/R2）→ 完成第 0 步 setup + 仓库初始化 | `AGENTS.md`、`docs/agents/*.md`、`.scratch/vps-file-hub/STATE.md`、`BRANCHES.md`、`.branch-records/vps-file-hub/*` |
 | 2026-10-07 03:20 | DSH (deepseek-flash) | 远端建立并推送（`origin` = `medicagooo/LinkBin`，PUBLIC）；research 子 agent 交付 31 个一手来源的平台限值并折回 D8–D13；修正"本机无法访问网络"的错误结论；修复两次因 `git add -A` 把临时脚本提交进公开 main 的问题（e013）并在 `.gitignore` 层面加白名单根治 | `docs/research/cloudflare-platform-limits.md`、D8–D13、`.gitignore` 白名单 |
+| 2026-10-07 03:57 | DSH (deepseek-flash) | **首次真实部署**：确认 wrangler OAuth 可用 → 固定 `bucket_name`/`database_name`（不写死 ID）→ 建 R2 → 部署 Worker + secret → 应用 schema → 全链路核验。**纠正三处陈旧记录**：`state.json` 里已被 D14 取代的"VPS agent 推送"通道、"禁止改动线上 CF 资源"的授权、`ssh-probe` 的"永不合并 main" | D31–D39、`vps-file-hub/state.json` 重写、事件 e023–e024、`BRANCHES.md` C-001 |
 
 ## 本轮结束时的仓库状态
 
-- `origin/main` = `52e77a4`，本地与远端一致，工作区干净。
-- 提交链：`c9af21c`（第 0 步 init）→ `cf8c415` → `0ae4c85` → `69048fc` → `4ab3a17`（research + D8–D13）→ `d23e033` → `52e77a4`（清理 + gitignore 根治）。
+- **部署时的 main** = `3880cd5`（`feat: encrypted runtime host management, single-secret deployment`），已与 `origin/main` 一致。
+- **本次会话新增的本地改动**（`wrangler.jsonc` 固定资源名、`STATE.md` 更正、登记簿事件与状态）：**已提交，未推送**（本轮未获推送授权）。
+- 未入库的本地文件（均已核实被 `.gitignore` 覆盖）：`.env.deploy`（`SSH_MASTER_KEY`）、`.dev.vars`（含陈旧 `PROBE_*`，本次未使用）、`.dry-run/`、`.wrangler/`。
+- 提交链（旧）：`c9af21c`（第 0 步 init）→ `cf8c415` → `0ae4c85` → `69048fc` → `4ab3a17`（research + D8–D13）→ `d23e033` → `52e77a4`（清理 + gitignore 根治）→ … → `729e5b8`（合并 prototype）→ `3880cd5`（加密主机管理）。
 - **已知残留**：`4ab3a17` 与 `d23e033` 两个提交的历史里各含一个一次性脚本（`tmp-record.ps1`、`fix-tmp.ps1`），当前 tip 已不含它们。**不做 force-push 重写已发布 main**（未获授权，且会破坏已 fetch 者的默认分支）。已在 e013 记录，避免日后被误认为有意内容。
 - **下一步之前不要 compact 上下文**：第 1–3 步（grill → spec → 工单）必须共享同一份思考。

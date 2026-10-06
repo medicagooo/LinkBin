@@ -11,11 +11,11 @@
     "Performs read-only operations on the target host."
   ],
   "constraints": [
-    "Never merged to main; kept as a primary source on branch prototype/ssh-probe (flow manual section 2.3).",
-    "Disposable by design: the write-up is optimised for speed of learning, not for production quality.",
+    "Originally kept off main as branch prototype/ssh-probe, but that branch was merged into main on 2026-10-07 (event e019) because Workers Builds deploys from the connected GitHub repository and the probe has to be reachable from the built branch. The probe routes now ship inside the main Worker and are the disposable part.",
+    "Disposable by design: the probe routes are optimised for speed of learning, not for production quality, and are deleted once the verdict is recorded.",
     "Read-only on the target VPS: no writes, deletes, or modifications.",
-    "Credentials must never be committed; they are supplied via wrangler secret or a local untracked file.",
-    "Deploying the probe creates a real but throwaway Worker; that deployment is part of the experiment."
+    "Credentials must never be committed; the host credential is entered through the deployed UI and stored encrypted in D1 under SSH_MASTER_KEY.",
+    "DANGER: the /probe routes have no authentication. If PROBE_HOST/PROBE_USER/PROBE_PASSWORD are set as vars, anyone who can reach the Worker can run commands and read arbitrary files as that user on the target host. The agent therefore does NOT set PROBE_*; the probe is driven from a stored host that is deleted immediately after the run."
   ],
   "acceptance": [
     "PASS: SFTP list returns real directory entries AND a read file's SHA-256 matches the same file hashed independently AND CPU time per invocation stays well under the paid default of 30 s.",
@@ -28,9 +28,10 @@
     "docs/research/cloudflare-platform-limits.md (platform ceilings)",
     ".scratch/vps-file-hub/STATE.md decisions D14 and D21-D27",
     "mscdex/ssh2#1494 (open) - ssh2 fails at import under workerd",
-    "mscdex/ssh2#1401 - maintainer declines non-node socket API support"
+    "mscdex/ssh2#1401 - maintainer declines non-node socket API support",
+    "Working test harness as of 2026-10-07: Worker \"linkbin\" deployed at https://linkbin.cyc-xiaochen.workers.dev with SSH_MASTER_KEY set and the schema applied, exposing /probe/exec, /probe/list and /probe/read plus /api/hosts/test"
   ],
-  "next": "Create branch prototype/ssh-probe from main (predeclared as event e016), then build the minimal probe Worker and deploy it with the user-supplied VPS credentials.",
+  "next": "Add the test host through the deployed UI at https://linkbin.cyc-xiaochen.workers.dev (label, address, port, username, credential). Then run POST /api/hosts/test for the identification plus rule-evaluation pass, and GET /probe/list and /probe/read for the SFTP listing and file-read pass with a SHA-256 comparison. Delete the host row immediately afterwards. Read measured CPU time from `wrangler tail` or the Workers Logs dashboard: the verdict depends on measured CPU, not merely on the request succeeding.",
   "created_at": "2026-10-07T03:50:00+08:00",
-  "updated_at": "2026-10-07T03:50:00+08:00"
+  "updated_at": "2026-10-07T03:58:00+08:00"
 }

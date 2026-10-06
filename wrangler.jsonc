@@ -29,14 +29,23 @@
   "d1_databases": [
     {
       "binding": "DB",
-      // No `database_id`: omitted so the database is created at deploy time.
+      // `database_name` pins the name. `database_id` is deliberately ABSENT: Wrangler provisions the
+      // database on first deploy, and Cloudflare states the linkage survives later deploys even with
+      // no resource ID in this file — so no account-specific ID has to live in a public repository.
+      // Source: https://developers.cloudflare.com/changelog/post/2025-10-24-automatic-resource-provisioning/
+      // Caveat: with no `database_id`, `wrangler d1 execute|migrations --remote` cannot resolve the
+      // database. This project does not need it — the Worker applies its own schema via
+      // POST /api/admin/apply-schema. See README.md.
+      "database_name": "linkbin-db",
       "migrations_dir": "migrations"
     }
   ],
   "r2_buckets": [
     {
-      "binding": "BUCKET"
-      // No `bucket_name`: omitted so the bucket is created at deploy time.
+      "binding": "BUCKET",
+      // Pinned, not auto-named: the name IS the bucket's identity, so stating it here makes a later
+      // deploy bind this bucket rather than provision another one alongside it.
+      "bucket_name": "linkbin-files"
     }
   ],
   "rules": [
