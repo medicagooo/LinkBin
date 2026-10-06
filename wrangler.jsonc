@@ -1,33 +1,53 @@
 {
   // LinkBin — Workers configuration.
   //
-  // Deployment is done by Cloudflare Workers Builds from the connected GitHub repository
-  // (Cloudflare dashboard > Workers & Pages > the Worker > Settings > Build). The deploy command
-  // is the default `npx wrangler deploy` run with this repository as the root directory.
+  // Deployment runs through Cloudflare Workers Builds from the connected GitHub repository
+  // (Cloudflare dashboard > Workers & Pages > this Worker > Settings > Build), executing the
+  // default `npx wrangler deploy` with this repository as the root directory.
   //
-  // SECURITY: this repository is PUBLIC. Never put credentials, hostnames, IP addresses, or
-  // internal paths in this file. PROBE_HOST/PROBE_USER are deliberately left as placeholders and
-  // are set as encrypted dashboard variables instead; PROBE_PASSWORD is a secret and must be set
-  // in the dashboard (Settings > Variables and Secrets) or, for local development only, in
-  // .dev.vars (git-ignored).
+  // RESOURCES ARE AUTO-PROVISIONED. The D1 database and the R2 bucket carry no ids or names on
+  // purpose: with none present, Wrangler creates them during the deploy and names them with this
+  // Worker's name as a prefix. Deploying from the dashboard (which is what Workers Builds does)
+  // creates them but does NOT write their ids back into this file — see README.md.
+  // Verified against https://developers.cloudflare.com/workers/wrangler/configuration/ ("Automatic
+  // provisioning": currently works for KV, R2, D1, Flagship, AI Search, Agent Memory, Dispatch
+  // Namespaces and Queues).
+  //
+  // SECURITY: this repository is PUBLIC. Never put credentials, host addresses, or internal paths
+  // in this file. Hosts and the directories to collect from are runtime DATA: they are added through
+  // the web UI and stored encrypted in D1. The only secret this deployment needs is SSH_MASTER_KEY,
+  // set in the dashboard or with `wrangler secret put` — never here.
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "linkbin-probe",
+  "name": "linkbin",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-04",
   "compatibility_flags": ["nodejs_compat"],
   "observability": {
-    // Invocation logs carry CPU time and wall time, which is the measurement this experiment needs.
+    // Invocation logs carry CPU time and wall time, which the SSH probe needs as a measurement.
     "enabled": true
   },
-  "r2_buckets": [
+  "d1_databases": [
     {
-      "binding": "PROBE_BUCKET",
-      "bucket_name": "linkbin-probe"
+      "binding": "DB",
+      // No `database_id`: omitted so the database is created at deploy time.
+      "migrations_dir": "migrations"
     }
   ],
-  "vars": {
-    "PROBE_HOST": "REPLACE_ME_dashboard_variable",
-    "PROBE_PORT": "22",
-    "PROBE_USER": "REPLACE_ME_dashboard_variable"
-  }
+  "r2_buckets": [
+    {
+      "binding": "BUCKET"
+      // No `bucket_name`: omitted so the bucket is created at deploy time.
+    }
+  ],
+  "rules": [
+    {
+      // Schema SQL is imported into the Worker as a string so that a deployment with no CLI access
+      // can still create its own tables. See src/index.ts, POST /api/admin/apply-schema.
+      // `fallthrough` keeps Wrangler's own default text rule in play for the other extensions,
+      // instead of silently replacing it.
+      "type": "Text",
+      "globs": ["**/*.sql"],
+      "fallthrough": true
+    }
+  ]
 }

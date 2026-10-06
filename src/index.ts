@@ -1,235 +1,644 @@
 /**
- * ssh-probe — a DISPOSABLE prototype. Not production code, never merged to main.
+ * LinkBin Worker.
  *
- * It answers exactly one question (see ../../.scratch/vps-file-hub/STATE.md, decision D14):
+ * Three things live here, deliberately separated:
  *
- *   Can a Cloudflare Worker reach a real VPS over SSH, authenticate, list a directory, and
- *   read a file's bytes — inside the paid-plan CPU budget?
+ *   1. The **management API and UI** — the product surface. Hosts, and the directories to collect
+ *      from them, are added at runtime through the web UI and stored encrypted in D1. Adding a
+ *      machine therefore needs no redeploy, and this deployment's only secret is `SSH_MASTER_KEY`.
+ *   2. A **schema bootstrap** route. Deployment happens through Workers Builds from GitHub, so there
+ *      is no CLI attached to a release: the Worker has to be able to create its own tables. The
+ *      schema is the same `migrations/0001_init.sql` the CLI would use, imported as a string, so
+ *      there is exactly one source of truth.
+ *   3. The **probe routes** (`/probe*`) — the ssh-probe experiment, kept until its verdict is
+ *      recorded. They read a target from a stored host (or the environment) and exist only to answer
+ *      whether a Worker can read a file over SSH at all.
  *
- * Why it has to be deployed rather than run under `wrangler dev`: local development refuses
- * outbound connections to localhost and private addresses, so no local SSH server can stand in
- * for the real target.
- *
- * Deliberate limits, so that a failure is informative rather than ambiguous:
- *   - READ-ONLY against the target host. It only ever lists and reads.
- *   - The SSH stack is Workers-native (`edgeport`) because `ssh2` cannot even be imported in
- *     workerd: it compiles poly1305 WASM at module init and runtime WASM compilation is
- *     disallowed there (mscdex/ssh2#1494).
- *   - AES-GCM is negotiated explicitly. It is WebCrypto-backed, whereas
- *     chacha20-poly1305@openssh.com would be assembled in pure JS and is the likeliest way to
- *     blow the CPU budget.
+ * Constraint that shapes every write path: **D1 has no transactions.** The only atomic unit is a
+ * single `db.batch()`. So multi-step intentions are expressed as independently repeatable statements
+ * rather than as a unit that must succeed or fail as a whole.
  */
 
-import { connect as sshConnect, type SshSession } from 'edgeport/ssh';
-import { connect as sftpConnect, type SftpSession } from 'edgeport/sftp';
+import { connect as sshConnect } from 'edgeport/ssh';
+import { connect as sftpConnect } from 'edgeport/sftp';
+import { credentialFingerprint, decryptField, encryptField, generateMasterKey } from './crypto';
+import { getHost, listHosts, nowIso, rulesForHost, slugify, type HostRow, type SourceRuleRow } from './db';
+import { renderIndexPage } from './ui';
+// Wrangler's default bundling treats `.sql` as a `Text` module, so this is a plain string at
+// runtime. Importing the migration file keeps the CLI path and the in-Worker path on one schema.
+import initSchemaSql from '../migrations/0001_init.sql';
 
 interface Env {
-	/** Host to reach. Supplied as a plain var, not a secret. */
-	PROBE_HOST: string;
-	/** TCP port, as a string var. */
-	PROBE_PORT: string;
-	/** Login user. Supplied as a plain var, not a secret. */
-	PROBE_USER: string;
-	/** Login password. MUST come from a Worker secret (wrangler secret put PROBE_PASSWORD). */
-	PROBE_PASSWORD: string;
-	/** Throwaway R2 bucket proving the read bytes can be persisted. */
-	PROBE_BUCKET: R2Bucket;
+	DB: D1Database;
+	BUCKET: R2Bucket;
+	/**
+	 * Base64 32-byte AES-GCM key. The ONLY secret this Worker needs. Everything else sensitive lives
+	 * encrypted in D1.
+	 */
+	SSH_MASTER_KEY: string;
+	/** Probe-only and optional: the probe prefers a stored host and falls back to these. */
+	PROBE_HOST?: string;
+	PROBE_PORT?: string;
+	PROBE_USER?: string;
+	PROBE_PASSWORD?: string;
 }
 
-/** Per-stage timings, so a failure points at the stage that failed. */
-type Stage = { stage: string; ms: number };
-type ProbeError = { stage: string; name: string; message: string; ms: number };
-
-/** RFC 3339 UTC, which is also the Worker's own clock (workerd runs with TZ=UTC). */
-function nowIso(): string {
-	return new Date().toISOString();
+class HttpError extends Error {
+	constructor(
+		readonly status: number,
+		message: string,
+	) {
+		super(message);
+	}
 }
 
 function json(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body, null, 2), {
 		status,
-		headers: { 'content-type': 'application/json; charset=utf-8' },
+		headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
 	});
 }
 
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-	const digest = await crypto.subtle.digest('SHA-256', bytes);
-	return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+function requireMasterKey(env: Env): string {
+	if (!env.SSH_MASTER_KEY) {
+		throw new HttpError(
+			503,
+			'SSH_MASTER_KEY is not set on this deployment, so stored credentials cannot be read or written. Generate one at GET /api/master-key and set it as a secret.',
+		);
+	}
+	return env.SSH_MASTER_KEY;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Schema bootstrap
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Splits the schema file into individual statements.
+ *
+ * `db.batch()` is the only documented atomic unit in D1, so the schema is applied as batches rather
+ * than as statements run one at a time. Every statement is `CREATE ... IF NOT EXISTS`, which is what
+ * makes re-applying safe.
+ */
+function schemaStatements(): string[] {
+	return initSchemaSql
+		.split(';')
+		.map((chunk) =>
+			chunk
+				.split('\n')
+				.filter((line) => !line.trim().startsWith('--'))
+				.join('\n')
+				.trim(),
+		)
+		.filter((statement) => statement.length > 0);
+}
+
+async function applySchema(env: Env): Promise<Response> {
+	const statements = schemaStatements().map((sql) => env.DB.prepare(sql));
+
+	// Batch size is bounded on purpose: a batch is atomic, so a smaller batch means a failure names a
+	// narrower range. It is not atomic ACROSS batches, which is exactly why every statement is
+	// idempotent and re-running the whole thing is safe.
+	const BATCH = 20;
+	let applied = 0;
+	for (let i = 0; i < statements.length; i += BATCH) {
+		await env.DB.batch(statements.slice(i, i + BATCH));
+		applied += Math.min(BATCH, statements.length - i);
+	}
+
+	const { results } = await env.DB.prepare(
+		"SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY name",
+	).all<{ name: string }>();
+
+	return json({
+		ok: true,
+		statementsApplied: applied,
+		tables: (results ?? []).map((t) => t.name),
+		note: 'Idempotent: every statement is CREATE ... IF NOT EXISTS, so this is safe to repeat.',
+	});
+}
+
+/** Reports whether the schema is present, so the UI can tell the operator what to do next. */
+async function schemaStatus(env: Env): Promise<{ ready: boolean; missing: string[] }> {
+	const required = ['hosts', 'source_rules', 'objects', 'multipart_sessions'];
+	const { results } = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all<{ name: string }>();
+	const present = new Set((results ?? []).map((r) => r.name));
+	return { ready: required.every((t) => present.has(t)), missing: required.filter((t) => !present.has(t)) };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Hosts
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The host view handed to the UI.
+ *
+ * Ciphertext never leaves the Worker. What the UI receives instead is a short stable fingerprint, so
+ * it can say "a password is stored" — and notice when that changes — without being able to recover
+ * it. This is a presentation boundary; the real boundary is that D1 only ever holds ciphertext.
+ */
+async function publicHost(row: HostRow) {
+	return {
+		id: row.id,
+		label: row.label,
+		address: row.address,
+		port: row.port,
+		username: row.username,
+		hostKeyFingerprint: row.host_key_fingerprint,
+		enabled: row.enabled === 1,
+		hasPassword: row.password_enc !== null,
+		passwordFingerprint: await credentialFingerprint(row.password_enc),
+		hasPrivateKey: row.private_key_enc !== null,
+		privateKeyFingerprint: await credentialFingerprint(row.private_key_enc),
+		hasPrivateKeyPassphrase: row.private_key_pass_enc !== null,
+		createdAt: row.created_at,
+		updatedAt: row.updated_at,
+	};
+}
+
+function publicRule(row: SourceRuleRow) {
+	return {
+		id: row.id,
+		scope: row.host_id === null ? 'global' : 'host',
+		hostId: row.host_id,
+		pattern: row.pattern,
+		isExclude: row.is_exclude === 1,
+		note: row.note,
+		enabled: row.enabled === 1,
+	};
+}
+
+async function upsertHost(env: Env, body: Record<string, unknown>): Promise<Response> {
+	const masterKey = requireMasterKey(env);
+
+	const address = String(body.address ?? '').trim();
+	const username = String(body.username ?? '').trim();
+	const label = String(body.label ?? '').trim() || address;
+	const port = Number(body.port ?? 22);
+
+	if (!address) throw new HttpError(400, 'address is required');
+	if (!username) throw new HttpError(400, 'username is required');
+	if (!Number.isInteger(port) || port < 1 || port > 65535) throw new HttpError(400, 'port must be an integer between 1 and 65535');
+
+	// The id doubles as the AES-GCM additional data for the encrypted columns, so it is fixed at
+	// creation and never rewritten: changing it would silently orphan every stored credential.
+	const id = body.id ? slugify(String(body.id)) : slugify(label || address);
+	if (!id) throw new HttpError(400, 'could not derive a usable id; supply one explicitly');
+
+	const existing = await getHost(env.DB, id);
+	const timestamp = nowIso();
+
+	// Only encrypt what was supplied. An omitted field means "keep what is stored", which is exactly
+	// what lets the UI edit a host without ever handling the existing credential.
+	const password = typeof body.password === 'string' && body.password.length > 0 ? body.password : null;
+	const privateKey = typeof body.privateKey === 'string' && body.privateKey.length > 0 ? body.privateKey : null;
+	const privateKeyPassphrase =
+		typeof body.privateKeyPassphrase === 'string' && body.privateKeyPassphrase.length > 0 ? body.privateKeyPassphrase : null;
+
+	const passwordEnc = password ? await encryptField(masterKey, id, 'password', password) : (existing?.password_enc ?? null);
+	const privateKeyEnc = privateKey ? await encryptField(masterKey, id, 'private_key', privateKey) : (existing?.private_key_enc ?? null);
+	const privateKeyPassEnc = privateKeyPassphrase
+		? await encryptField(masterKey, id, 'private_key_passphrase', privateKeyPassphrase)
+		: (existing?.private_key_pass_enc ?? null);
+
+	// One statement, so no atomicity is required. Repeating it with the same id updates in place.
+	await env.DB.prepare(
+		`INSERT INTO hosts (id, label, address, port, username, password_enc, private_key_enc, private_key_pass_enc,
+		                    host_key_fingerprint, enabled, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT (id) DO UPDATE SET
+		   label = excluded.label,
+		   address = excluded.address,
+		   port = excluded.port,
+		   username = excluded.username,
+		   password_enc = excluded.password_enc,
+		   private_key_enc = excluded.private_key_enc,
+		   private_key_pass_enc = excluded.private_key_pass_enc,
+		   enabled = excluded.enabled,
+		   updated_at = excluded.updated_at`,
+	)
+		.bind(
+			id,
+			label,
+			address,
+			port,
+			username,
+			passwordEnc,
+			privateKeyEnc,
+			privateKeyPassEnc,
+			existing?.host_key_fingerprint ?? null,
+			body.enabled === false ? 0 : 1,
+			existing?.created_at ?? timestamp,
+			timestamp,
+		)
+		.run();
+
+	const saved = await getHost(env.DB, id);
+	return json({ ok: true, host: saved ? await publicHost(saved) : null });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Connecting
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Builds SSH options for a stored host, decrypting at the last possible moment.
+ *
+ * The plaintext exists only for the duration of this call. It is never logged, never returned, and
+ * never written anywhere. Because the host id is bound into the ciphertext as additional data, a
+ * credential copied from another row fails here instead of authenticating as the wrong machine.
+ */
+async function connectOptionsFor(env: Env, row: HostRow) {
+	const masterKey = requireMasterKey(env);
+
+	let password: string | undefined;
+	let privateKey: { pem: string; passphrase?: string } | undefined;
+
+	if (row.password_enc) password = await decryptField(masterKey, row.id, 'password', row.password_enc);
+	if (row.private_key_enc) {
+		const pem = await decryptField(masterKey, row.id, 'private_key', row.private_key_enc);
+		const passphrase = row.private_key_pass_enc
+			? await decryptField(masterKey, row.id, 'private_key_passphrase', row.private_key_pass_enc)
+			: undefined;
+		privateKey = { pem, passphrase };
+	}
+
+	if (!password && !privateKey) throw new HttpError(400, `host ${row.id} has no stored credential`);
+
+	return {
+		hostname: row.address,
+		port: row.port,
+		username: row.username,
+		password,
+		privateKey,
+		// AES-GCM is asserted rather than preferred: it is WebCrypto-backed, whereas
+		// chacha20-poly1305 would be assembled in pure JS and is the likeliest way to blow the CPU
+		// budget. A refusal here is a finding, not something to hide behind a fallback.
+		algorithms: { cipher: 'aes256-gcm@openssh.com' } as const,
+		timeoutMs: 20_000,
+	};
+}
+
+/** Minimal glob for one path segment: `*`, `?` and literals. */
+function globToRegExp(pattern: string): RegExp {
+	let out = '^';
+	for (const ch of pattern) {
+		if (ch === '*') out += '[^/]*';
+		else if (ch === '?') out += '[^/]';
+		else out += ch.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+	}
+	return new RegExp(`${out}$`);
 }
 
 /**
- * Negotiates AES-GCM only.
+ * Connects to a host, identifies it, and checks each applicable rule against a real directory
+ * listing where the rule permits it.
  *
- * `cipher` is a single string in edgeport's AlgorithmPrefs rather than a preference list, so
- * this is an assertion: if the server cannot do aes256-gcm@openssh.com, negotiation fails and
- * that failure is itself the finding (rather than silently falling back to pure-JS ChaCha and
- * reporting a CPU number that means something else).
+ * Read-only throughout: `uname`, `whoami`, `hostname`, `df`, and SFTP `list`/`stat`. Nothing on the
+ * target is written, renamed, or deleted.
  */
-const AES_GCM_ONLY = { cipher: 'aes256-gcm@openssh.com' } as const;
+async function testHost(env: Env, id: string): Promise<Response> {
+	const row = await getHost(env.DB, id);
+	if (!row) throw new HttpError(404, `no host with id ${id}`);
 
-const baseOptions = (env: Env) => ({
-	hostname: env.PROBE_HOST,
-	port: Number(env.PROBE_PORT || '22'),
-	username: env.PROBE_USER,
-	password: env.PROBE_PASSWORD,
-	algorithms: AES_GCM_ONLY,
-	timeoutMs: 20_000,
-});
-
-/**
- * One connection, reused for every route. `sshConnect` must be called inside the request
- * handler: a socket cannot be created in global scope or shared across requests.
- */
-async function withSftp<T>(env: Env, fn: (sftp: SftpSession, ssh: SshSession) => Promise<T>) {
-	const ssh = await sshConnect(baseOptions(env));
-	try {
-		const sftp = await sftpConnect({ session: ssh });
+	const stages: { stage: string; ms: number }[] = [];
+	const timed = async <T>(stage: string, fn: () => Promise<T>): Promise<T> => {
+		const t0 = Date.now();
 		try {
-			return await fn(sftp, ssh);
+			return await fn();
+		} finally {
+			stages.push({ stage, ms: Date.now() - t0 });
+		}
+	};
+
+	// Decryption happens before the timer starts: the measured stage should be the connection, not
+	// the fast local key work, and this keeps the plaintext alive for the shortest span possible.
+	const options = await connectOptionsFor(env, row);
+	const ssh = await timed('ssh connect + auth', () => sshConnect(options));
+
+	try {
+		const facts = await timed('identify', async () => ({
+			uname: await ssh.run('uname -a'),
+			whoami: await ssh.run('whoami'),
+			hostname: await ssh.run('hostname'),
+			disk: await ssh.df('/').catch(() => null),
+		}));
+
+		const rules = await rulesForHost(env.DB, id);
+		const evaluations: {
+			pattern: string;
+			scope: string;
+			isExclude: boolean;
+			status: string;
+			matchCount?: number;
+			matches?: string[];
+			detail?: string;
+		}[] = [];
+
+		const sftp = await timed('sftp subsystem', () => sftpConnect({ session: ssh }));
+		try {
+			for (const rule of rules) {
+				const base = {
+					pattern: rule.pattern,
+					scope: rule.host_id === null ? 'global' : 'host',
+					isExclude: rule.is_exclude === 1,
+				};
+				const slash = rule.pattern.lastIndexOf('/');
+				const dir = slash > 0 ? rule.pattern.slice(0, slash) : '/';
+				const name = slash >= 0 ? rule.pattern.slice(slash + 1) : rule.pattern;
+
+				// A wildcard in the directory part cannot be resolved by listing one directory. It is
+				// reported honestly as needing the collection step rather than silently skipped.
+				if (/[*?[]/.test(dir)) {
+					evaluations.push({ ...base, status: 'needs_collection_step', detail: 'the directory part contains a wildcard' });
+					continue;
+				}
+
+				try {
+					const entries = await sftp.list(dir);
+					const regex = globToRegExp(name);
+					const matches = entries
+						.filter((e) => !e.attrs.isDirectory && regex.test(e.filename))
+						.map((e) => e.filename)
+						.sort();
+					evaluations.push({
+						...base,
+						status: 'ok',
+						matchCount: matches.length,
+						matches: matches.slice(0, 50),
+						detail: `${matches.length} file(s) in ${dir}`,
+					});
+				} catch (err) {
+					evaluations.push({ ...base, status: 'error', detail: (err as Error).message });
+				}
+			}
 		} finally {
 			await sftp.close();
 		}
+
+		return json({ ok: true, host: await publicHost(row), facts, rules: rules.map(publicRule), evaluations, stages });
 	} finally {
 		await ssh.close();
 	}
 }
 
+// ---------------------------------------------------------------------------------------------
+// Rules
+// ---------------------------------------------------------------------------------------------
+
+async function createRule(env: Env, body: Record<string, unknown>): Promise<Response> {
+	const pattern = String(body.pattern ?? '').trim();
+	if (!pattern) throw new HttpError(400, 'pattern is required');
+	if (!pattern.startsWith('/')) throw new HttpError(400, 'pattern must be an absolute path, for example /var/log/*.log');
+
+	const hostId = body.hostId === null || body.hostId === undefined || body.hostId === '' ? null : slugify(String(body.hostId));
+	if (hostId !== null && !(await getHost(env.DB, hostId))) throw new HttpError(400, `no host with id ${hostId}`);
+
+	// One INSERT is one statement, so it needs no atomicity. A repeated pattern would add a duplicate
+	// row — harmless for evaluation, but noise — so an identical existing rule is returned instead.
+	const existing = await env.DB.prepare('SELECT * FROM source_rules WHERE pattern = ? AND is_exclude = ? AND host_id IS ?')
+		.bind(pattern, body.isExclude === true ? 1 : 0, hostId)
+		.first<SourceRuleRow>();
+	if (existing) return json({ ok: true, id: existing.id, deduplicated: true });
+
+	const result = await env.DB.prepare(
+		'INSERT INTO source_rules (host_id, pattern, is_exclude, note, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)',
+	)
+		.bind(hostId, pattern, body.isExclude === true ? 1 : 0, body.note ? String(body.note) : null, nowIso())
+		.run();
+
+	return json({ ok: true, id: result.meta.last_row_id, deduplicated: false });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Router
+// ---------------------------------------------------------------------------------------------
+
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		const url = new URL(request.url);
-		const stages: Stage[] = [];
-		const timed = async <T>(stage: string, fn: () => Promise<T>): Promise<T> => {
-			const t0 = Date.now();
-			try {
-				return await fn();
-			} finally {
-				stages.push({ stage, ms: Date.now() - t0 });
-			}
-		};
-
-		const target = {
-			host: env.PROBE_HOST,
-			port: Number(env.PROBE_PORT || '22'),
-			user: env.PROBE_USER,
-			hasPassword: typeof env.PROBE_PASSWORD === 'string' && env.PROBE_PASSWORD.length > 0,
-		};
-
-		// --- 0. config sanity, without opening a connection -------------------------------
-		if (url.pathname === '/') {
-			return json({
-				probe: 'ssh-probe',
-				purpose: 'Can a Worker read a file from a real VPS over SSH?',
-				target,
-				routes: ['/', '/exec', '/list?path=/etc', '/read?path=/etc/hostname'],
-				note: target.hasPassword ? 'credential present' : 'PROBE_PASSWORD is NOT set — /exec, /list and /read will fail',
-			});
-		}
-
-		if (!target.hasPassword) {
-			return json({ error: 'PROBE_PASSWORD is not set', target }, 500);
-		}
-		if (!target.host || !target.user) {
-			return json({ error: 'PROBE_HOST or PROBE_USER is not set', target }, 500);
-		}
+		const path = url.pathname;
+		const method = request.method;
 
 		try {
-			// --- 1. does the SSH transport + auth work at all? ---------------------------
-			if (url.pathname === '/exec') {
-				const result = await timed('ssh connect + exec', () =>
-					withSftp(env, async (_sftp, ssh) => {
-						const uname = await ssh.run('uname -a');
-						const whoami = await ssh.run('whoami');
-						const hostname = await ssh.run('hostname');
-						return { uname, whoami, hostname };
-					}),
-				);
-				return json({ ok: true, startedAt: nowIso(), target, stages, result });
-			}
-
-			// --- 2. does the SFTP subsystem work? ---------------------------------------
-			if (url.pathname === '/list') {
-				const path = url.searchParams.get('path') ?? '/etc';
-				const entries = await timed('sftp list', () =>
-					withSftp(env, async (sftp) => sftp.list(path)),
-				);
-				// Directory listings can be large; return a bounded, sorted sample.
-				const sorted = [...entries].sort((a, b) => a.filename.localeCompare(b.filename));
-				return json({
-					ok: true,
-					startedAt: nowIso(),
-					target,
-					stages,
-					path,
-					entryCount: entries.length,
-					entries: sorted.slice(0, 25).map((e) => ({
-						name: e.filename,
-						size: e.attrs.size,
-						isDirectory: e.attrs.isDirectory,
-						mtime: e.attrs.mtime,
-					})),
+			if (path === '/' && method === 'GET') {
+				return new Response(renderIndexPage(), {
+					headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
 				});
 			}
 
-			// --- 3. the real experiment: read bytes, hash them, persist them to R2 -------
-			if (url.pathname === '/read') {
-				const path = url.searchParams.get('path') ?? '/etc/hostname';
-				const key = url.searchParams.get('key') ?? `probe${path}`;
-
-				const read = await timed('sftp readFile', () =>
-					withSftp(env, async (sftp) => {
-						const attrs = await sftp.stat(path);
-						const bytes = await sftp.readFile(path);
-						return { attrs, bytes };
-					}),
-				);
-
-				const hash = await timed('sha256 of bytes', () => sha256Hex(read.bytes));
-				const put = await timed('r2 put', () => env.PROBE_BUCKET.put(key, read.bytes));
-
+			if (path === '/api/status' && method === 'GET') {
+				const schema = await schemaStatus(env).catch((err) => ({ ready: false, missing: [`error: ${(err as Error).message}`] }));
 				return json({
 					ok: true,
-					startedAt: nowIso(),
-					target,
-					stages,
-					path,
-					sftp: {
-						reportedSize: read.attrs.size,
-						mtime: read.attrs.mtime,
-						isDirectory: read.attrs.isDirectory,
-					},
-					read: {
-						bytesRead: read.bytes.length,
-						sha256: hash,
-						// Proof that the bytes are the remote file's content, and not an
-						// empty or error buffer.
-						contentUtf8: new TextDecoder().decode(read.bytes.slice(0, 256)),
-					},
-					r2: {
-						key,
-						bytesWritten: put?.size ?? null,
-						etag: put?.etag ?? null,
-					},
-					// First 64 bytes as hex, so the local comparison is unambiguous when the
-					// content is not valid UTF-8.
-					headHex: [...read.bytes.slice(0, 64)].map((b) => b.toString(16).padStart(2, '0')).join(''),
+					worker: 'linkbin',
+					schema,
+					masterKeySet: Boolean(env.SSH_MASTER_KEY),
+					r2Bound: Boolean(env.BUCKET),
 				});
 			}
 
-			return json({ error: 'unknown route', routes: ['/', '/exec', '/list', '/read'] }, 404);
-		} catch (err) {
-			// A failure here IS a result. Report which stage died and what the runtime said.
-			const e = err as Error;
+			// Generates a candidate master key. It cannot install the key itself — a secret is
+			// deployment configuration, not runtime state — but it means the operator never has to
+			// invent key material by hand.
+			if (path === '/api/master-key' && method === 'GET') {
+				let currentBytes = 0;
+				if (env.SSH_MASTER_KEY) {
+					try {
+						currentBytes = atob(env.SSH_MASTER_KEY.trim()).length;
+					} catch {
+						currentBytes = -1;
+					}
+				}
+				return json({
+					generated: generateMasterKey(),
+					currentKeyStatus:
+						currentBytes === 0
+							? 'not set'
+							: currentBytes === 32
+								? 'set and well formed (32 bytes)'
+								: `set but INVALID: decodes to ${currentBytes} bytes, expected 32`,
+					install: 'Set it as a Secret named SSH_MASTER_KEY, or: wrangler secret put SSH_MASTER_KEY',
+					warning:
+						'Generating a new key does NOT re-encrypt anything. Replacing SSH_MASTER_KEY makes every stored credential unreadable.',
+				});
+			}
+
+			if (path === '/api/admin/apply-schema' && method === 'POST') {
+				return await applySchema(env);
+			}
+
+			if (path === '/api/hosts' && method === 'GET') {
+				const rows = await listHosts(env.DB);
+				return json({ ok: true, hosts: await Promise.all(rows.map(publicHost)) });
+			}
+
+			if (path === '/api/hosts' && method === 'POST') {
+				return await upsertHost(env, (await request.json()) as Record<string, unknown>);
+			}
+
+			if (path === '/api/hosts/delete' && method === 'POST') {
+				const body = (await request.json()) as { id?: string };
+				const id = slugify(String(body.id ?? ''));
+				if (!id) throw new HttpError(400, 'id is required');
+				await env.DB.prepare('DELETE FROM hosts WHERE id = ?').bind(id).run();
+				return json({ ok: true, deleted: id });
+			}
+
+			if (path === '/api/hosts/test' && method === 'POST') {
+				const body = (await request.json()) as { id?: string };
+				const id = slugify(String(body.id ?? ''));
+				if (!id) throw new HttpError(400, 'id is required');
+				return await testHost(env, id);
+			}
+
+			if (path === '/api/rules' && method === 'GET') {
+				const hostId = url.searchParams.get('hostId');
+				const { results } = hostId
+					? await env.DB.prepare('SELECT * FROM source_rules WHERE host_id IS NULL OR host_id = ? ORDER BY host_id, is_exclude, pattern')
+							.bind(slugify(hostId))
+							.all<SourceRuleRow>()
+					: await env.DB.prepare('SELECT * FROM source_rules ORDER BY host_id, is_exclude, pattern').all<SourceRuleRow>();
+				return json({ ok: true, rules: (results ?? []).map(publicRule) });
+			}
+
+			if (path === '/api/rules' && method === 'POST') {
+				return await createRule(env, (await request.json()) as Record<string, unknown>);
+			}
+
+			if (path === '/api/rules/delete' && method === 'POST') {
+				const body = (await request.json()) as { id?: number };
+				if (typeof body.id !== 'number') throw new HttpError(400, 'numeric id is required');
+				await env.DB.prepare('DELETE FROM source_rules WHERE id = ?').bind(body.id).run();
+				return json({ ok: true, deleted: body.id });
+			}
+
+			// --- probe: can a Worker read a file over SSH at all? ---------------------------
+			// Kept until the verdict is recorded in .scratch/vps-file-hub/STATE.md.
+			if (path.startsWith('/probe')) return await handleProbe(path, url, env);
+
 			return json(
-				{
-					ok: false,
-					startedAt: nowIso(),
-					target,
-					stages,
-					error: { name: e?.name ?? 'unknown', message: e?.message ?? String(err), stack: e?.stack },
-					hint: 'If the message mentions exceeding CPU or error 1102, the CPU budget is the blocker. If it mentions a protocol or cipher negotiation failure, AES-GCM was refused.',
-				},
-				502,
+				{ error: 'not found', path, routes: ['/', '/api/status', '/api/hosts', '/api/rules', '/api/admin/apply-schema', '/probe*'] },
+				404,
 			);
+		} catch (err) {
+			const e = err as Error;
+			const status = e instanceof HttpError ? e.status : 500;
+			// Errors reach the operator, but never carry decrypted material: messages that could are
+			// built only from the host id and the field name.
+			return json({ ok: false, error: e.message, name: e.name, status }, status);
 		}
 	},
 } satisfies ExportedHandler<Env>;
+
+// ---------------------------------------------------------------------------------------------
+// Probe routes (throwaway — delete once the verdict is recorded)
+// ---------------------------------------------------------------------------------------------
+
+async function handleProbe(path: string, url: URL, env: Env): Promise<Response> {
+	const stages: { stage: string; ms: number }[] = [];
+	const timed = async <T>(stage: string, fn: () => Promise<T>): Promise<T> => {
+		const t0 = Date.now();
+		try {
+			return await fn();
+		} finally {
+			stages.push({ stage, ms: Date.now() - t0 });
+		}
+	};
+
+	type ConnectOptions = Awaited<ReturnType<typeof connectOptionsFor>>;
+
+	// Prefer a stored host so the probe exercises the same encrypted-credential path the product
+	// will use; fall back to environment variables from the original standalone experiment.
+	let options: ConnectOptions;
+	let targetSource: string;
+
+	if (env.PROBE_HOST && env.PROBE_USER) {
+		if (!env.PROBE_PASSWORD) throw new HttpError(500, 'PROBE_PASSWORD is not set');
+		options = {
+			hostname: env.PROBE_HOST,
+			port: Number(env.PROBE_PORT || '22'),
+			username: env.PROBE_USER,
+			password: env.PROBE_PASSWORD,
+			algorithms: { cipher: 'aes256-gcm@openssh.com' },
+			timeoutMs: 20_000,
+		} as ConnectOptions;
+		targetSource = 'environment variables';
+	} else {
+		const stored = await listHosts(env.DB);
+		const first = stored.find((h) => h.enabled === 1 && (h.password_enc || h.private_key_enc));
+		if (!first) throw new HttpError(400, 'no probe target: set PROBE_HOST/PROBE_USER/PROBE_PASSWORD, or add a host with a credential');
+		options = await connectOptionsFor(env, first);
+		targetSource = `stored host ${first.id}`;
+	}
+
+	const ssh = await timed('ssh connect + auth', () => sshConnect(options));
+	try {
+		if (path === '/probe/exec') {
+			const result = await timed('exec', async () => ({
+				uname: await ssh.run('uname -a'),
+				whoami: await ssh.run('whoami'),
+				hostname: await ssh.run('hostname'),
+				disk: await ssh.df('/').catch(() => null),
+			}));
+			return json({ ok: true, startedAt: nowIso(), targetSource, stages, result });
+		}
+
+		if (path === '/probe/list') {
+			const dir = url.searchParams.get('path') ?? '/etc';
+			const entries = await timed('sftp list', async () => {
+				const sftp = await sftpConnect({ session: ssh });
+				try {
+					return await sftp.list(dir);
+				} finally {
+					await sftp.close();
+				}
+			});
+			const sorted = [...entries].sort((a, b) => a.filename.localeCompare(b.filename));
+			return json({
+				ok: true,
+				startedAt: nowIso(),
+				targetSource,
+				stages,
+				path: dir,
+				entryCount: entries.length,
+				entries: sorted.slice(0, 25).map((e) => ({ name: e.filename, size: e.attrs.size, isDirectory: e.attrs.isDirectory, mtime: e.attrs.mtime })),
+			});
+		}
+
+		if (path === '/probe/read') {
+			const filePath = url.searchParams.get('path') ?? '/etc/hostname';
+			const key = url.searchParams.get('key') ?? `probe${filePath}`;
+
+			const read = await timed('sftp readFile', async () => {
+				const sftp = await sftpConnect({ session: ssh });
+				try {
+					const attrs = await sftp.stat(filePath);
+					const bytes = await sftp.readFile(filePath);
+					return { attrs, bytes };
+				} finally {
+					await sftp.close();
+				}
+			});
+
+			const digest = await timed('sha256', () => crypto.subtle.digest('SHA-256', read.bytes));
+			const hash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+			const put = await timed('r2 put', () => env.BUCKET.put(key, read.bytes));
+
+			return json({
+				ok: true,
+				startedAt: nowIso(),
+				targetSource,
+				stages,
+				path: filePath,
+				sftp: { reportedSize: read.attrs.size, mtime: read.attrs.mtime },
+				read: { bytesRead: read.bytes.length, sha256: hash, contentUtf8: new TextDecoder().decode(read.bytes.slice(0, 256)) },
+				r2: { key, bytesWritten: put?.size ?? null, etag: put?.etag ?? null },
+			});
+		}
+
+		throw new HttpError(404, `unknown probe route ${path}; use /probe/exec, /probe/list or /probe/read`);
+	} finally {
+		await ssh.close();
+	}
+}
