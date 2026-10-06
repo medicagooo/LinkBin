@@ -34,6 +34,7 @@ tmp-*
 node_modules/
 .wrangler/
 dist/
+.dry-run/
 build/
 coverage/
 *.tsbuildinfo
