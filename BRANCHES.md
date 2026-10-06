@@ -15,7 +15,9 @@
     }
   ],
   "active": ["vps-file-hub"],
-  "pending": [],
+  "pending": [
+    "vps-file-hub-e010: push origin main (predeclared; awaiting execution)"
+  ],
   "remote": {
     "origin": "git@github.com:medicagooo/LinkBin.git",
     "url": "https://github.com/medicagooo/LinkBin",
