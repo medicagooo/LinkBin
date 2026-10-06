@@ -1,18 +1,23 @@
 /**
  * LinkBin Worker.
  *
- * Three things live here, deliberately separated:
+ * Two things live here:
  *
- *   1. The **management API and UI** — the product surface. Hosts, and the directories to collect
- *      from them, are added at runtime through the web UI and stored encrypted in D1. Adding a
- *      machine therefore needs no redeploy, and this deployment's only secret is `SSH_MASTER_KEY`.
+ *   1. The **management API and UI** — hosts, and the directories to collect from them, are added at
+ *      runtime through the web UI and stored encrypted in D1. Adding a machine therefore needs no
+ *      redeploy, and this deployment's only secret is `SSH_MASTER_KEY`.
  *   2. A **schema bootstrap** route. Deployment happens through Workers Builds from GitHub, so there
  *      is no CLI attached to a release: the Worker has to be able to create its own tables. The
  *      schema is the same `migrations/0001_init.sql` the CLI would use, imported as a string, so
  *      there is exactly one source of truth.
- *   3. The **probe routes** (`/probe*`) — the ssh-probe experiment, kept until its verdict is
- *      recorded. They read a target from a stored host (or the environment) and exist only to answer
- *      whether a Worker can read a file over SSH at all.
+ *
+ * The collection channel is SSH from this Worker out to the host. Nothing is installed on the hosts:
+ * the Worker connects with `cloudflare:sockets` using a Workers-native SSH stack. `ssh2` cannot be
+ * used at all because it compiles WebAssembly at import time and workerd forbids runtime compilation.
+ *
+ * Not built yet: collection into R2, the download path, and scheduling. The `objects` and
+ * `multipart_sessions` tables exist, and the byte budget below is measured against them, but nothing
+ * ingests yet.
  *
  * Constraint that shapes every write path: **D1 has no transactions.** The only atomic unit is a
  * single `db.batch()`. So multi-step intentions are expressed as independently repeatable statements
@@ -24,9 +29,12 @@ import { connect as sftpConnect } from 'edgeport/sftp';
 import { credentialFingerprint, decryptField, encryptField, generateMasterKey } from './crypto';
 import { getHost, listHosts, nowIso, rulesForHost, slugify, type HostRow, type SourceRuleRow } from './db';
 import { LOCALES, pickLocale, renderIndexPage, type Locale } from './ui';
-// Wrangler's default bundling treats `.sql` as a `Text` module, so this is a plain string at
-// runtime. Importing the migration file keeps the CLI path and the in-Worker path on one schema.
+// Wrangler's default bundling treats `.sql` as a `Text` module, so these are plain strings at
+// runtime. Importing the migration files keeps the CLI path and the in-Worker path on one schema.
+// A new migration must be added here AND to the list below, or a CLI-less deployment would never
+// apply it.
 import initSchemaSql from '../migrations/0001_init.sql';
+import usageIndexSql from '../migrations/0002_usage_index.sql';
 
 interface Env {
 	DB: D1Database;
@@ -36,12 +44,16 @@ interface Env {
 	 * encrypted in D1.
 	 */
 	SSH_MASTER_KEY: string;
-	/** Probe-only and optional: the probe prefers a stored host and falls back to these. */
-	PROBE_HOST?: string;
-	PROBE_PORT?: string;
-	PROBE_USER?: string;
-	PROBE_PASSWORD?: string;
 }
+
+/**
+ * The scale this deployment is designed for. These are enforced rather than advisory, because the
+ * paid plan has hard ceilings underneath them and an unauthenticated API (D35) could otherwise be
+ * used to walk straight past every one of them.
+ */
+const MAX_HOSTS = 50;
+const MAX_FILE_BYTES = 100 * 1024 * 1024; // 100 MB per file
+const STORAGE_BUDGET_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB total in R2, a capacity budget
 
 class HttpError extends Error {
 	constructor(
@@ -78,14 +90,14 @@ function requireMasterKey(env: Env): string {	if (!env.SSH_MASTER_KEY) {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Splits the schema file into individual statements.
+ * Splits a schema file into individual statements.
  *
  * `db.batch()` is the only documented atomic unit in D1, so the schema is applied as batches rather
  * than as statements run one at a time. Every statement is `CREATE ... IF NOT EXISTS`, which is what
  * makes re-applying safe.
  */
-function schemaStatements(): string[] {
-	return initSchemaSql
+function statementsOf(sql: string): string[] {
+	return sql
 		.split(';')
 		.map((chunk) =>
 			chunk
@@ -97,8 +109,24 @@ function schemaStatements(): string[] {
 		.filter((statement) => statement.length > 0);
 }
 
+/**
+ * Every migration a CLI-less deployment has to apply, in order.
+ *
+ * This list is the in-Worker equivalent of `wrangler d1 migrations apply`. It has to be extended
+ * whenever a migration file is added, which is the one maintenance cost of not having a CLI attached
+ * to a release. `applySchema` reports what it applied so a missing entry is visible rather than
+ * silent.
+ */
+const SCHEMA_MIGRATIONS: { name: string; sql: string }[] = [
+	{ name: '0001_init', sql: initSchemaSql },
+	{ name: '0002_usage_index', sql: usageIndexSql },
+];
+
 async function applySchema(env: Env): Promise<Response> {
-	const statements = schemaStatements().map((sql) => env.DB.prepare(sql));
+	const planned = SCHEMA_MIGRATIONS.flatMap((migration) =>
+		statementsOf(migration.sql).map((sql) => ({ migration: migration.name, sql })),
+	);
+	const statements = planned.map((p) => env.DB.prepare(p.sql));
 
 	// Batch size is bounded on purpose: a batch is atomic, so a smaller batch means a failure names a
 	// narrower range. It is not atomic ACROSS batches, which is exactly why every statement is
@@ -111,23 +139,102 @@ async function applySchema(env: Env): Promise<Response> {
 	}
 
 	const { results } = await env.DB.prepare(
-		"SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY name",
+		"SELECT name FROM sqlite_master WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY name",
 	).all<{ name: string }>();
 
 	return json({
 		ok: true,
 		statementsApplied: applied,
-		tables: (results ?? []).map((t) => t.name),
+		migrations: SCHEMA_MIGRATIONS.map((m) => m.name),
+		objects: (results ?? []).map((t) => t.name),
 		note: 'Idempotent: every statement is CREATE ... IF NOT EXISTS, so this is safe to repeat.',
 	});
 }
 
-/** Reports whether the schema is present, so the UI can tell the operator what to do next. */
+/**
+ * Reports whether the schema is present, so the UI can tell the operator what to do next.
+ *
+ * Indexes are checked alongside tables: a table can exist from an older deployment while a later
+ * migration never ran, and that is precisely the state this returns `ready: false` for.
+ */
 async function schemaStatus(env: Env): Promise<{ ready: boolean; missing: string[] }> {
-	const required = ['hosts', 'source_rules', 'objects', 'multipart_sessions'];
-	const { results } = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all<{ name: string }>();
+	const required = ['hosts', 'source_rules', 'objects', 'multipart_sessions', 'idx_objects_usage'];
+	const { results } = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','index')").all<{ name: string }>();
 	const present = new Set((results ?? []).map((r) => r.name));
 	return { ready: required.every((t) => present.has(t)), missing: required.filter((t) => !present.has(t)) };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Storage budget
+// ---------------------------------------------------------------------------------------------
+
+interface StorageUsage {
+	/** Bytes in live objects — rows that are neither superseded nor soft-deleted. */
+	liveBytes: number;
+	/** Bytes retained by superseded or soft-deleted rows that have not been collected yet. */
+	retainedBytes: number;
+	/** Live + retained: what R2 is actually holding, which is what the 10 GB ceiling applies to. */
+	totalBytes: number;
+	objectCount: number;
+	budgetBytes: number;
+	remainingBytes: number;
+	usedFraction: number;
+}
+
+/**
+ * Measures what the store is actually holding.
+ *
+ * `liveBytes` is what a consumer can reach; `totalBytes` is what the bucket holds, and R2 charges
+ * for the bucket. The budget therefore has to be judged on the total, or superseded objects would
+ * let the store grow past 10 GB while every visible number still looked healthy.
+ *
+ * One aggregate query, not a scan: D1 allows 1000 queries per Worker invocation and the row ceiling
+ * is what matters here, not the row count.
+ */
+async function measureStorage(db: D1Database): Promise<StorageUsage> {
+	const row = await db
+		.prepare(
+			`SELECT
+			   COALESCE(SUM(CASE WHEN superseded_by IS NULL AND deleted_at IS NULL THEN size_bytes ELSE 0 END), 0) AS live_bytes,
+			   COALESCE(SUM(CASE WHEN superseded_by IS NOT NULL OR deleted_at IS NOT NULL THEN size_bytes ELSE 0 END), 0) AS retained_bytes,
+			   COALESCE(SUM(size_bytes), 0) AS total_bytes,
+			   COUNT(*) AS object_count
+			 FROM objects`,
+		)
+		.first<{ live_bytes: number; retained_bytes: number; total_bytes: number; object_count: number }>();
+
+	const totalBytes = Number(row?.total_bytes ?? 0);
+	return {
+		liveBytes: Number(row?.live_bytes ?? 0),
+		retainedBytes: Number(row?.retained_bytes ?? 0),
+		totalBytes,
+		objectCount: Number(row?.object_count ?? 0),
+		budgetBytes: STORAGE_BUDGET_BYTES,
+		remainingBytes: Math.max(0, STORAGE_BUDGET_BYTES - totalBytes),
+		usedFraction: totalBytes / STORAGE_BUDGET_BYTES,
+	};
+}
+
+/**
+ * Decides whether one more file of `size` bytes fits, before anything is transferred.
+ *
+ * Called before an upload rather than after, so a file that cannot fit is refused instead of being
+ * read from the host and then discarded. Nothing calls this yet — the ingest path is not built — and
+ * that is exactly why it exists now: the alternative is discovering the ceiling in production.
+ */
+async function checkFileBudget(db: D1Database, size: number): Promise<{ ok: true } | { ok: false; reason: string }> {
+	if (!Number.isFinite(size) || size < 0) return { ok: false, reason: 'file size is not a valid non-negative number' };
+	if (size > MAX_FILE_BYTES) {
+		return { ok: false, reason: `file is ${size} bytes, above the ${MAX_FILE_BYTES} byte per-file limit` };
+	}
+	const usage = await measureStorage(db);
+	if (usage.totalBytes + size > STORAGE_BUDGET_BYTES) {
+		return {
+			ok: false,
+			reason: `storing ${size} bytes would take the bucket to ${usage.totalBytes + size} of a ${STORAGE_BUDGET_BYTES} byte budget; ${usage.remainingBytes} bytes remain`,
+		};
+	}
+	return { ok: true };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -191,6 +298,16 @@ async function upsertHost(env: Env, body: Record<string, unknown>): Promise<Resp
 
 	const existing = await getHost(env.DB, id);
 	const timestamp = nowIso();
+
+	// The host ceiling applies to CREATING a host, not to updating one. Checking the total on every
+	// write would make the 50th host uneditable — the operator could no longer rotate its password.
+	if (!existing) {
+		const countRow = await env.DB.prepare('SELECT COUNT(*) AS n FROM hosts').first<{ n: number }>();
+		const count = Number(countRow?.n ?? 0);
+		if (count >= MAX_HOSTS) {
+			throw new HttpError(400, `this deployment is designed for at most ${MAX_HOSTS} hosts and already has ${count}; delete one first`);
+		}
+	}
 
 	// Only encrypt what was supplied. An omitted field means "keep what is stored", which is exactly
 	// what lets the UI edit a host without ever handling the existing credential.
@@ -443,13 +560,24 @@ export default {
 
 			if (path === '/api/status' && method === 'GET') {
 				const schema = await schemaStatus(env).catch((err) => ({ ready: false, missing: [`error: ${(err as Error).message}`] }));
+				// Host count is included because the ceiling is only useful if it is visible: an
+				// operator who cannot see "49 of 50" discovers the limit by being refused.
+				const hosts = await env.DB.prepare('SELECT COUNT(*) AS n FROM hosts')
+					.first<{ n: number }>()
+					.catch(() => null);
 				return json({
 					ok: true,
 					worker: 'linkbin',
 					schema,
 					masterKeySet: Boolean(env.SSH_MASTER_KEY),
 					r2Bound: Boolean(env.BUCKET),
+					hosts: { count: Number(hosts?.n ?? 0), max: MAX_HOSTS },
+					limits: { maxFileBytes: MAX_FILE_BYTES, storageBudgetBytes: STORAGE_BUDGET_BYTES },
 				});
+			}
+
+			if (path === '/api/usage' && method === 'GET') {
+				return json({ ok: true, usage: await measureStorage(env.DB) });
 			}
 
 			// Generates a candidate master key. It cannot install the key itself — a secret is
@@ -527,14 +655,14 @@ export default {
 				return json({ ok: true, deleted: body.id });
 			}
 
-			// --- probe: can a Worker read a file over SSH at all? ---------------------------
-			// Kept until the verdict is recorded in .scratch/vps-file-hub/STATE.md.
-			if (path.startsWith('/probe')) return await handleProbe(path, url, env);
+			// The /probe* routes were REMOVED here. They existed only to answer whether a Worker can
+			// read a file over SSH, that verdict is recorded (PASS, see STATE.md D36), and they were an
+			// unauthenticated remote-command and arbitrary-file-read surface: with no PROBE_* set they
+			// fell back to the first stored host carrying a credential, so adding any host would have
+			// re-created a live exposure for anyone who could reach the Worker (D41). Do not reintroduce
+			// them; a diagnostic that needs a host credential belongs behind the auth gap in D35.
 
-			return json(
-				{ error: 'not found', path, routes: ['/', '/api/status', '/api/hosts', '/api/rules', '/api/admin/apply-schema', '/probe*'] },
-				404,
-			);
+			return json({ error: 'not found', path, routes: ['/', '/api/status', '/api/hosts', '/api/rules', '/api/usage', '/api/admin/apply-schema'] }, 404);
 		} catch (err) {
 			const e = err as Error;
 			const status = e instanceof HttpError ? e.status : 500;
@@ -547,147 +675,3 @@ export default {
 		}
 	},
 } satisfies ExportedHandler<Env>;
-
-// ---------------------------------------------------------------------------------------------
-// Probe routes (throwaway — delete once the verdict is recorded)
-// ---------------------------------------------------------------------------------------------
-
-async function handleProbe(path: string, url: URL, env: Env): Promise<Response> {
-	const stages: { stage: string; ms: number }[] = [];
-	const timed = async <T>(stage: string, fn: () => Promise<T>): Promise<T> => {
-		const t0 = Date.now();
-		try {
-			return await fn();
-		} finally {
-			stages.push({ stage, ms: Date.now() - t0 });
-		}
-	};
-
-	type ConnectOptions = Awaited<ReturnType<typeof connectOptionsFor>>;
-
-	// Prefer a stored host so the probe exercises the same encrypted-credential path the product
-	// will use; fall back to environment variables from the original standalone experiment.
-	let options: ConnectOptions;
-	let targetSource: string;
-
-	if (env.PROBE_HOST && env.PROBE_USER) {
-		if (!env.PROBE_PASSWORD) throw new HttpError(500, 'PROBE_PASSWORD is not set');
-		options = {
-			hostname: env.PROBE_HOST,
-			port: Number(env.PROBE_PORT || '22'),
-			username: env.PROBE_USER,
-			password: env.PROBE_PASSWORD,
-			// A list, not a string — see the note in connectOptionsFor.
-			algorithms: { cipher: ['aes256-gcm@openssh.com', 'aes128-gcm@openssh.com', 'aes256-ctr', 'aes192-ctr', 'aes128-ctr'] },
-			timeoutMs: 20_000,
-		} as ConnectOptions;
-		targetSource = 'environment variables';
-	} else {
-		const stored = await listHosts(env.DB);
-		const first = stored.find((h) => h.enabled === 1 && (h.password_enc || h.private_key_enc));
-		if (!first) throw new HttpError(400, 'no probe target: set PROBE_HOST/PROBE_USER/PROBE_PASSWORD, or add a host with a credential');
-		options = await connectOptionsFor(env, first);
-		targetSource = `stored host ${first.id}`;
-	}
-
-	const ssh = await timed('ssh connect + auth', () => sshConnect(options));
-	try {
-		if (path === '/probe/exec') {
-			const result = await timed('exec', async () => ({
-				uname: await ssh.run('uname -a'),
-				whoami: await ssh.run('whoami'),
-				hostname: await ssh.run('hostname'),
-				disk: await ssh.df('/').catch(() => null),
-			}));
-			return json({ ok: true, startedAt: nowIso(), targetSource, stages, result });
-		}
-
-		/**
-		 * Computes the file's hash ON THE HOST, so the value the Worker derived from the bytes it
-		 * read can be compared against something computed independently of the Worker.
-		 *
-		 * The command is built from a FIXED command name plus a single-quoted, escaped path — there
-		 * is no arbitrary command execution here, and the route stays read-only. Turning the probe
-		 * into a general shell would make it an RCE endpoint for anyone who can reach the Worker,
-		 * which the management UI already has no authentication for.
-		 */
-		if (path === '/probe/hash') {
-			const filePath = url.searchParams.get('path') ?? '/etc/hostname';
-			// A POSIX single-quoted string cannot contain a single quote, so escape by closing,
-			// inserting an escaped quote, and reopening: ' -> '\''
-			const quoted = `'${filePath.replace(/'/g, `'\\''`)}'`;
-			const result = await timed('host sha256sum', async () => {
-				// sha256sum is coreutils; busybox also provides it (this probe's Alpine target does).
-				const sha = await ssh.run(`sha256sum -- ${quoted}`);
-				const size = await ssh.run(`wc -c < ${quoted}`);
-				return { sha256: sha.split(/\s+/)[0], wcBytes: Number(size.trim()) };
-			});
-			return json({
-				ok: true,
-				startedAt: nowIso(),
-				targetSource,
-				stages,
-				path: filePath,
-				host: result,
-				note: 'Compare host.sha256 against read.sha256 from /probe/read for the same path.',
-			});
-		}
-
-		if (path === '/probe/list') {
-			const dir = url.searchParams.get('path') ?? '/etc';
-			const entries = await timed('sftp list', async () => {
-				const sftp = await sftpConnect({ session: ssh });
-				try {
-					return await sftp.list(dir);
-				} finally {
-					await sftp.close();
-				}
-			});
-			const sorted = [...entries].sort((a, b) => a.filename.localeCompare(b.filename));
-			return json({
-				ok: true,
-				startedAt: nowIso(),
-				targetSource,
-				stages,
-				path: dir,
-				entryCount: entries.length,
-				entries: sorted.slice(0, 25).map((e) => ({ name: e.filename, size: e.attrs.size, isDirectory: e.attrs.isDirectory, mtime: e.attrs.mtime })),
-			});
-		}
-
-		if (path === '/probe/read') {
-			const filePath = url.searchParams.get('path') ?? '/etc/hostname';
-			const key = url.searchParams.get('key') ?? `probe${filePath}`;
-
-			const read = await timed('sftp readFile', async () => {
-				const sftp = await sftpConnect({ session: ssh });
-				try {
-					const attrs = await sftp.stat(filePath);
-					const bytes = await sftp.readFile(filePath);
-					return { attrs, bytes };
-				} finally {
-					await sftp.close();
-				}
-			});
-
-			const digest = await timed('sha256', () => crypto.subtle.digest('SHA-256', read.bytes));
-			const hash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
-			const put = await timed('r2 put', () => env.BUCKET.put(key, read.bytes));
-
-			return json({
-				ok: true,
-				startedAt: nowIso(),
-				targetSource,
-				stages,
-				path: filePath,
-				sftp: { reportedSize: read.attrs.size, mtime: read.attrs.mtime },
-				read: { bytesRead: read.bytes.length, sha256: hash, contentUtf8: new TextDecoder().decode(read.bytes.slice(0, 256)) },
-				r2: { key, bytesWritten: put?.size ?? null, etag: put?.etag ?? null },
-			});
-		}
-
-		throw new HttpError(404, `unknown probe route ${path}; use /probe/exec, /probe/list or /probe/read`);
-	} finally {
-		await ssh.close();
-	}
-}
