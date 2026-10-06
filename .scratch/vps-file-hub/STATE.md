@@ -22,9 +22,9 @@
 
 ## 当前阶段
 
-**第 0 步 `setup` 已完成；第 1 步 `grill-with-docs` 进行中（已锁定 D1–D35）；分叉 A `prototype` 已建并已部署到真实 Cloudflare，等待真机 SSH 结论。**
+**第 0 步 `setup` 已完成；第 1 步 `grill-with-docs` 进行中（已锁定 D1–D39）；分叉 A `prototype` 已部署到真实 Cloudflare 并已取得真机 PASS 结论。**
 
-**2026-10-07 更新（本次会话）**：Worker `linkbin` 已用 CLI 部署上线，D1/R2 已自动供给，`SSH_MASTER_KEY` 已设置，schema 已应用。**SSH 通道的真机验证是现在唯一的阻塞项**——它无法在本机验证（`wrangler dev` 拒绝连内网地址），所以"部署"就是这道验证的前置，而不是跳过流程。
+**2026-10-07 更新**：Worker `linkbin` 已部署上线（D36），SSH 采集通道**真机验证 PASS**（证据见下），**探针残留已清理、线上已不存有任何主机凭据**（事件 e025）。
 
 按 §2.3，**原型闸门已于 2026-10-07 解除（PASS）**，可以进入第 3 步 `to-spec`。仍待关闭的是"未决问题"里的 Q1–Q4、Q6、Q7 等设计问题。
 
@@ -39,6 +39,7 @@
 - [x] **第 1 步 grill（第 1–2 轮，未完）** → `GLOSSARY.md`（已建，含"非关系数据库"术语退役）、`docs/adr/0001-d1-for-metadata-r2-for-bytes.md`、`docs/adr/0002-chunked-ingest-multipart-state-in-d1.md`；锁定 D14–D20。
 - [x] **工具链可运行性（子 agent 实证）** → Node v24.21.0 / pnpm 11.7.0 可用；**npm 不存在**；wrangler **4.147.0 实测运行**；本地 D1+R2 仿真完整可用（含 R2 分片与范围读）；`@cloudflare/vitest-plugin` 提供全离线 TDD。→ D19、D20。
 - [x] **分叉 A · 真机验证 —— ✅ PASS（2026-10-07）** → 在真实主机上跑通完整链路，**证据见下**。**原型闸门已解除，可以进入第 3 步。**
+- [x] **探针残留清理（2026-10-07，事件 e025）** → 删除了线上唯一的主机行（`probe2` = `root@77.93.157.129`，含加密密码）、探针规则与 3 个 R2 对象。**理由**：`/probe*` 无鉴权且会回退到"第一个已启用且带凭据的主机"，于是"无鉴权 UI + 表内存着 root 凭据 + 无鉴权 probe 路由"三者叠加，使公网任何人可 `GET /probe/read?path=…` 以 root 读走该机任意文件并写入 R2——**这是当时真实存在的暴露面**。复核：`GET /api/hosts` 与 `GET /api/rules` 均返回 0。**D30 提醒仍然有效：该机 root 密码进过会话记录，建议轮换。**
 - [ ] 第 3 步 to-spec → `.scratch/vps-file-hub/spec.md`
 
 ### 原型判定证据（PASS，2026-10-07）

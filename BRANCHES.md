@@ -31,8 +31,8 @@
     "url": "https://github.com/medicagooo/LinkBin",
     "visibility": "PUBLIC",
     "default_branch": "main",
-    "last_verified_main": "3880cd5f8aa4fd5f55d53149bd66de651335a505",
-    "verified_at": "2026-10-07T03:57:00+08:00"
+    "last_verified_main": "e5493a499289d76a275c581e081cf91bc10d270e",
+    "verified_at": "2026-10-07T04:12:00+08:00"
   },
   "read": [],
   "changes": [
@@ -49,7 +49,21 @@
       "rules": "R2 bucket_name is pinned in wrangler.jsonc; database_name is pinned but database_id is deliberately absent, so the repository carries no account-specific resource ID. SSH_MASTER_KEY is write-once: replacing it makes every stored credential undecryptable.",
       "side_effects": "The UI and the /probe routes have NO authentication (D35). Anyone reaching the Worker can manage hosts and credentials; the /probe routes reach a stored host. Accepted by the user as a private-tool risk.",
       "status": "deployed; feature incomplete (store-verified collection and download are not built)"
+    },
+    {
+      "id": "C-002",
+      "requirement_date": "2026-10-07",
+      "implementation_date": "2026-10-07",
+      "deployment_date": "2026-10-07",
+      "domain": "security / deployed data",
+      "request": "vps-file-hub-e023",
+      "evidence": ["vps-file-hub-e025", ".scratch/vps-file-hub/STATE.md"],
+      "before": "The live deployment stored one enabled host with a real root password for a remote machine, plus a collection rule and three objects in R2. Because the UI and the /probe routes have no authentication, and the probe falls back to the first stored host with a credential, any internet user could have called GET /probe/read?path=<anything> to read arbitrary files from that machine as root and write them into R2. The exposure was current, not theoretical.",
+      "after": "No host and no credential is stored in the deployment: hosts and source_rules are empty and the three probe objects are deleted. The unauthenticated probe path no longer has a target.",
+      "rules": "The /probe* routes are still unauthenticated. They are only harmless while no host row exists, so adding a host re-creates the exposure until D35 (authentication) is implemented.",
+      "side_effects": "The encrypted password was destroyed with its row and is unrecoverable. D30 already recommended rotating that host's root password because it had entered the session record.",
+      "status": "done; underlying D35 authentication gap remains open"
     }
   ],
-  "notes": "C-001 is the first business-relevant entry: it is a deployment of an incomplete feature, not a finished capability. Collection, download and consumer-facing download are still unbuilt. See .scratch/vps-file-hub/STATE.md for the current phase."
+  "notes": "C-001 and C-002 concern a deployment of an incomplete feature, not a finished capability. Collection, download and the consumer-facing surface are still unbuilt. C-002 is a security cleanup of state created during the probe, not a product behaviour. See .scratch/vps-file-hub/STATE.md for the current phase."
 }
