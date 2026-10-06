@@ -1,5 +1,24 @@
 # --- Local / scratch ---
-.scratch/*/tmp/
+# .scratch/ is the LOCAL MARKDOWN ISSUE TRACKER (.scratch/<feature>/spec.md, issues/, STATE.md)
+# and those files MUST be committed — see docs/agents/issue-tracker.md. Everything else in there is
+# agent scratch space and must never be committed.
+#
+# This allowlist-then-deny shape exists because of a real incident (registry event e013): a broad
+# `git add -A` twice swept throwaway helper scripts into public main. Keep the tracker tracked; deny
+# the rest of the tree; then re-allow the tracker paths explicitly.
+.scratch/*
+!.scratch/*/
+.scratch/*/*
+!.scratch/*/spec.md
+!.scratch/*/STATE.md
+!.scratch/*/map.md
+!.scratch/*/issues/
+.scratch/*/issues/*
+!.scratch/*/issues/*.md
+
+# Deny agent scratch by shape, anywhere in the repo.
+tmp-*
+*.tmp
 *.local
 
 # --- Secrets: never commit Cloudflare credentials or per-host config ---
