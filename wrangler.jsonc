@@ -1,0 +1,33 @@
+{
+  // LinkBin — Workers configuration.
+  //
+  // Deployment is done by Cloudflare Workers Builds from the connected GitHub repository
+  // (Cloudflare dashboard > Workers & Pages > the Worker > Settings > Build). The deploy command
+  // is the default `npx wrangler deploy` run with this repository as the root directory.
+  //
+  // SECURITY: this repository is PUBLIC. Never put credentials, hostnames, IP addresses, or
+  // internal paths in this file. PROBE_HOST/PROBE_USER are deliberately left as placeholders and
+  // are set as encrypted dashboard variables instead; PROBE_PASSWORD is a secret and must be set
+  // in the dashboard (Settings > Variables and Secrets) or, for local development only, in
+  // .dev.vars (git-ignored).
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "linkbin-probe",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-04",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    // Invocation logs carry CPU time and wall time, which is the measurement this experiment needs.
+    "enabled": true
+  },
+  "r2_buckets": [
+    {
+      "binding": "PROBE_BUCKET",
+      "bucket_name": "linkbin-probe"
+    }
+  ],
+  "vars": {
+    "PROBE_HOST": "REPLACE_ME_dashboard_variable",
+    "PROBE_PORT": "22",
+    "PROBE_USER": "REPLACE_ME_dashboard_variable"
+  }
+}
