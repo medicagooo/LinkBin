@@ -49,9 +49,36 @@ and correct `STATE.md`.
   "unverified". Cited platform facts live in `docs/research/`.
 - **No transactions.** D1 is SQLite-based and the project must not assume multi-statement atomicity.
   Use object-level atomicity, idempotent writes, and compensating actions.
-- **Backward compatibility.** The VPS-side agents are deployed on machines this repo does not
-  control. Once an ingest API ships, changes must stay backward compatible for older agents, and
-  both old and new integration paths must be verified.
+- **Deployment is not VPS-side.** Nothing is installed on the collected hosts; the Worker reaches
+  them over SSH itself (decision D14, verified against a real host on 2026-10-07). Do not reintroduce
+  a "VPS-side agent" design: it was explicitly rejected. The old note about keeping an ingest API
+  backward compatible for deployed agents therefore no longer applies — there are no deployed agents.
+- **The Worker is already live.** `linkbin` is deployed with a provisioned D1 database and an R2
+  bucket. `wrangler deploy` from this repository works and has been used; Workers Builds from the
+  connected GitHub repository is the intended long-term path but is a dashboard step only a human can
+  perform. See `README.md` for both. Never commit account-specific resource ids: `wrangler.jsonc`
+  pins `bucket_name` and `database_name` and deliberately omits `database_id` (D38).
+- **The deployed Worker has no authentication** (D35). Anyone who can reach it can manage hosts and
+  their stored credentials. Worse, `/probe*` are unauthenticated remote-command and arbitrary-file-read
+  endpoints that act on the first stored host with a credential, so **adding any host re-creates a
+  real exposure** (D41). Do not set `PROBE_*` variables. Treat fixing the auth gap as a prerequisite
+  for anything beyond private use.
+- **Scale limits are fixed.** At most **50 hosts**, **100 MB** per file, and **10 GB total in R2**.
+  The 10 GB figure is a capacity budget, so the system must measure and bound its own total bytes.
+- **Single secret.** `SSH_MASTER_KEY` is the only deployment secret (D32); hosts and their credentials
+  are runtime data encrypted into D1. It is write-once: replacing it makes every stored credential
+  undecryptable. Adding a second deployment secret (for example an R2 API token for presigning) breaks
+  this architecture on purpose — do not do it without reopening the decision.
+
+## Concurrent sessions
+
+More than one agent session may work in this repository at the same time, and that has already caused
+a real incident: two sessions drew the same branch-registry event ids from their own counters, and the
+de-duplication pass deleted two genuine records. Follow `.branch-records/FORMAT.md`: take the next id
+**from the file**, treat a duplicate id as a hard error, never resolve a collision by preferring one
+writer, and verify unique-id count after every write. The same applies to decision ids (`D<n>`) in
+`STATE.md`. Uncommitted changes you did not make are another session's work — preserve them and stage
+explicitly rather than using `git add -A`.
 
 ## Process notes
 
