@@ -68,6 +68,10 @@
 - **D25 6 连接上限的影响被高估，但有一处文档冲突**。官方措辞是"最多 6 个连接**同时等待响应头**"，且"**响应头到达后不再计入**"——SSH 服务端会立即发 banner，故等待窗口很短，**实际不太会咬人**。但 `tcp-sockets` 页另有"每个打开的 TCP socket 都计入可同时打开的最大连接数"的说法，两页**措辞冲突**，对**已建立的长会话**是否计数**标记为未核实**。
 - **D26 会话生命周期需要 Durable Object**。在 DO 内创建并保持打开的 TCP socket 会让 DO 常驻内存并计费，**每连接最多 15 分钟**；15 分钟后 socket 不再保活（socket 本身继续工作）。所有严肃实现都把 SSH 会话放在 DO 里并用 alarm 重连。**这引入一个第 3 步必须处理的接缝，且与 D1 无事务约束叠加。**
 - **D27 Cloudflare 官方无任何 SSH 客户端先例（取证结论）**。Workers 文档索引 `llms.txt`（541 行）对 `ssh`/`sftp` **零命中**；`cloudflare-docs`、`workers-sdk`、`workerd` 三个仓库检索均无"Worker 作为 SSH 客户端"的页面或示例；Cloudflare 博客无相关文章。唯一提及是 TCP sockets 页那句"包括 SSH 在内的应用层协议需要底层 TCP socket API"。**→ 本项目的 SSH 路径完全建立在第三方实现之上，无官方背书，需自担维护风险。**
+- **D28 部署方式 = Cloudflare Workers Builds（GitHub 集成）**。用户要求"部署项目要先 push main，然后 worker 通过 github 来部署"。已核实事实：Workers Builds **必须先在 Cloudflare 仪表盘把仓库连上**（`Workers & Pages` → Worker → `Settings` → `Build`），这一步 AI 在仪表盘之外**无法完成，只有用户能做**（已核查：Cloudflare 未提供连接仓库的 CLI/API 路径；Terraform provider 的 `builds` 支持仍是未合并 PR）。连上后可配：**production branch** 触发 `deploy` 命令（默认 `npx wrangler deploy`），**非 production 分支**触发 **preview build**（`npx wrangler preview`，给出 Preview URL）。→ **纠正一个关键误解：push 到 main 本身不触发部署，"连仓库"才是开关。** 另：Workers Builds **不读** `wrangler.jsonc` 里的 Custom Builds 配置。**已因此把 Worker 移到仓库根**（`src/index.ts`、`wrangler.jsonc`、`package.json` 在根；`prototype/ssh-probe/` 只留文档），使 Root directory 可留空。
+- **D29 仓库公开 ⇒ 主机清单不外泄**。`wrangler.jsonc` 中 `PROBE_HOST`/`PROBE_USER` 留**占位符**，真实值走仪表盘的**加密变量**；`PROBE_PASSWORD` 为 secret。本地开发用 `.dev.vars`（已 gitignore）。**已扫描确认密码与 VPS IP 均不在跟踪树内。**
+- **D30 测试目标与凭据卫生**。测试 VPS 由用户提供（`root@77.93.157.129`，密码经对话给出）。**该密码已进入会话记录，而仓库为公开——实验结束后建议轮换该机 root 密码。** 实验对目标机**只读**。
+
 ## 未决问题（阻塞项）
 
 **开放问题必须在第 1 步 `grill-with-docs` 中全部关闭；有任何问题悬着就不得进 `to-spec`（§2.2 判据）。**
