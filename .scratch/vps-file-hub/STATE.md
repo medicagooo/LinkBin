@@ -33,24 +33,41 @@
 - [x] **远端建立并推送** → `origin` = `git@github.com:medicagooo/LinkBin.git`（**PUBLIC**，默认分支已为 `main`）。`origin/main` = `cf8c415`，与本地一致、无分歧，普通 fast-forward 推送、无需强制。依据：`git ls-remote origin`、`gh repo view`、`gh api .../git/trees/main?recursive=1`（远端树 14 个 blob 全部就位）。
 - [x] **工具链核实** → 36 个 skill 目录（mattpocock 27 + 腾讯 RTC 9）均含 `SKILL.md`；`git` 2.56 / `gh` 2.102（账号 `medicagooo`，SSH 协议，含 `repo` scope）在 PATH；**Node/pnpm/Python 不在 PATH**（须用 DSH 自带运行时）；无 Docker。
 - [x] **网络环境核实** → `web_fetch` 在本机**不可用**：公网域名（含 `example.com`、`developers.cloudflare.com`）解析到非公网 TUN 地址 `198.18.0.203`，请求在发出前即被拒绝。**但这不是断网**——已验证可用替代路径：用 `Invoke-WebRequest` 抓文档页的 **`.md` 变体**（`<path>/index.md`）可拿到干净 Markdown 与 `dateModified`。`web_search` 亦可用但只返回来源与摘要。故平台限值必须显式标注"未核实"。**更正**：此前记为本机"完全无法访问网络"不准确，现已修正。
-- [x] **架构因果核实** → Cloudflare Workers 无长驻进程、不能主动建 SSH/SFTP 长连接，故"worker 拉取 vps"在实现上必须变为 **VPS 侧 agent 主动推送**（协议层必然，非文档依赖）。
+- [x] **架构因果核实** → Cloudflare Workers 无长驻进程、不能主动建 SSH/SFTP 长连接，故"worker 拉取 vps"在实现上必须变为 **VPS 侧 agent 主动推送**（协议层必然，非文档依赖）。**⚠️ 此条结论已被 D14 修正**：用户选择 Worker 直连 SSH，采集方向回到"Worker 主动拉取"；协议层事实不变（无官方 SSH 客户端），风险改由 `prototype` 前置承担。
+- [x] **第 1 步 grill（第 1–2 轮，未完）** → `GLOSSARY.md`（已建，含"非关系数据库"术语退役）、`docs/adr/0001-d1-for-metadata-r2-for-bytes.md`、`docs/adr/0002-chunked-ingest-multipart-state-in-d1.md`；锁定 D14–D20。
+- [x] **工具链可运行性（子 agent 实证）** → Node v24.21.0 / pnpm 11.7.0 可用；**npm 不存在**；wrangler **4.147.0 实测运行**；本地 D1+R2 仿真完整可用（含 R2 分片与范围读）；`@cloudflare/vitest-plugin` 提供全离线 TDD。→ D19、D20。
+- [ ] **分叉 A · prototype（下一步）** → 验证 Worker 能否真的建起 SSH 连接、列目录、读文件。**这是进入第 3 步的前置。**
+- [ ] 第 3 步 to-spec → `.scratch/vps-file-hub/spec.md`
 
 ## 已锁定决策（不可回退 / 改动需重开）
 
 - **D1 技术栈**：后端跑在 **Cloudflare Workers**；**D1** 存元数据；**R2** 存文件本体。理由：用户 2026-10-07 明确指定。影响：全部票。
 - **D2 术语更正（与原始想法冲突，已确认）**：原始想法说"非关系数据库"，但 **D1 基于 SQLite，是关系型**。用户知悉后仍选定 D1。→ **此后所有产物禁止再用"非关系数据库"描述本项目存储**，须表述为"元数据存 D1（SQLite），文件本体存 R2 对象存储"。影响：GLOSSARY、spec、全部票。*（§2.2 要求显式指出冲突，此处已指出并记录；正式 ADR 待第 1 步落盘。）*
-- **D3 数据流方向**：**VPS 侧 agent 主动推送 → Worker ingest API → 写 R2 → 写 D1 元数据 → 消费端凭元数据关联下载**。Worker 侧的定时任务（Cron）只做触发对账/续传，不承担"主动拉取"。
+- **D3 ⚠️ 已被 D14 取代（2026-10-07，第二轮拷问）**：原决策为"VPS 侧 agent 主动推送 → Worker ingest API"。用户明确否决："本项目不安装到 vps 侧"。**保留此条仅为记录沿革，任何后续产物不得再据此设计。** 取代者见 D14。
 - **D4 同步语义**：**定时增量同步 + 内容哈希去重，只推新增/变更文件**。理由：省带宽、天然幂等、可重跑。（用户选定）
 - **D5 无事务约束（已被研究证实并细化）**：D1 官方文档措辞为 **"D1 operates in auto-commit"**；唯一有文档保证的原子单元是单次 `db.batch()`（"Batched statements are SQL transactions… aborts or rolls back the entire sequence"）。**`BEGIN`/`COMMIT`/`ROLLBACK`/`SAVEPOINT` 在 D1 文档中零命中，`D1Database` 也不暴露事务 API**。故：多步摄取状态迁移（created → parts uploaded → completed → verified）必须是**幂等 + 条件写 + 可续跑 + 补偿清理**，不得假设原子性。依据：[docs/research/cloudflare-platform-limits.md](docs/research/cloudflare-platform-limits.md) §7。
+- **D6 授权边界**：可写代码 / 可本地提交 / **可推 PR 到远端**；**不可部署 VPS**。AI 不得自行认定已获部署授权。
+- **D7 流程纪律**：S1 链路，第 1–3 步不断上下文；每步结束更新本文件。
 - **D8 摄取必须分片，且分片状态必须在 Worker 之外**：Workers 入站请求体上限由**zone 套餐**决定（Free/Pro **100 MB**、Business 200 MB、Enterprise 最高 5 GB），而 Worker 每 isolate 只有 **128 MB 内存**——"边缘收下了 100 MB" ≠ "能缓冲 100 MB"。Cloudflare 明确写着 multipart 的 `uploadId` 与已传分片状态 **"needs to be kept track of somewhere outside of the Worker"**。→ **分片状态入 D1 是第一天就要定的 schema 决策，不是后续优化**。参数：分片 **≥5 MiB**（末片除外）、≤10,000 片、单片 ≤5 GiB、对象 ≤4.995 TiB。依据：研究 §1、§4、§5、§11.1–11.2。
 - **D9 下载走流式返回 R2 对象，不经过 Worker 内存**：把 `R2ObjectBody.body`（`ReadableStream`）直接作为 `Response` body 是官方文档模式；**响应体无强制大小上限**，HTTP 触发的 Worker 在客户端保持连接期间**无墙钟上限**，且 **R2 出网免费**。范围读（`{offset,length}` / `{suffix}`）支撑断点续传。依据：研究 §5、§11.5。
 - **D10 并发预算是硬约束**：**每次调用最多 6 个同时在途连接**，该上限由 `fetch()`、`connect()`、R2 读写、KV、Queues、Cache、出站 WebSocket **共享**（D1 连接同样计入）。→ 扇出与批处理必须按 6 设计，不能按"想开多少开多少"。依据：研究 §11 末尾。
 - **D11 预签名 URL 的三个硬边界**：有效期上限 **7 天**、**不能用于自定义域名**（仅 `<ACCOUNT_ID>.r2.cloudflarestorage.com`）、是**不可撤销的 bearer token**（无 IP 绑定、无单次语义）。若消费端要自定义域名下载，官方替代路径是公开 bucket + WAF/Access，且 `r2.dev` 被官方明确降级为**非生产**。→ 消费端下载方案在 Q4 中必须在这两条路里选。依据：研究 §9、§11.6–11.7。
 - **D12 读己之写必须显式换取一致性**：D1 副本 "may be arbitrarily out of date"，只有在 `withSession()` 内才有顺序一致性，bookmark 需跨请求传递（官方示例用 `x-d1-bookmark` 头）。→ 消费端读取刚写入的元数据时必须用 `withSession("first-primary")` 或传 bookmark。依据：研究 §7、§11.10。
 - **D13 调度是分钟级、UTC-only、弱投递**：五字段 UTC cron，最小粒度 1 分钟；**Free 每账号仅 5 个 Cron Trigger**（Paid 250）；配置变更最多 15 分钟生效；单次 cron 调用墙钟上限 15 分钟、Free CPU 10 ms。→ **触发式对账必须可跨调用续跑，且不得假设"某一分钟不会被跳过"**。依据：研究 §3、§11.8。
-- **D6 授权边界**：可写代码 / 可本地提交 / **可推 PR 到远端**；**不可部署 VPS**。AI 不得自行认定已获部署授权。
-- **D7 流程纪律**：S1 链路，第 1–3 步不断上下文；每步结束更新本文件。
-
+- **D14 采集通道 = Worker 直连 SSH（用户 2026-10-07 选定，含原型前置）**：不向 VPS 安装任何组件，由 Worker 通过 `cloudflare:sockets` 的原始 TCP 发起 SSH 连接去拉取文件。**已被明确告知的风险**：Workers 无 shell / 无子进程 / 无长驻进程；官方只有 TCP+TLS 传输层原语，**没有任何 SSH/SFTP 客户端实现或示例**；该路径**无法在本机离线验证**（不同于 D1/R2 可完整本地仿真）。用户知情后仍选定，并同意**先插入 `prototype` 叠加项验证**（§2.3）。**在原型给出可运行答案之前，不得进入第 3 步 `to-spec`。** 影响：全部票；另需确认 D15。
+- **D15 密码语义（第一步）**：文件在 R2 中为明文，密码**仅在下载时校验**，作为独立于下载授权的一道访问控制。**真正加密存储（无密码者即使拿到 R2 也解不开）明确列为后续独立票**，因密钥管理做错的危害大于不做。
+- **D16 网页前端**：与 Worker **同源托管**（Cloudflare 静态资源 + API），范围限死为——配置 Host 与 Source Rule、手动触发采集、查看采集回执与错误、浏览与搜索元数据、取下载链接、测试下载。**明确排除**用户名/权限分级/审计日志。
+- **D17 分片阈值**：单文件 **>25 MB** 走 R2 分片上传（≥5 MiB/片），**不压缩**。理由：100 MB 是 Free/Pro 的请求体上限，25 MB 留 4 倍余量避开 413；压缩会破坏逐字节校验与"消费端直接下载"。
+- **D18 初始化与认证**：项目需支持显式初始化命令以创建 R2/D1（用户选定 D1 **Paid** 套餐）。**wrangler 首次认证由用户本人完成**（浏览器登入，AI 无法代劳）。建 bucket/database 属云资源变更，**执行前必须单独确认目标与影响**。
+- **D19 本机工具链已实测可用（子 agent 实证，非推断）**：打包 Node **v24.21.0**、pnpm **11.7.0**；**npm 不存在**（node bin 目录只有 `node.exe`，`npm-cli.js` 缺失，故 `npx` 不可用，须用 `pnpm dlx`/`pnpm exec`）；**wrangler 4.147.0 已实际运行成功**。**关键坑**：直接 `pnpm dlx wrangler` 会以 `'node' is not recognized` 失败——必须先 `$env:PATH = "<node bin 目录>;$env:PATH"`（仅对子进程生效，不改系统 PATH）。**本地 D1+R2 可完整仿真**：`wrangler dev` 默认本地绑定，D1 CRUD、JSON1、FTS5、R2 范围读与**完整分片上传**均本地通过，**零真实 Cloudflare 资源**。测试用 `@cloudflare/vitest-plugin`（**已由 `@cloudflare/vitest-pool-workers` 更名而来**，API 不变），需 Vitest ≥4.1，全本地离线。
+- **D20 本地 D1 与生产的差异（实测发现，必须写进代码约束）**：本地 D1 是**函数白名单化**的 SQLite——`sqlite_version()`、`PRAGMA journal_mode`、`BEGIN` 均被拒（`SQLITE_AUTH` / `not authorized`）。**代码不得依赖 `sqlite_version()`、`PRAGMA` 或任何 `BEGIN`/`SAVEPOINT`。** 另实证：失败时 `db.batch()` **确实整体回滚**（2 条语句失败后行数为 1）——这是 D5 在真实运行时的确认，而非文档推断。
+- **D21 SSH 实现路径：不得使用 `ssh2`（子 agent 一手取证）**。`ssh2` 在 workerd 下**导入即失败**：它在模块初始化时无条件编译 poly1305 WASM，而 workerd 禁止运行时 WASM 编译 → `CompileError: WebAssembly.instantiate(): Wasm code generation disallowed by embedder`（[mscdex/ssh2#1494](https://github.com/mscdex/ssh2/issues/1494)，**仍 open**，2026-04-22，0 评论；报告者只能靠下游打补丁绕过）。且上游维护者已明确关门：[#1401](https://github.com/mscdex/ssh2/issues/1401) 原话 **"I'm not really interested in supporting a non-node socket API."**。社区在 [#1371](https://github.com/mscdex/ssh2/issues/1371) 的最终结论是 "i will try with container then"。**后果：任何以 `ssh2`/`ssh2-sftp-client`/`node-ssh` 为基础的方案一律否决。**
+- **D22 采用 Workers 原生纯 TS SSH 栈**。已知唯一"声明支持 Workers 且以可读源码自证"的库是 **`edgeport` 1.0.6**（MIT，2026-08-24，仅 2 个依赖 `@noble/ciphers`+`bcrypt-pbkdf`、无 Node 内建依赖；`src/core/socket.ts` 直接 import `cloudflare:sockets`；其测试经 `@cloudflare/vitest-pool-workers` **在 workerd 内**对真实 Dockerized OpenSSH/Dropbear 跑通密码认证、ed25519 公钥、强制 AES-GCM、SFTP-over-same-session）。另有 4 个独立应用级纯 `crypto.subtle` 实现可作参考（CloudSSH 385★、EdgeSSH 119★、CF-Workers-WebSSH 70★）。**成熟度风险已明确**：edgeport 仅 9 star、月下载约 2.8k、仓库约 3 个月新、单一维护者、**无任何生产使用证据**。故 D22 为**原型候选**而非已定终局——原型必须一并评估其可用性。
+- **D23 WASM 与密码学硬约束**。`WebAssembly.instantiate()` 在 Workers **只支持预编译模块**，运行时编译被禁 → **任何依赖运行时 WASM 的库都不可用**。WebCrypto **已有**主流 SSH 套件所需的全部原语：X25519 `deriveBits`、Ed25519/ECDSA/RSA-SHA2 验签、**AES-GCM / AES-CTR**、HMAC-SHA2。**缺 ChaCha20-Poly1305**（需由 `@noble/ciphers` 纯 JS 组装）。`node:crypto` 的流式 AEAD 序列（`createDecipheriv('aes-*-gcm')` → `update` → `setAuthTag` → `final`）在 workerd 下抛 `Error: No auth tag provided`，**故 AEAD 一律走 `crypto.subtle`，不得走 `node:crypto`**。
+- **D24 真实 CPU 预算风险（影响可行性）**。Workers CPU 上限：**Free 每次 HTTP 请求 10 ms**，**Paid 默认 30 s（可提至 5 min）**；内存 128 MB/isolate；"等待网络不计入 CPU"。**纯 JS ChaCha20-Poly1305 是最大 CPU 隐患**（edgeport 自己的 README 就此警告）。→ **必须协商 AES-GCM（WebCrypto 原生速度）**，并优先按已核实的目标测量握手 CPU。**含义：Free 套餐很可能连 SSH 握手都过不了——这是个需要用户确认的可行性前提。**
+- **D25 6 连接上限的影响被高估，但有一处文档冲突**。官方措辞是"最多 6 个连接**同时等待响应头**"，且"**响应头到达后不再计入**"——SSH 服务端会立即发 banner，故等待窗口很短，**实际不太会咬人**。但 `tcp-sockets` 页另有"每个打开的 TCP socket 都计入可同时打开的最大连接数"的说法，两页**措辞冲突**，对**已建立的长会话**是否计数**标记为未核实**。
+- **D26 会话生命周期需要 Durable Object**。在 DO 内创建并保持打开的 TCP socket 会让 DO 常驻内存并计费，**每连接最多 15 分钟**；15 分钟后 socket 不再保活（socket 本身继续工作）。所有严肃实现都把 SSH 会话放在 DO 里并用 alarm 重连。**这引入一个第 3 步必须处理的接缝，且与 D1 无事务约束叠加。**
+- **D27 Cloudflare 官方无任何 SSH 客户端先例（取证结论）**。Workers 文档索引 `llms.txt`（541 行）对 `ssh`/`sftp` **零命中**；`cloudflare-docs`、`workers-sdk`、`workerd` 三个仓库检索均无"Worker 作为 SSH 客户端"的页面或示例；Cloudflare 博客无相关文章。唯一提及是 TCP sockets 页那句"包括 SSH 在内的应用层协议需要底层 TCP socket API"。**→ 本项目的 SSH 路径完全建立在第三方实现之上，无官方背书，需自担维护风险。**
 ## 未决问题（阻塞项）
 
 **开放问题必须在第 1 步 `grill-with-docs` 中全部关闭；有任何问题悬着就不得进 `to-spec`（§2.2 判据）。**
