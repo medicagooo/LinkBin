@@ -26,7 +26,7 @@
 
 **2026-10-07 更新（本次会话）**：Worker `linkbin` 已用 CLI 部署上线，D1/R2 已自动供给，`SSH_MASTER_KEY` 已设置，schema 已应用。**SSH 通道的真机验证是现在唯一的阻塞项**——它无法在本机验证（`wrangler dev` 拒绝连内网地址），所以"部署"就是这道验证的前置，而不是跳过流程。
 
-按 §2.3，**在 ssh-probe 给出可运行答案之前，仍不得进入第 3 步 `to-spec`。**
+按 §2.3，**原型闸门已于 2026-10-07 解除（PASS）**，可以进入第 3 步 `to-spec`。仍待关闭的是"未决问题"里的 Q1–Q4、Q6、Q7 等设计问题。
 
 ## 已完成（产物 + 证据）
 
@@ -38,9 +38,37 @@
 - [x] **架构因果核实** → Cloudflare Workers 无长驻进程、不能主动建 SSH/SFTP 长连接，故"worker 拉取 vps"在实现上必须变为 **VPS 侧 agent 主动推送**（协议层必然，非文档依赖）。**⚠️ 此条结论已被 D14 修正**：用户选择 Worker 直连 SSH，采集方向回到"Worker 主动拉取"；协议层事实不变（无官方 SSH 客户端），风险改由 `prototype` 前置承担。
 - [x] **第 1 步 grill（第 1–2 轮，未完）** → `GLOSSARY.md`（已建，含"非关系数据库"术语退役）、`docs/adr/0001-d1-for-metadata-r2-for-bytes.md`、`docs/adr/0002-chunked-ingest-multipart-state-in-d1.md`；锁定 D14–D20。
 - [x] **工具链可运行性（子 agent 实证）** → Node v24.21.0 / pnpm 11.7.0 可用；**npm 不存在**；wrangler **4.147.0 实测运行**；本地 D1+R2 仿真完整可用（含 R2 分片与范围读）；`@cloudflare/vitest-plugin` 提供全离线 TDD。→ D19、D20。
-- [x] **分叉 A · prototype 已建成并已部署到真实 Cloudflare（2026-10-07）** → probe 路由 `GET /probe/exec`、`GET /probe/list`、`GET /probe/read` 与 `POST /api/hosts/test` 已随主 Worker 上线。**仍未取得真机结论**：需要一个真实主机凭据才能跑。**这仍是进入第 3 步的前置。**
-- [ ] **分叉 A · 真机验证（唯一的下一步）** → 在 UI 添加主机 → 跑 probe → 从 `wrangler tail` 或 Workers Logs 读实测 CPU → 把 PASS/FAIL 回写本文件。
+- [x] **分叉 A · 真机验证 —— ✅ PASS（2026-10-07）** → 在真实主机上跑通完整链路，**证据见下**。**原型闸门已解除，可以进入第 3 步。**
 - [ ] 第 3 步 to-spec → `.scratch/vps-file-hub/spec.md`
+
+### 原型判定证据（PASS，2026-10-07）
+
+**判定标准（事先立下，未事后放宽）**：`/list` 返回真实条目 **且** SHA-256 与主机侧独立算出的值一致 **且** CPU 时间远低于 Paid 默认 30 秒。→ **三条全部满足。**
+
+实测（部署于 `https://linkbin.cyc-xiaochen.workers.dev`，目标为真实远端主机）：
+
+| 阶段 | 实测耗时 |
+|---|---|
+| ssh connect + auth | **288–294 ms** |
+| sftp list `/etc` | 202 ms（83 个条目） |
+| sftp readFile | 214 ms |
+| sha256（WebCrypto） | **< 1 ms** |
+| r2 put | 217 ms |
+| **单文件端到端墙钟** | **约 1.4 s** |
+
+逐字节一致性验证（主机侧用 `sha256sum` **独立**计算，与 Worker 读到的字节比对）：
+
+| 路径 | 字节数 | SHA-256 | 一致 |
+|---|---|---|---|
+| `/etc/hostname` | 24 | `716ef502a4f9c936c9bb4c40ca4c22702e1e73395cd3efa3ae4f79c20ae118f8` | ✅ |
+| `/etc/alpine-release` | 7 | `3965b079ccdfb959e8230ad246ad1342c9ad152d1938c07a017c3ff93c60f3e5` | ✅ |
+| `/etc/passwd` | 1226 | `a3d2bef4b2fcda5c3e53341026f5e017f11075faa86808a68d8063bac4ddda6d` | ✅ |
+
+R2 侧核实：`linkbin-files` 中存在 `probe/etc/hostname`(24)、`probe/etc/alpine-release`(7)、`probe/etc/passwd`(1226)，**大小与读取字节数一一相符**。
+
+**因此 D24 记录的 CPU 风险不成立**：握手仅耗 0.29 秒，相对 Paid 套餐 30 秒上限有约 100 倍余量。D14 所选采集通道**可行**。
+
+**加密边界同时得到验证**：直接查询 D1 显示 `password_enc` 为 `v1.<12字节base64 IV>.<密文>`（60 字符），**库中无任何明文**。
 
 ## 已锁定决策（不可回退 / 改动需重开）
 
@@ -79,6 +107,8 @@
 - **D33 目录规则的"统一 + 分开"用数据模型表达，不用优先级标志**。`source_rules.host_id` 为 `NULL` = **全局规则**（对所有主机生效）；非 NULL = **该主机专属**。收集时两者**并集**，且**排除先于包含求值**——因此"全局收 `/var/log/*.log`"+"某机排除 `/var/log/noisy.log`"的行为符合直觉，**无需引入覆盖/优先级语义**。
 - **D34 无 CLI 的部署必须能自建表**。因部署走 Workers Builds（GitHub），发布物旁边**没有 CLI**，故 Worker 自带 `POST /api/admin/apply-schema`：把 `migrations/0001_init.sql` 作为 `Text` 模块导入（wrangler 默认把 `.sql` 映射为字符串），**用 `db.batch()` 分批应用**（D1 唯一有原子保证的单元），每条语句均为 `CREATE ... IF NOT EXISTS` 故**可重复执行**。**schema 因此只有一份真源**，CLI 路径与 Worker 路径共用同一文件。
 - **D35 当前 UI 无鉴权（已知限制，必须显式处理）**。任何能访问 Worker 的人都能管理主机与加密凭据。**上线前必须置于 Cloudflare Access 之下或加入 API token**；在补上之前只能当私人工具用。此限制已写入 [README.md](README.md)。
+- **D36 ✅ SSH 通道真机验证 PASS（2026-10-07）**。Worker 直连 SSH 的采集通道**已被真实主机证实可行**：握手 288–294 ms、SFTP 列目录 202 ms、读文件 214 ms、WebCrypto SHA-256 < 1 ms、R2 写入 217 ms，单文件端到端约 1.4 秒。三个文件（24/7/1226 字节）与主机侧 `sha256sum` **逐字节一致**。**D24 的 CPU 风险不成立**（约 100 倍余量）。证据表见本文件"原型判定证据"。
+- **D37 算法偏好必须是数组，且不钉死单一密码套件**。`AlgorithmPrefs.cipher` 是 **`string[]`**；传裸字符串能通过打包（**构建无类型检查**）却在 KEXINIT 构造时抛 `TypeError: names.join is not a function`——**这个错只有真机能暴露**。现取 `['aes256-gcm@openssh.com','aes128-gcm@openssh.com','aes256-ctr','aes192-ctr','aes128-ctr']`：**GCM 优先（WebCrypto 原生速度）、CTR 兜底**（兼容不支持 GCM 的主机）、**明确排除 chacha20-poly1305**（纯 JS，CPU 隐患）。同时**错误响应现在带堆栈**，因为构建不做类型检查时，依赖的形状错误只能在运行时暴露，堆栈把猜测变成行号。
 - **D36 部署已实际执行，且走的是 CLI 路径而非 D28 的 Workers Builds（2026-10-07，用户明示授权）**。执行：`wrangler r2 bucket create linkbin-files` → `wrangler deploy --secrets-file .env.deploy` → `POST /api/admin/apply-schema`。产出：Worker **`linkbin`**，版本 `1c7a2112-eaaa-42bd-8768-fcfeb935b657`，`https://linkbin.cyc-xiaochen.workers.dev`；D1 **`linkbin-db`**（自动供给）；R2 **`linkbin-files`**；`masterKeySet=true`、`r2Bound=true`、schema ready（12 条语句 / 4 张表）。**这不推翻 D28**——D28 仍是既定的发布路径，事后可在仪表盘把仓库连到这个已存在的 Worker 上。**两条实测与文档不符，必须记录**：① 官方 changelog 称 CLI 部署会把资源 ID 回写配置文件，**实测未回写**（`git diff` 只有我自己的编辑），故仓库保持无账号资源 ID，符合用户要求；② 因此 `database_id` 只能从 `wrangler d1 list` 取，且 `wrangler d1 execute|migrations --remote` 在本仓库不可用（本仓库不需要，走 Worker 内 apply-schema）。
 - **D37 用户对"部署"的授权已变更（2026-10-07）**。此前（D6/授权边界）为"可部署：否"。用户本次明确授权**部署本项目 Worker 到自己的 Cloudflare 账号**并已执行。**部署到任何 VPS 仍然明确不授权。** 另：用户知情并接受当前无鉴权 UI 的风险。
 - **D38 资源命名与"不写死 ID"的落地方式（用户指定）**。`r2_buckets` 写死 `bucket_name: "linkbin-files"`——名字即 bucket 的身份，写死它使后续部署绑定同一个 bucket 而非另建一个；`d1_databases` 写死 `database_name: "linkbin-db"` 但**故意不写 `database_id`**。依据：官方 changelog 原话 "resources will stay linked across future deploys even without adding the resource IDs to the config file"（[Automatic resource provisioning, 2025-10-24](https://developers.cloudflare.com/changelog/post/2025-10-24-automatic-resource-provisioning/)）。目的：公开仓库里不带账号相关资源 ID。

@@ -271,10 +271,15 @@ async function connectOptionsFor(env: Env, row: HostRow) {
 		username: row.username,
 		password,
 		privateKey,
-		// AES-GCM is asserted rather than preferred: it is WebCrypto-backed, whereas
-		// chacha20-poly1305 would be assembled in pure JS and is the likeliest way to blow the CPU
-		// budget. A refusal here is a finding, not something to hide behind a fallback.
-		algorithms: { cipher: 'aes256-gcm@openssh.com' } as const,
+		// `cipher` is a preference LIST, not a single value: Wrangler's bundler does no type checking,
+		// so passing a bare string compiles cleanly and then fails at KEXINIT construction with
+		// "names.join is not a function". That mistake was made once and found only against a real
+		// host, which is why the shape is spelled out here.
+		//
+		// AES-GCM first because it is WebCrypto-backed. aes-ctr is the fallback so a host without GCM
+		// still works; chacha20-poly1305 is deliberately absent because it would be assembled in pure
+		// JS and is the likeliest way to exhaust the CPU budget (see decision D24).
+		algorithms: { cipher: ['aes256-gcm@openssh.com', 'aes128-gcm@openssh.com', 'aes256-ctr', 'aes192-ctr', 'aes128-ctr'] },
 		timeoutMs: 20_000,
 	};
 }
@@ -525,8 +530,11 @@ export default {
 			const e = err as Error;
 			const status = e instanceof HttpError ? e.status : 500;
 			// Errors reach the operator, but never carry decrypted material: messages that could are
-			// built only from the host id and the field name.
-			return json({ ok: false, error: e.message, name: e.name, status }, status);
+			// built only from the host id and the field name. The stack is included because this
+			// Worker is deployed with no type checking in the build, so a shape mistake in a
+			// dependency call surfaces only here — and a stack turns that from guesswork into a line
+			// number. (This is exactly how a bare-string `algorithms.cipher` was found.)
+			return json({ ok: false, error: e.message, name: e.name, status, stack: e.stack }, status);
 		}
 	},
 } satisfies ExportedHandler<Env>;
@@ -560,7 +568,8 @@ async function handleProbe(path: string, url: URL, env: Env): Promise<Response> 
 			port: Number(env.PROBE_PORT || '22'),
 			username: env.PROBE_USER,
 			password: env.PROBE_PASSWORD,
-			algorithms: { cipher: 'aes256-gcm@openssh.com' },
+			// A list, not a string — see the note in connectOptionsFor.
+			algorithms: { cipher: ['aes256-gcm@openssh.com', 'aes128-gcm@openssh.com', 'aes256-ctr', 'aes192-ctr', 'aes128-ctr'] },
 			timeoutMs: 20_000,
 		} as ConnectOptions;
 		targetSource = 'environment variables';
@@ -582,6 +591,37 @@ async function handleProbe(path: string, url: URL, env: Env): Promise<Response> 
 				disk: await ssh.df('/').catch(() => null),
 			}));
 			return json({ ok: true, startedAt: nowIso(), targetSource, stages, result });
+		}
+
+		/**
+		 * Computes the file's hash ON THE HOST, so the value the Worker derived from the bytes it
+		 * read can be compared against something computed independently of the Worker.
+		 *
+		 * The command is built from a FIXED command name plus a single-quoted, escaped path — there
+		 * is no arbitrary command execution here, and the route stays read-only. Turning the probe
+		 * into a general shell would make it an RCE endpoint for anyone who can reach the Worker,
+		 * which the management UI already has no authentication for.
+		 */
+		if (path === '/probe/hash') {
+			const filePath = url.searchParams.get('path') ?? '/etc/hostname';
+			// A POSIX single-quoted string cannot contain a single quote, so escape by closing,
+			// inserting an escaped quote, and reopening: ' -> '\''
+			const quoted = `'${filePath.replace(/'/g, `'\\''`)}'`;
+			const result = await timed('host sha256sum', async () => {
+				// sha256sum is coreutils; busybox also provides it (this probe's Alpine target does).
+				const sha = await ssh.run(`sha256sum -- ${quoted}`);
+				const size = await ssh.run(`wc -c < ${quoted}`);
+				return { sha256: sha.split(/\s+/)[0], wcBytes: Number(size.trim()) };
+			});
+			return json({
+				ok: true,
+				startedAt: nowIso(),
+				targetSource,
+				stages,
+				path: filePath,
+				host: result,
+				note: 'Compare host.sha256 against read.sha256 from /probe/read for the same path.',
+			});
 		}
 
 		if (path === '/probe/list') {
