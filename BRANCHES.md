@@ -15,9 +15,15 @@
     }
   ],
   "active": ["vps-file-hub"],
-  "pending": [
-    "vps-file-hub-e009: push origin main (predeclared; awaiting execution)"
-  ],
+  "pending": [],
+  "remote": {
+    "origin": "git@github.com:medicagooo/LinkBin.git",
+    "url": "https://github.com/medicagooo/LinkBin",
+    "visibility": "PUBLIC",
+    "default_branch": "main",
+    "last_verified_main": "cf8c415833e7f94130fd546d0f2c00a4f6a3a25a",
+    "verified_at": "2026-10-07T03:00:00+08:00"
+  },
   "read": [],
   "changes": [],
   "notes": "No business change has been implemented yet. This ledger records process/infrastructure events only until the first shippable behaviour exists. See .scratch/vps-file-hub/STATE.md for current phase."
