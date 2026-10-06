@@ -40,9 +40,13 @@ and correct `STATE.md`.
 - **Toolchain.** Node, pnpm, and Python are **not on `PATH`** on this machine. Use the harness-bundled
   runtimes reported by `load_workspace_dependencies`, or install none and avoid them. `git` 2.56 and
   `gh` (account `medicagooo`, `repo` scope, SSH protocol) are on `PATH`. Docker is absent.
-- **Network limit.** `web_fetch` cannot resolve any public hostname on this machine (all non-public
-  IPs). `web_search` works but returns only sources and snippets. Therefore **never state a platform
-  limit from memory** — mark it "unverified, needs citation" and record it in the research note.
+- **Network.** The harness `web_fetch` tool **cannot be used** on this machine: public hostnames resolve
+  to a non-public TUN address (observed `198.18.0.203`), so it is rejected before any request is made.
+  This is *not* a lack of connectivity. **Proven workaround:** fetch the **`.md` variant** of a
+  documentation page with `Invoke-WebRequest` (e.g. `https://developers.cloudflare.com/d1/platform/limits/index.md`),
+  which returns clean Markdown plus a `dateModified`. `web_search` also works, but returns only
+  sources and snippets. Therefore **never state a platform limit from memory** — cite it, or label it
+  "unverified". Cited platform facts live in `docs/research/`.
 - **No transactions.** D1 is SQLite-based and the project must not assume multi-statement atomicity.
   Use object-level atomicity, idempotent writes, and compensating actions.
 - **Backward compatibility.** The VPS-side agents are deployed on machines this repo does not

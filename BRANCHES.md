@@ -15,16 +15,14 @@
     }
   ],
   "active": ["vps-file-hub"],
-  "pending": [
-    "vps-file-hub-e010: push origin main (predeclared; awaiting execution)"
-  ],
+  "pending": [],
   "remote": {
     "origin": "git@github.com:medicagooo/LinkBin.git",
     "url": "https://github.com/medicagooo/LinkBin",
     "visibility": "PUBLIC",
     "default_branch": "main",
-    "last_verified_main": "cf8c415833e7f94130fd546d0f2c00a4f6a3a25a",
-    "verified_at": "2026-10-07T03:00:00+08:00"
+    "last_verified_main": "0ae4c85145dd96b59554cc0dfa593c40bfd028a7",
+    "verified_at": "2026-10-07T03:07:00+08:00"
   },
   "read": [],
   "changes": [],

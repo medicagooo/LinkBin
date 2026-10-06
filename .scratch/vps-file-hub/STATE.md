@@ -32,7 +32,7 @@
 - [x] **仓库初始化** → `git init`（`main`），初始提交 `c9af21c` 含本续接卡与登记簿。依据：`git log --oneline`。
 - [x] **远端建立并推送** → `origin` = `git@github.com:medicagooo/LinkBin.git`（**PUBLIC**，默认分支已为 `main`）。`origin/main` = `cf8c415`，与本地一致、无分歧，普通 fast-forward 推送、无需强制。依据：`git ls-remote origin`、`gh repo view`、`gh api .../git/trees/main?recursive=1`（远端树 14 个 blob 全部就位）。
 - [x] **工具链核实** → 36 个 skill 目录（mattpocock 27 + 腾讯 RTC 9）均含 `SKILL.md`；`git` 2.56 / `gh` 2.102（账号 `medicagooo`，SSH 协议，含 `repo` scope）在 PATH；**Node/pnpm/Python 不在 PATH**（须用 DSH 自带运行时）；无 Docker。
-- [x] **网络环境核实** → `web_fetch` 在本机**完全不可用**（任意公网域名解析为非公网 IP）；`web_search` 可用但只返回来源与摘要。故平台限值必须显式标注"未核实"。
+- [x] **网络环境核实** → `web_fetch` 在本机**不可用**：公网域名（含 `example.com`、`developers.cloudflare.com`）解析到非公网 TUN 地址 `198.18.0.203`，请求在发出前即被拒绝。**但这不是断网**——已验证可用替代路径：用 `Invoke-WebRequest` 抓文档页的 **`.md` 变体**（`<path>/index.md`）可拿到干净 Markdown 与 `dateModified`。`web_search` 亦可用但只返回来源与摘要。故平台限值必须显式标注"未核实"。**更正**：此前记为本机"完全无法访问网络"不准确，现已修正。
 - [x] **架构因果核实** → Cloudflare Workers 无长驻进程、不能主动建 SSH/SFTP 长连接，故"worker 拉取 vps"在实现上必须变为 **VPS 侧 agent 主动推送**（协议层必然，非文档依赖）。
 
 ## 已锁定决策（不可回退 / 改动需重开）
@@ -41,7 +41,13 @@
 - **D2 术语更正（与原始想法冲突，已确认）**：原始想法说"非关系数据库"，但 **D1 基于 SQLite，是关系型**。用户知悉后仍选定 D1。→ **此后所有产物禁止再用"非关系数据库"描述本项目存储**，须表述为"元数据存 D1（SQLite），文件本体存 R2 对象存储"。影响：GLOSSARY、spec、全部票。*（§2.2 要求显式指出冲突，此处已指出并记录；正式 ADR 待第 1 步落盘。）*
 - **D3 数据流方向**：**VPS 侧 agent 主动推送 → Worker ingest API → 写 R2 → 写 D1 元数据 → 消费端凭元数据关联下载**。Worker 侧的定时任务（Cron）只做触发对账/续传，不承担"主动拉取"。
 - **D4 同步语义**：**定时增量同步 + 内容哈希去重，只推新增/变更文件**。理由：省带宽、天然幂等、可重跑。（用户选定）
-- **D5 无事务约束**：D1 不支持多语句原子提交。设计只用**对象级原子性 + 幂等写 + 补偿动作**，禁止任何"多步作为一个单元成功或失败"的假设。这是全局硬约束。
+- **D5 无事务约束（已被研究证实并细化）**：D1 官方文档措辞为 **"D1 operates in auto-commit"**；唯一有文档保证的原子单元是单次 `db.batch()`（"Batched statements are SQL transactions… aborts or rolls back the entire sequence"）。**`BEGIN`/`COMMIT`/`ROLLBACK`/`SAVEPOINT` 在 D1 文档中零命中，`D1Database` 也不暴露事务 API**。故：多步摄取状态迁移（created → parts uploaded → completed → verified）必须是**幂等 + 条件写 + 可续跑 + 补偿清理**，不得假设原子性。依据：[docs/research/cloudflare-platform-limits.md](docs/research/cloudflare-platform-limits.md) §7。
+- **D8 摄取必须分片，且分片状态必须在 Worker 之外**：Workers 入站请求体上限由**zone 套餐**决定（Free/Pro **100 MB**、Business 200 MB、Enterprise 最高 5 GB），而 Worker 每 isolate 只有 **128 MB 内存**——"边缘收下了 100 MB" ≠ "能缓冲 100 MB"。Cloudflare 明确写着 multipart 的 `uploadId` 与已传分片状态 **"needs to be kept track of somewhere outside of the Worker"**。→ **分片状态入 D1 是第一天就要定的 schema 决策，不是后续优化**。参数：分片 **≥5 MiB**（末片除外）、≤10,000 片、单片 ≤5 GiB、对象 ≤4.995 TiB。依据：研究 §1、§4、§5、§11.1–11.2。
+- **D9 下载走流式返回 R2 对象，不经过 Worker 内存**：把 `R2ObjectBody.body`（`ReadableStream`）直接作为 `Response` body 是官方文档模式；**响应体无强制大小上限**，HTTP 触发的 Worker 在客户端保持连接期间**无墙钟上限**，且 **R2 出网免费**。范围读（`{offset,length}` / `{suffix}`）支撑断点续传。依据：研究 §5、§11.5。
+- **D10 并发预算是硬约束**：**每次调用最多 6 个同时在途连接**，该上限由 `fetch()`、`connect()`、R2 读写、KV、Queues、Cache、出站 WebSocket **共享**（D1 连接同样计入）。→ 扇出与批处理必须按 6 设计，不能按"想开多少开多少"。依据：研究 §11 末尾。
+- **D11 预签名 URL 的三个硬边界**：有效期上限 **7 天**、**不能用于自定义域名**（仅 `<ACCOUNT_ID>.r2.cloudflarestorage.com`）、是**不可撤销的 bearer token**（无 IP 绑定、无单次语义）。若消费端要自定义域名下载，官方替代路径是公开 bucket + WAF/Access，且 `r2.dev` 被官方明确降级为**非生产**。→ 消费端下载方案在 Q4 中必须在这两条路里选。依据：研究 §9、§11.6–11.7。
+- **D12 读己之写必须显式换取一致性**：D1 副本 "may be arbitrarily out of date"，只有在 `withSession()` 内才有顺序一致性，bookmark 需跨请求传递（官方示例用 `x-d1-bookmark` 头）。→ 消费端读取刚写入的元数据时必须用 `withSession("first-primary")` 或传 bookmark。依据：研究 §7、§11.10。
+- **D13 调度是分钟级、UTC-only、弱投递**：五字段 UTC cron，最小粒度 1 分钟；**Free 每账号仅 5 个 Cron Trigger**（Paid 250）；配置变更最多 15 分钟生效；单次 cron 调用墙钟上限 15 分钟、Free CPU 10 ms。→ **触发式对账必须可跨调用续跑，且不得假设"某一分钟不会被跳过"**。依据：研究 §3、§11.8。
 - **D6 授权边界**：可写代码 / 可本地提交 / **可推 PR 到远端**；**不可部署 VPS**。AI 不得自行认定已获部署授权。
 - **D7 流程纪律**：S1 链路，第 1–3 步不断上下文；每步结束更新本文件。
 
@@ -50,12 +56,15 @@
 **开放问题必须在第 1 步 `grill-with-docs` 中全部关闭；有任何问题悬着就不得进 `to-spec`（§2.2 判据）。**
 
 - **Q1（阻塞 spec）** VPS 侧 agent 的形态：语言（Python / Go / 纯 shell + curl）、安装方式、是否需要常驻、如何配置"指定位置"。→ 判定维度：纸面可定，但影响票切分。
-- **Q2（阻塞 spec）** 摄取传输路径：文件经 Worker 中转上传 vs agent 直传 R2。**受 Workers 请求体大小上限约束，该上限尚未核实**（Q5）。
-- **Q3（阻塞 spec）** 元数据模型：需要哪些字段（VPS 标识 / 路径 / 大小 / 内容哈希 / mtime / 版本代际 / 软删）。
-- **Q4（阻塞 spec）** 消费端形态：纯 HTTP 下载（预签名 URL 或 Worker 流式返回）是否足够，还是要 Web 浏览/搜索界面。
-- **Q5（阻塞 Q2）** **Cloudflare 平台硬限值未核实**：Workers 请求体上限、R2 分片上传的部件尺寸上下限、D1 库大小/行大小上限、Cron 触发上限与最小粒度。→ 已派出后台 research 子 agent 取一手来源；**本机 `web_fetch` 不可用，可能只能拿到"未核实"结论**。
-- **Q6** Cloudflare 账号侧凭据与资源就绪情况：R2 bucket、D1 database 是否已创建；`wrangler` 认证方式。→ 影响第 0 步之后的 `wizard` 叠加项。
-- **Q7** 上游 VPS 清单与要采集的具体路径（数量、总量级）。→ 由用户提供。
+- **Q2（阻塞 spec · 已被研究收窄）** 摄取传输路径。**事实已定**（D8）：大文件**不能**经 Worker 一次性上传，必须分片，且分片状态存 D1。**仍需你定**的是 agent 侧复杂度取舍：
+  - **(a) agent 分片后逐片 PUT 到 Worker ingest API，Worker 转写 R2 multipart**（Worker 全程在场，鉴权与元数据写入简单；但每片都过一次 Worker，受 6 连接与 100 MB 上限约束）
+  - **(b) agent 用预签名 URL / 临时凭据直传 R2，Worker 只发凭据与收元数据**（绕开 Worker 体量上限，吞吐最好；但预签名有 D11 的硬边界，临时凭据需在可信环境本地签 JWT）
+  - **(c) 小文件走 (a)、超阈值走 (b) 的混合**
+- **Q3（阻塞 spec）** 元数据模型：需要哪些字段（VPS 标识 / 路径 / 大小 / 内容哈希 / mtime / 版本代际 / 软删）。**已被研究加上硬约束**：行 ≤2 MB、≤100 列、SQL 语句 ≤100 KB、每调用 ≤1000 次查询，且**必须含分片会话表**（D8）。
+- **Q4（阻塞 spec）** 消费端形态与下载授权路径。**已被研究收窄为二选一**（D11）：预签名 URL（7 天上限、不支持自定义域名）vs 公开 bucket + WAF/Access。另需定：纯 HTTP 下载是否够，还是要 Web 浏览/搜索界面。
+- **Q5 ✅ 已解决** 平台硬限值已核实并落盘：`docs/research/cloudflare-platform-limits.md`（943 行、31 个唯一官方 URL、11 处显式"unverified"标注、11 节 Design implications）。**遗留未核实项 10 条**（真机 SFTP 可行性、cron 投递保证、Worker 内预签名等），需要时按该文件 §10 逐条处理，**禁止凭记忆补数字**。
+- **Q6** Cloudflare 账号侧凭据与资源就绪情况：R2 bucket、D1 database 是否已创建；`wrangler` 认证方式；**D1 是 Free（500 MB / 50 查询每调用）还是 Paid（10 GB / 1000 查询）——这直接决定可行性**。→ 影响 `wizard` 叠加项。
+- **Q7** 上游 VPS 清单与要采集的具体路径（数量、总量级、单文件最大体积）。→ 由用户提供。**单文件体积直接决定 Q2 走哪条路**。
 
 ## 授权边界
 
