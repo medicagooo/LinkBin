@@ -32,6 +32,16 @@ _Avoid_: agent, daemon, crawler
 One file's bytes as stored in R2, addressed by an object key.
 _Avoid_: blob, file (a file is the thing on a Host; an Object is its stored form)
 
+**Derived Object**:
+An Object whose content is computed from other stored Objects by a Merge Rule, rather than read off a
+Host. It is a second source of content, alongside Collection.
+_Avoid_: generated file, output, artifact, bundle
+
+**Merge Rule**:
+The configuration that produces a Derived Object: which Objects are its sources, the order they are
+combined in, how they are combined, and the name of the result. It is data, not code.
+_Avoid_: script, transform, pipeline
+
 **Object Version**:
 The stored form of one file's content as identified by its content hash. Content change produces a
 new Object Version; it is never an in-place edit.

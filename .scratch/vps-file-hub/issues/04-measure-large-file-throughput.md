@@ -24,3 +24,4 @@ comes down or large files must span several invocations — and both of those ch
 - [ ] **The measurement endpoint is deleted before this ticket is done.** A diagnostic that acts on a stored credential must not outlive the question it answered; the previous one did, and became a live exposure.
 - [ ] The measured numbers are written into the state record and the spec's notes, replacing the current "not yet measured" caveat.
 - [ ] No production code path is added for this; if any is introduced for the measurement, it is removed here.
+

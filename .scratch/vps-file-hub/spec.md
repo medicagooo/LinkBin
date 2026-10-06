@@ -3,6 +3,14 @@
 `Status: ready-for-agent`
 Feature: `.scratch/vps-file-hub/` · Tracker: local markdown · Decisions honoured: D1–D45
 
+> **Revision note.** Three requirements were added by the user after the first publication, and this
+> spec is updated rather than superseded: self-service password setup on first visit, share links with
+> an expiry and an optional password, and **derived objects** — outputs computed from stored objects
+> by a merge rule. The first two sharpen existing stories; the third adds a data source, so it gets its
+> own section and its own decisions. Ticket numbers referenced below stay stable; the merge work is
+> additive.
+
+
 ---
 
 ## Problem Statement
@@ -114,8 +122,35 @@ A single Cloudflare Worker that:
 54. As the operator, I want to be able to force a specific appearance and language, so that the choice sticks.
 55. As the operator, I want the interface reachable from my phone, so that I can check state without a desktop.
 56. As the operator, I want the interface to be legible and usable with a keyboard, so that I am not fighting it to do simple things.
-57. **As the operator, I want the interface and API to require authentication, so that a stranger who finds the URL cannot add machines, store credentials, or trigger collection.**
+57. As the operator, I want the interface and API to require authentication, so that a stranger who finds the URL cannot add machines, store credentials, or trigger collection.
 58. As the operator, I want a collection endpoint to be callable by a scheduler without an interactive login, so that automation does not require me to be present.
+59. As the operator, I want to set the password myself on my first visit, so that I do not have to obtain or paste a token from anywhere else.
+60. As the operator, I want to be refused clearly if I try to set a weak or empty password, so that the one thing standing between the internet and my credentials is not trivially guessable.
+61. As the operator, I want to change the password later and have existing sessions end, so that changing it actually locks out anything already signed in.
+62. As the operator, I want the password itself never stored recoverably, so that a database leak does not hand over the interface.
+
+### Sharing files
+
+63. As the operator, I want to choose specific files to share and get a link for them, so that I can hand out exactly what I intend and nothing else.
+64. As the operator, I want to set how long a share lasts, so that a link for a one-off handover and a link for a colleague are not forced to the same lifetime.
+65. As the operator, I want to set a password on a share, so that the link and the password can travel by different routes.
+66. As a recipient, I want to open the link and download the file with the password, so that I do not need an account or any other access.
+67. As the operator, I want to see the shares I have issued and cancel one, so that a link I regret sending stops working.
+68. As the operator, I want a share that has expired or been cancelled to say which it is, so that a recipient can tell me something useful.
+
+### Combining files into one
+
+69. As the operator, I want to define a merge that takes several stored files and produces one combined file, so that I stop merging them by hand.
+70. As the operator, I want the merge to understand the files' structure rather than just gluing them together, so that combining configuration documents produces a valid document rather than a run of stacked blocks.
+71. As the operator, I want duplicates across the sources removed, so that the combined file does not repeat the same entry once per source.
+72. As the operator, I want to control the order of the sources, so that the combined file is deterministic rather than dependent on timing.
+73. As the operator, I want a preview of what a merge will produce before it is stored, so that a wrong rule does not silently create a large wrong file.
+74. As the operator, I want the merge to re-run by itself when any of its inputs changes, so that the combined file is never quietly out of date.
+75. As the operator, I want to see whether a derived file is current or stale, and what it was built from, so that I can trust it.
+76. As the operator, I want the combined file to be downloadable and shareable like any other stored file, so that producing it is the only special thing about it.
+77. As the operator, I want the inputs of a merge protected from eviction, so that the combined file can always be rebuilt rather than becoming permanently broken.
+78. As the operator, I want a merge that fails to leave the previous combined file in place, so that a bad re-run does not destroy a good result.
+79. As the operator, I want to be prevented from defining a merge that depends on itself, so that the system cannot get stuck in a loop.
 
 ## Implementation Decisions
 
@@ -216,6 +251,43 @@ endpoint needs a separate non-interactive credential from the interactive interf
   limit, and separate rows are what make "why is this specific file missing" answerable.
 - **Capacity refusals are receipts.** A file refused for budget produces a recorded issue, or the
   question "why did this stop syncing" has no answer.
+
+### Derived objects — outputs computed from stored objects
+
+A **derived object** is a stored object whose content is computed from other stored objects rather
+than read off a machine. It is a second way for content to enter the store, which is why it gets its
+own decisions.
+
+- A **merge rule** names its source objects, how to order them, how to combine them, and the name of
+  the output. It is data, configured in the interface, not code.
+- **There is no script execution.** The concrete requirement — combining several configuration files
+  into one — is a structured merge, and structured merges are expressible as configuration. Executing
+  supplied code inside this Worker was considered and rejected: the isolate holds every stored machine
+  credential and the master key, so the blast radius of a sandbox escape is total, and an earlier
+  diagnostic endpoint in this same project already demonstrated how a temporary capability becomes a
+  permanent exposure. A checklist run against that earlier endpoint is what removed it; the same
+  reasoning applies with more force here.
+- **YAML-aware list merging is supported for the stated case.** Source documents are parsed and their
+  list-valued keys are unioned with duplicates removed, producing a normalised document. A
+  widely-used pure-JavaScript YAML parser is available with no transitive dependencies, which matters
+  because a parser requiring native code or runtime WebAssembly cannot run in this runtime at all —
+  the same constraint that rules out the SSH library this project first tried.
+- **Protection is the default.** A derived object is marked important when created, because the
+  budget policy never evicts an important object. Without this, evicting a source would leave a
+  derived object that cannot be recomputed, and the automatic re-run would quietly produce a partial
+  or empty result instead of an error.
+- **A derived object records what it was built from**, including a content hash per source. That
+  record is what makes "re-run when an input changes" decidable, and it is also what lets the
+  interface explain why a derived object is stale.
+- Derived objects count against the same budget as everything else, and their size is measured the same
+  way. A derived object cannot be its own source, directly or transitively.
+- **The merge rule is configuration with four parts**, which is what keeps it previewable and
+  auditable: where the inputs come from, the order they are combined in, how they are combined, and
+  what the output is called. Source selection reuses the same directory-pattern vocabulary as
+  collection, so there is one way to describe "which files" in this project rather than two.
+- Ordering is explicit rather than incidental. Sources are ordered by a stated rule so that a
+  re-run produces byte-identical output; an order that depended on database or filesystem return
+  order would make the output change without anything having changed.
 
 ### Rules and scope
 
