@@ -22,11 +22,11 @@
 
 ## 当前阶段
 
-**第 0 步 `setup` 已完成；第 1 步 `grill-with-docs` 进行中（已锁定 D1–D39）；分叉 A `prototype` 已部署到真实 Cloudflare 并已取得真机 PASS 结论。**
+**第 0 步 `setup` 已完成；第 1 步 `grill-with-docs` 已完成（D1–D45 锁定，Q1–Q7 全部关闭）；分叉 A `prototype` 真机 PASS。**
 
-**2026-10-07 更新**：Worker `linkbin` 已部署上线（D36），SSH 采集通道**真机验证 PASS**（证据见下），**探针残留已清理、线上已不存有任何主机凭据**（事件 e025）。
+**2026-10-07 更新**：Worker `linkbin` 已上线；SSH 采集通道**真机验证 PASS**；探针残留已清理，且**探针路由已从代码中删除**（`52edd51`，线上实测 `/probe/*` 全部 404）；部署链路已打通（e033 首次 Workers Builds 构建成功）；迁移已应用（e034，`0002_usage_index`）。
 
-按 §2.3，**原型闸门已于 2026-10-07 解除（PASS）**，可以进入第 3 步 `to-spec`。仍待关闭的是"未决问题"里的 Q1–Q4、Q6、Q7 等设计问题。
+**当前阶段 = 第 3 步 `to-spec` 的入口。** 按 §2.3 原型闸门已解除；按 §2.2"没有任何问题悬着"的判据也已满足（Q4 随 D44 于 e035 关闭）。**第 3 步的产物 `spec.md` 尚未落盘，这是唯一的缺口。**
 
 ## 已完成（产物 + 证据）
 
@@ -144,15 +144,22 @@ R2 侧核实：`linkbin-files` 中存在 `probe/etc/hostname`(24)、`probe/etc/a
 
 ## 下一个动作（精确到可执行）
 
-- **动作**：**在已上线的 Worker 上跑真机 SSH 探针**——打开 `https://linkbin.cyc-xiaochen.workers.dev`，在 UI 里添加测试主机（label / address / port / username / 密码），然后：
-  1. `POST /api/hosts/test` 带 `{"id":"<host-id>"}` —— 拿连接耗时与规则求值；
-  2. `GET /probe/list?path=/etc` 与 `GET /probe/read?path=/etc/hostname` —— 拿 SFTP 列目录与文件读取；
-  3. **并行开一个 `wrangler tail linkbin`** 读实测 CPU 时间（判据是 CPU 而非"请求成功"）；
-  4. **测完立即删除该主机行**（`POST /api/hosts/delete`）。
-  然后按 `acceptance` 判 PASS/FAIL，回写本文件 D14 段落与 `.branch-records/ssh-probe/state.json`。
-- **⛔ 绝对不要设置 `PROBE_HOST`/`PROBE_USER`/`PROBE_PASSWORD` 变量**（见 D39：那会把无鉴权的远程命令执行入口直接暴露到公网）。
-- **前置**：需要一个真实可 SSH 的主机凭据（来自用户，Q7）。本机无法替代——`wrangler dev` 拒绝连内网地址。
-- **验证方式**：拿到实测 CPU 数值 + `sha256` 与独立计算的哈希一致 → PASS；`exceededCpu`/错误 1102 / 算法协商失败 / 哈希不符 → FAIL。**两种结果都是有效结论，都必须落盘。**
+> **⚠️ 本节已重写（2026-10-07，事件 e035）。** 上一版写的是"在已上线的 Worker 上跑真机 SSH 探针"，
+> 让下一个会话去调 `GET /probe/list` 与 `GET /probe/read`。**那两条路由在提交 `52edd51` 中已被删除，
+> 现在返回 404**（探针结论是 PASS，代码已清）。照旧版执行会直接撞墙——这正是"冲突时信产物"要修的情形。
+
+- **动作**：执行**第 3 步 `to-spec`** —— 读 `C:\Users\medic\.agents\skills\to-spec\SKILL.md`，
+  把已锁定的 D1–D45 合成为 `.scratch/vps-file-hub/spec.md`（`Status: ready-for-agent`）。
+  按该 skill 的流程：**先 sketch 测试接缝并与用户确认**，再落盘；它**不访谈**，只综合。
+- **前置**：✅ 全部满足——原型闸门已解除（D36 PASS）；**Q1–Q7 全部关闭**（Q4 于 e035 随 D44 确认而关闭）；
+  部署与迁移均已完成（e033 首次 Workers Builds 构建成功、e034 已应用 `0002_usage_index`）。
+- **验证方式**：`spec.md` 已落盘且 `Status: ready-for-agent`；测试接缝已获用户确认；spec 中**不出现具体文件路径与代码片段**（原型产出的决策密集片段是唯一例外）。
+- **本轮尚未落盘**：`to-spec` 的产物本身。第 4 步 `to-tickets` 在第 3 步完成前不得开始。
+
+### 已不再适用（保留作沿革）
+
+- ~~跑真机 SSH 探针（`/probe/*`）~~ —— 已完成（D36 PASS）且路由已删除，**不要再调用**。
+- ~~设置 `PROBE_HOST`/`PROBE_USER`/`PROBE_PASSWORD`~~ —— 绑定已从 `Env` 接口移除，设了也没有代码会读；这是好事，勿恢复。
 
 ## 环境硬事实（下一个会话直接用，不要重测）
 
