@@ -26,6 +26,7 @@
   "status": "active",
   "integration": "unmerged",
   "evidence": [
+    "git refs/heads/main = c9af21c46da3782bb1e935a1088c3e71d038100c (step-0 bootstrap commit)",
     "D:\\proj\\LinkBin\\.scratch\\vps-file-hub\\STATE.md (phase 0 complete, scenario card)",
     "D:\\proj\\LinkBin\\docs\\agents\\issue-tracker.md",
     "D:\\proj\\LinkBin\\docs\\agents\\domain.md",

@@ -15,7 +15,9 @@
     }
   ],
   "active": ["vps-file-hub"],
-  "pending": [],
+  "pending": [
+    "vps-file-hub-e009: push origin main (predeclared; awaiting execution)"
+  ],
   "read": [],
   "changes": [],
   "notes": "No business change has been implemented yet. This ledger records process/infrastructure events only until the first shippable behaviour exists. See .scratch/vps-file-hub/STATE.md for current phase."

@@ -52,3 +52,28 @@ New or changed registry files must:
 - keep event ids unique within a task;
 - state pending operation intent explicitly, with no `predeclared` event left dangling after a
   success or an abandoned attempt.
+
+## Known failure mode: stray NUL bytes
+
+A tooling edit once appended a single `0x00` byte to the end of an `events.jsonl` line. `git` then
+reported the file as **binary** (`Bin 2979 -> 3774 bytes`), which silently disables diffing,
+`code-review`, and any line-based parsing — the whole registry becomes unreadable while still
+looking fine in an editor.
+
+Guard before every commit that touches the registry:
+
+```powershell
+# no NUL bytes, no BOM, LF-only, one parsable JSON object per line, unique ids
+$p = '.branch-records/<task>/events.jsonl'
+$bytes = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $p))
+if ([Array]::IndexOf($bytes, [byte]0) -ge 0) { throw "stray NUL byte in $p" }
+if ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { throw "BOM in $p" }
+if (($bytes | Where-Object { $_ -eq 13 }).Count -gt 0) { throw "CR in $p (must be LF-only)" }
+$lines = [System.IO.File]::ReadAllLines($p)
+$ids = foreach ($l in $lines) { ($l | ConvertFrom-Json).id }
+if (($ids | Group-Object | Where-Object Count -gt 1)) { throw "duplicate event id" }
+```
+
+`.gitattributes` pins `*.jsonl`, `*.json`, and `*.md` to `eol=lf` in the working tree so that
+`core.autocrlf` cannot reintroduce CRLF into the machine-parsed files.
+
