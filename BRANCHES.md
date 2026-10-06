@@ -25,9 +25,7 @@
     }
   ],
   "active": ["vps-file-hub", "ssh-probe"],
-  "pending": [
-    "vps-file-hub-e033: push main to origin to trigger the first Workers Builds deployment (predeclared; awaiting execution)"
-  ],
+  "pending": [],
   "remote": {
     "origin": "git@github.com:medicagooo/LinkBin.git",
     "url": "https://github.com/medicagooo/LinkBin",
