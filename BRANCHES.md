@@ -12,10 +12,22 @@
       "purpose": "Collect designated files from multiple VPS hosts into Cloudflare R2 + D1 and let other devices download them",
       "status": "active",
       "integration": "unmerged"
+    },
+    {
+      "task": "ssh-probe",
+      "state": ".branch-records/ssh-probe/state.json",
+      "events": ".branch-records/ssh-probe/events.jsonl",
+      "purpose": "Prototype answering one question: can a Cloudflare Worker connect to a real VPS over SSH and read a file? Answers whether the chosen collection channel is viable at all.",
+      "status": "active",
+      "integration": "unmerged",
+      "branch": "prototype/ssh-probe",
+      "merge_policy": "never merged to main; retained as a primary source (flow manual section 2.3)"
     }
   ],
-  "active": ["vps-file-hub"],
-  "pending": [],
+  "active": ["vps-file-hub", "ssh-probe"],
+  "pending": [
+    "vps-file-hub-e016: create branch prototype/ssh-probe from main (predeclared; awaiting execution)"
+  ],
   "remote": {
     "origin": "git@github.com:medicagooo/LinkBin.git",
     "url": "https://github.com/medicagooo/LinkBin",

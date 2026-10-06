@@ -1,0 +1,36 @@
+{
+  "task": "ssh-probe",
+  "purpose": "Answer exactly one design question with a running answer: can a Cloudflare Worker connect to a real VPS over SSH and read a file's bytes? The main feature (vps-file-hub) cannot proceed to spec until this is resolved, because its whole collection channel depends on it.",
+  "question": "Can a Worker, using a Workers-native SSH stack over cloudflare:sockets, complete TCP connect + SSH authentication + SFTP directory listing + SFTP file read against a real remote VPS, within the paid-plan CPU budget?",
+  "requirements": [
+    "Runs on a real deployed Worker against a real remote VPS; local wrangler dev cannot be used because outbound connections to localhost and private IPs are refused.",
+    "Uses a Workers-native pure-TS SSH stack; ssh2 is excluded because runtime WASM compilation is disallowed in workerd and the upstream issue is open with the maintainer declining support.",
+    "Negotiates AES-GCM (WebCrypto-backed) rather than pure-JS ChaCha20-Poly1305, because CPU is the binding constraint.",
+    "Proves the chain end to end: directory listing, then reading one file and verifying its content by hash.",
+    "Reports measured CPU time and wall time from the invocation log so the paid-plan budget can be judged.",
+    "Performs read-only operations on the target host."
+  ],
+  "constraints": [
+    "Never merged to main; kept as a primary source on branch prototype/ssh-probe (flow manual section 2.3).",
+    "Disposable by design: the write-up is optimised for speed of learning, not for production quality.",
+    "Read-only on the target VPS: no writes, deletes, or modifications.",
+    "Credentials must never be committed; they are supplied via wrangler secret or a local untracked file.",
+    "Deploying the probe creates a real but throwaway Worker; that deployment is part of the experiment."
+  ],
+  "acceptance": [
+    "PASS: SFTP list returns real directory entries AND a read file's SHA-256 matches the same file hashed independently AND CPU time per invocation stays well under the paid default of 30 s.",
+    "FAIL: exceededCpu / error 1102, an algorithm-negotiation protocol error, or a hash mismatch.",
+    "Either outcome is a valid result and must be written back into vps-file-hub's STATE.md before that feature proceeds."
+  ],
+  "status": "active",
+  "integration": "unmerged",
+  "evidence": [
+    "docs/research/cloudflare-platform-limits.md (platform ceilings)",
+    ".scratch/vps-file-hub/STATE.md decisions D14 and D21-D27",
+    "mscdex/ssh2#1494 (open) - ssh2 fails at import under workerd",
+    "mscdex/ssh2#1401 - maintainer declines non-node socket API support"
+  ],
+  "next": "Create branch prototype/ssh-probe from main (predeclared as event e016), then build the minimal probe Worker and deploy it with the user-supplied VPS credentials.",
+  "created_at": "2026-10-07T03:50:00+08:00",
+  "updated_at": "2026-10-07T03:50:00+08:00"
+}
