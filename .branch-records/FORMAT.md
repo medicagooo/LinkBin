@@ -36,6 +36,37 @@ This repository maintains the branch/business registry described in the global a
 pre-action commit. A registry commit cannot precede the registry's existence. This exception is
 recorded explicitly in the initial `operation` event.
 
+## Event ids must never collide, and a collision must never resolve itself
+
+Two agent sessions appended to this registry concurrently and both drew event ids from the same
+counter, so `e023` and `e024` were each defined twice with different content. The de-duplication pass
+that detected this resolved the collision by keeping whichever line came first and **silently
+discarding the other**, which deleted two genuine records from the ledger — including the prototype
+verdict. Recovery meant renumbering the survivors to fresh ids (see event `vps-file-hub-e029`).
+
+Rules that follow from that incident:
+
+- **Take the next id from the file, not from your own counter.** Read the highest existing id and
+  increment it immediately before writing.
+- **A duplicate id is a hard error, never a merge and never a drop.** Abort the write and renumber the
+  new record. Losing history is worse than an ugly sequence.
+- **Verify after every write** that the unique-id count equals the line count:
+
+```powershell
+$p = '.branch-records/<task>/events.jsonl'
+$ids = [System.IO.File]::ReadAllLines((Resolve-Path -LiteralPath $p).Path) |
+       ForEach-Object { ($_ | ConvertFrom-Json).id }
+if (($ids | Group-Object | Where-Object Count -gt 1)) { throw 'duplicate event id' }
+if ($ids.Count -ne ($ids | Sort-Object -Unique).Count) { throw 'id count mismatch' }
+```
+
+- **Do not resolve a collision by preferring one writer.** If two records describe the same id, they
+  are two facts. Keep both, give one a new id, and append a `correction` event describing the repair.
+
+The same applies to decision ids in `.scratch/<feature>/STATE.md`: an id is a permanent reference, so
+never reuse one for a different decision. When two sessions allocate the same number, renumber the
+later record and leave a note — do not overwrite the earlier decision.
+
 ## Date fields
 
 - `at` / `created_at` / `updated_at` are ISO-8601 timestamps in **+08:00** (China Standard Time).
