@@ -1,10 +1,18 @@
 /**
- * Guards the UI template against a mistake that has now cost two build failures.
+ * Guards the UI template against a mistake that has now cost three failures.
  *
  * `src/ui.ts` embeds a whole HTML document — including `<style>` and `<script>` — inside TypeScript
- * template literals. A backtick anywhere inside those regions terminates the literal early, and the
- * error esbuild then reports points at the end of the file rather than at the offending character,
- * which makes it slow to find. Two separate CSS/JS comments each containing a backtick caused this.
+ * template literals. A backtick anywhere inside those regions terminates the literal early.
+ *
+ * The first two incidents produced an esbuild error that pointed at the end of the file rather than at
+ * the offending character. The third produced **no build error at all**: the truncated literal was
+ * still syntactically valid, so the build passed and the page died at runtime with a TypeError naming
+ * an identifier assembled from the fragments.
+ *
+ * Note the backtick does not have to be in code. Inside these regions a line-comment marker is literal
+ * text, not a comment, so a backtick in prose breaks the page just as thoroughly — and stripping line
+ * comments before counting backticks is precisely the mistake that hid the third incident. See the
+ * dedicated check in the scanner below.
  *
  * This script fails loudly and names the exact line. It is wired into `pnpm run check` so it runs
  * before a build rather than after a confusing failure.
@@ -22,6 +30,37 @@ const offenders = [];
 let inTemplate = false;
 let templateStartLine = 0;
 
+// --- Check 1: the <script> body must contain no backtick at all ------------------------------
+//
+// This one is absolute, not heuristic. Everything between `<script>` and `</script>` is emitted
+// verbatim into the page, but in this file that text also sits inside an outer TypeScript template
+// literal. A backtick there is therefore never code - it closes the outer literal, and the remainder
+// of the document is then parsed as JavaScript. The failure is silent at build time: the truncated
+// result happened to be syntactically valid, so `wrangler deploy` reported success and the page died
+// only when a browser loaded it, with a TypeError naming an identifier assembled from fragments.
+// That is how a backtick written inside a script comment shipped to production.
+//
+// The inner script uses no template literals of its own, so "no backticks here" is a requirement
+// rather than a preference. If that ever stops being true, this check must be replaced by a real
+// parser rather than relaxed.
+{
+  let inScript = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (!inScript) {
+      if (lines[i].includes('<script>')) inScript = true;
+      continue;
+    }
+    if (lines[i].includes('</script>')) break;
+    if (lines[i].includes('`')) {
+      offenders.push({
+        line: i + 1,
+        text: lines[i].trim(),
+        reason: 'backtick inside the <script> body, which is emitted verbatim inside an outer template literal, so this backtick ends that literal early',
+      });
+    }
+  }
+}
+
 for (let i = 0; i < lines.length; i++) {
 	const line = lines[i];
 
@@ -36,7 +75,8 @@ for (let i = 0; i < lines.length; i++) {
 		continue;
 	}
 
-	// Inside a template literal. The region ends on a line whose first backtick closes it.
+	// (The per-region backtick check that replaces the naive one lives above, before this loop.)
+	// The region ends on a line whose first backtick closes it.
 	const closeIndex = line.indexOf('`');
 	if (closeIndex >= 0) {
 		// Anything after the closing backtick on this line is code again; check for a further

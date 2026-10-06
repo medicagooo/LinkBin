@@ -31,8 +31,8 @@
     "url": "https://github.com/medicagooo/LinkBin",
     "visibility": "PUBLIC",
     "default_branch": "main",
-    "last_verified_main": "e5493a499289d76a275c581e081cf91bc10d270e",
-    "verified_at": "2026-10-07T04:12:00+08:00"
+    "last_verified_main": "a1ffe65",
+    "verified_at": "2026-10-07T05:15:00+08:00"
   },
   "read": [],
   "changes": [
@@ -63,7 +63,20 @@
       "rules": "The /probe* routes are still unauthenticated. They are only harmless while no host row exists, so adding a host re-creates the exposure until D35 (authentication) is implemented.",
       "side_effects": "The encrypted password was destroyed with its row and is unrecoverable. D30 already recommended rotating that host's root password because it had entered the session record.",
       "status": "done; underlying D35 authentication gap remains open"
+    },
+    {
+      "id": "C-003",
+      "requirement_date": "2026-10-07",
+      "implementation_date": "2026-10-07",
+      "domain": "host management UI / authentication",
+      "request": "user instruction on 2026-10-07: let the host form choose between two authentication methods, and repair the reported bug that saving a host appeared to do nothing",
+      "evidence": ["src/ui.ts", "scripts/check-ui-template.mjs", ".scratch/vps-file-hub/STATE.md D48 and D49"],
+      "before": "The form showed password, key passphrase and private key as three independent optional fields, leaving the operator to infer the combination the server wanted. Saving reported only through the result panel further down the page, and not one request on the page had a .catch(), so a dropped connection or a redeploy in flight made a click do literally nothing with no message anywhere. There was no client-side validation either, so an empty address was answered by the server, again only in that distant panel.",
+      "after": "Authentication is an explicit choice - username with password, or username with private key and optional passphrase - and only the chosen method is displayed and submitted. Username stays visible in both because SSH requires one. Saving validates locally, disables the button while in flight, and reports success or the server's exact error immediately beneath the button. Every request is bounded at 30 seconds and normalises rejection, timeout and HTTP failure into one shape, so no call can fail invisibly.",
+      "rules": "An empty credential field still means keep what is already stored, which is what allows a host to be edited without re-entering its credential. A key-mode save no longer sends an empty password and vice versa, so a host never accumulates an unused second credential.",
+      "side_effects": "The form no longer closes after a successful save, because closing it would hide the confirmation that was just added. The UI template guard gained an absolute rule against backticks in the script body after a backtick in a comment shipped a page that failed only at runtime.",
+      "status": "done; code complete and verified locally against wrangler dev, not yet deployed"
     }
   ],
-  "notes": "C-001 and C-002 concern a deployment of an incomplete feature, not a finished capability. Collection, download and the consumer-facing surface are still unbuilt. C-002 is a security cleanup of state created during the probe, not a product behaviour. See .scratch/vps-file-hub/STATE.md for the current phase."
+  "notes": "C-001 and C-002 concern a deployment of an incomplete feature, not a finished capability. Collection, download and the consumer-facing surface are still unbuilt. C-002 was a security cleanup of state created during the probe; C-003 is the first change to the operator-facing surface itself. See .scratch/vps-file-hub/STATE.md for the current phase."
 }

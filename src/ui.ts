@@ -110,16 +110,26 @@ export function renderIndexPage(locale: Locale = 'en'): string {
           <label class="f narrow"><span data-i18n="form.port">Port</span><input id="f-port" value="22" inputmode="numeric"></label>
           <label class="f"><span data-i18n="form.username">Username</span><input id="f-username" autocomplete="off" placeholder="root"></label>
         </div>
-        <div class="fields">
+        <fieldset class="authmode">
+          <legend data-i18n="form.authMode">Authentication</legend>
+          <label class="mode"><input type="radio" name="authmode" value="password" id="m-password" checked><span data-i18n="form.modePassword">Username and password</span></label>
+          <label class="mode"><input type="radio" name="authmode" value="key" id="m-key"><span data-i18n="form.modeKey">Username and private key</span></label>
+        </fieldset>
+        <div class="fields" id="mode-password">
           <label class="f"><span data-i18n="form.password">Password</span><input id="f-password" type="password" autocomplete="new-password"></label>
-          <label class="f"><span data-i18n="form.passphrase">Key passphrase</span><input id="f-passphrase" type="password" autocomplete="new-password"></label>
         </div>
-        <label class="f"><span data-i18n="form.privateKey">Private key</span><textarea id="f-key" rows="3" spellcheck="false" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></label>
+        <div id="mode-key" hidden>
+          <label class="f"><span data-i18n="form.privateKey">Private key</span><textarea id="f-key" rows="3" spellcheck="false" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></label>
+          <div class="fields">
+            <label class="f"><span data-i18n="form.passphrase">Key passphrase (optional)</span><input id="f-passphrase" type="password" autocomplete="new-password"></label>
+          </div>
+        </div>
         <p class="hint" data-i18n="form.hint"></p>
         <div class="actions">
           <button class="primary" id="saveHost" data-i18n="form.save">Save host</button>
           <button class="ghost" id="cancelHost" data-i18n="form.cancel">Cancel</button>
         </div>
+        <div class="formmsg" id="formmsg" hidden role="status" aria-live="polite"></div>
       </section>
 
       <section class="glass rules" aria-labelledby="rules-h">
@@ -232,15 +242,51 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     return node;
   }
 
+  // Every request is bounded. Without this a hung call leaves the page waiting forever - and a
+  // disabled button is the same class of dead end as a silent failure. The server's own SSH connect
+  // timeout is 20s, so 30s leaves room for that plus the round trip.
+  var REQUEST_TIMEOUT_MS = 30000;
+
   function api(path, options) {
     var opts = options || {};
     opts.headers = { 'content-type': 'application/json' };
+    var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var timer = null;
+    if (controller) {
+      opts.signal = controller.signal;
+      timer = setTimeout(function () { controller.abort(); }, REQUEST_TIMEOUT_MS);
+    }
+    function stopTimer() { if (timer) { clearTimeout(timer); timer = null; } }
     return fetch(path, opts).then(function (res) {
       return res.text().then(function (text) {
         var body;
         try { body = JSON.parse(text); } catch (e) { body = { raw: text }; }
+        stopTimer();
         return { status: res.status, ok: res.ok, body: body };
       });
+    }).catch(function (err) {
+      stopTimer();
+      // A rejected fetch never reached an answer: the connection dropped, the Worker was mid-deploy,
+      // the browser is offline, or the timeout above fired. Every caller on this page is a bare
+      // .then() with no .catch() of its own, so without this the promise rejects into nothing and the
+      // click appears to do absolutely nothing - which is exactly how a failed save was reported, and
+      // it cost a diagnosis session: the fault was invisible rather than merely unexplained.
+      // Normalising it into the same shape as an HTTP failure gives one handling path everywhere.
+      // NOTE: never write a backtick in this file, not even inside a comment. Everything from the
+      // doctype to the closing script tag is one template literal, so a backtick here - including one
+      // in prose - ends the literal early and the remainder is parsed as code. That happened once and
+      // produced a TypeError naming a nonsense identifier instead of a syntax error.
+      var aborted = !!(err && err.name === 'AbortError');
+      return {
+        status: 0,
+        ok: false,
+        body: {
+          ok: false,
+          error: aborted
+            ? t('form.requestTimeout', { seconds: Math.round(REQUEST_TIMEOUT_MS / 1000) })
+            : t('form.requestFailed', { detail: String((err && err.message) || err) }),
+        },
+      };
     });
   }
 
@@ -688,26 +734,79 @@ export function renderIndexPage(locale: Locale = 'en'): string {
 
   $('cancelHost').addEventListener('click', function () { $('hostform').hidden = true; });
 
+  /** Which credential the form is currently offering. */
+  function authMode() { return $('m-key').checked ? 'key' : 'password'; }
+
+  function setAuthMode(mode) {
+    var isKey = mode === 'key';
+    $('mode-password').hidden = isKey;
+    $('mode-key').hidden = !isKey;
+    // Leaving the password field populated while it is hidden would submit a credential under a mode
+    // the operator is not looking at, so it is cleared on the way out. The key fields are left alone
+    // on purpose: toggling to check something and back would otherwise lose a pasted key.
+    if (isKey) $('f-password').value = '';
+  }
+
+  /** Inline feedback beside the button that was pressed, rather than only in the result panel. */
+  function formMessage(kind, text) {
+    var box = $('formmsg');
+    box.hidden = false;
+    box.className = 'formmsg ' + kind;
+    box.textContent = text;
+  }
+
+  function clearFormMessage() { var box = $('formmsg'); box.hidden = true; box.textContent = ''; box.className = 'formmsg'; }
+
+  $('m-password').addEventListener('change', function () { setAuthMode('password'); clearFormMessage(); });
+  $('m-key').addEventListener('change', function () { setAuthMode('key'); clearFormMessage(); });
+
   $('saveHost').addEventListener('click', function () {
+    clearFormMessage();
+
+    var address = $('f-address').value.trim();
+    var username = $('f-username').value.trim();
+    var mode = authMode();
+
+    // Checked here so the answer lands directly under the button. The server validates the same
+    // things, but its message goes to the result panel further down the page, which is what made a
+    // rejected save read as "the button does nothing".
+    if (!address) return formMessage('err', t('form.needAddress'));
+    if (!username) return formMessage('err', t('form.needUsername'));
+    if (mode === 'password' && !$('f-password').value) return formMessage('err', t('form.needPassword'));
+    if (mode === 'key' && !$('f-key').value.trim()) return formMessage('err', t('form.needKey'));
+
+    // Only the chosen method is sent: storing an unused second credential against the host would be
+    // a liability with no purpose, and an empty string means "keep the stored value" server-side.
     var payload = {
       label: $('f-label').value,
-      address: $('f-address').value,
+      address: address,
       port: Number($('f-port').value || 22),
-      username: $('f-username').value,
-      password: $('f-password').value,
-      privateKey: $('f-key').value,
-      privateKeyPassphrase: $('f-passphrase').value
+      username: username,
+      password: mode === 'password' ? $('f-password').value : '',
+      privateKey: mode === 'key' ? $('f-key').value : '',
+      privateKeyPassphrase: mode === 'key' ? $('f-passphrase').value : ''
     };
+
+    var button = $('saveHost');
+    button.disabled = true;
+    formMessage('busy', t('form.saving'));
+
     api('/api/hosts', { method: 'POST', body: JSON.stringify(payload) }).then(function (r) {
-      showRaw(r.ok && r.body.ok ? t('form.saved') : t('result.failed'), r.body);
-      if (r.ok && r.body.ok) {
-        // Nothing sensitive should linger in the DOM after a save.
-        $('f-password').value = '';
-        $('f-key').value = '';
-        $('f-passphrase').value = '';
-        $('hostform').hidden = true;
-        refreshAll();
+      button.disabled = false;
+      var ok = !!(r.ok && r.body && r.body.ok);
+      showRaw(ok ? t('form.saved') : t('result.failed'), r.body);
+      if (!ok) {
+        var detail = (r.body && (r.body.error || r.body.raw)) || t('result.unknownError');
+        return formMessage('err', t('form.saveFailed', { detail: detail }));
       }
+      // Nothing sensitive should linger in the DOM after a save.
+      $('f-password').value = '';
+      $('f-key').value = '';
+      $('f-passphrase').value = '';
+      // The form stays open with the message visible. Hiding it, as this used to, would hide the very
+      // confirmation that was just added - and adding a second host is the common next action.
+      formMessage('ok', t('form.saved'));
+      refreshAll();
     });
   });
 
@@ -810,13 +909,24 @@ function translationsLiteral(): string {
 			'form.address': 'Address',
 			'form.port': 'Port',
 			'form.username': 'Username',
+			'form.authMode': 'Authentication method',
+			'form.modePassword': 'Username and password',
+			'form.modeKey': 'Username and private key',
 			'form.password': 'Password',
-			'form.passphrase': 'Key passphrase',
+			'form.passphrase': 'Key passphrase (optional)',
 			'form.privateKey': 'Private key',
 			'form.hint': 'Credentials are encrypted in the Worker before they reach the database and are never sent back to this page. Leaving a field empty keeps whatever is already stored.',
 			'form.save': 'Save host',
 			'form.cancel': 'Cancel',
 			'form.saved': 'Host saved',
+			'form.saving': 'Saving…',
+			'form.needAddress': 'Enter an address before saving.',
+			'form.needUsername': 'Enter a username before saving.',
+			'form.needPassword': 'Enter a password, or switch to the private key method.',
+			'form.needKey': 'Paste a private key, or switch to the password method.',
+			'form.saveFailed': 'Not saved: {detail}',
+			'form.requestFailed': 'The request never reached the Worker ({detail}). Nothing was changed.',
+			'form.requestTimeout': 'The Worker did not answer within {seconds} seconds. Nothing was changed; try again.',
 			'rules.title': 'Directories to collect',
 			'rules.lede': 'A rule on all machines applies everywhere; a rule on one machine applies only there. Exclusions are checked first.',
 			'rules.scope': 'Applies to',
@@ -883,13 +993,24 @@ function translationsLiteral(): string {
 			'form.address': '地址',
 			'form.port': '端口',
 			'form.username': '用户名',
+			'form.authMode': '认证方式',
+			'form.modePassword': '用户名 + 密码',
+			'form.modeKey': '用户名 + 私钥',
 			'form.password': '密码',
-			'form.passphrase': '私钥口令',
+			'form.passphrase': '私钥口令（可留空）',
 			'form.privateKey': '私钥',
 			'form.hint': '凭据在 Worker 内加密后才写入数据库，并且永远不会回传到本页面。留空表示保留已存储的值。',
 			'form.save': '保存主机',
 			'form.cancel': '取消',
 			'form.saved': '主机已保存',
+			'form.saving': '正在保存…',
+			'form.needAddress': '请先填写地址。',
+			'form.needUsername': '请先填写用户名。',
+			'form.needPassword': '请填写密码，或切换到私钥方式。',
+			'form.needKey': '请粘贴私钥，或切换到密码方式。',
+			'form.saveFailed': '未保存：{detail}',
+			'form.requestFailed': '请求没有到达 Worker（{detail}），未做任何改动。',
+			'form.requestTimeout': 'Worker 在 {seconds} 秒内没有响应，未做任何改动，请重试。',
 			'rules.title': '要采集的目录',
 			'rules.lede': '对所有机器生效的规则处处适用；指定机器的规则只在那台生效。排除规则优先判断。',
 			'rules.scope': '适用范围',
@@ -956,13 +1077,24 @@ function translationsLiteral(): string {
 			'form.address': '位址',
 			'form.port': '連接埠',
 			'form.username': '使用者名稱',
+			'form.authMode': '認證方式',
+			'form.modePassword': '使用者名稱 + 密碼',
+			'form.modeKey': '使用者名稱 + 私鑰',
 			'form.password': '密碼',
-			'form.passphrase': '私鑰口令',
+			'form.passphrase': '私鑰口令（可留空）',
 			'form.privateKey': '私鑰',
 			'form.hint': '憑證在 Worker 內加密後才寫入資料庫，而且永遠不會回傳到本頁面。留空表示保留已儲存的值。',
 			'form.save': '儲存主機',
 			'form.cancel': '取消',
 			'form.saved': '主機已儲存',
+			'form.saving': '正在儲存…',
+			'form.needAddress': '請先填寫位址。',
+			'form.needUsername': '請先填寫使用者名稱。',
+			'form.needPassword': '請填寫密碼，或切換到私鑰方式。',
+			'form.needKey': '請貼上私鑰，或切換到密碼方式。',
+			'form.saveFailed': '未儲存：{detail}',
+			'form.requestFailed': '請求沒有到達 Worker（{detail}），未做任何變更。',
+			'form.requestTimeout': 'Worker 在 {seconds} 秒內沒有回應，未做任何變更，請重試。',
 			'rules.title': '要採集的目錄',
 			'rules.lede': '對所有機器生效的規則處處適用；指定機器的規則只在那台生效。排除規則優先判斷。',
 			'rules.scope': '適用範圍',
@@ -1029,13 +1161,24 @@ function translationsLiteral(): string {
 			'form.address': 'アドレス',
 			'form.port': 'ポート',
 			'form.username': 'ユーザー名',
+			'form.authMode': '認証方式',
+			'form.modePassword': 'ユーザー名 + パスワード',
+			'form.modeKey': 'ユーザー名 + 秘密鍵',
 			'form.password': 'パスワード',
-			'form.passphrase': '鍵のパスフレーズ',
+			'form.passphrase': '鍵のパスフレーズ（任意）',
 			'form.privateKey': '秘密鍵',
 			'form.hint': '認証情報は Worker 内で暗号化してからデータベースに入り、この画面へ戻ることはありません。空欄のままにすると保存済みの値が維持されます。',
 			'form.save': 'ホストを保存',
 			'form.cancel': 'キャンセル',
 			'form.saved': 'ホストを保存しました',
+			'form.saving': '保存中…',
+			'form.needAddress': 'アドレスを入力してください。',
+			'form.needUsername': 'ユーザー名を入力してください。',
+			'form.needPassword': 'パスワードを入力するか、秘密鍵方式に切り替えてください。',
+			'form.needKey': '秘密鍵を貼り付けるか、パスワード方式に切り替えてください。',
+			'form.saveFailed': '保存できませんでした：{detail}',
+			'form.requestFailed': 'リクエストが Worker に到達しませんでした（{detail}）。変更は行われていません。',
+			'form.requestTimeout': 'Worker が {seconds} 秒以内に応答しませんでした。変更は行われていません。もう一度お試しください。',
 			'rules.title': '収集するディレクトリ',
 			'rules.lede': 'すべてのマシンに効くルールはどこでも適用され、特定のマシンのルールはそこだけで適用されます。除外が先に判定されます。',
 			'rules.scope': '適用範囲',
@@ -1356,6 +1499,18 @@ input:focus, select:focus, textarea:focus, button:focus-visible {
 }
 textarea { font-size: 12.5px; line-height: 1.5; resize: vertical; }
 .actions { display: flex; gap: 9px; flex-wrap: wrap; margin-top: 4px; }
+/* The authentication choice is a real choice, not two optional fields side by side: an operator
+   picks one method and the other set disappears. */
+.authmode { border: 0; margin: 0 0 12px; padding: 0; }
+.authmode legend { padding: 0 0 7px; font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.mode { display: inline-flex; align-items: center; gap: 6px; margin-right: 18px; font-size: 13px; cursor: pointer; }
+.mode input { margin: 0; }
+/* Feedback lives next to the button that produced it. The result panel further down the page is
+   where the full payload goes; it is not where a rejected click should have to be discovered. */
+.formmsg { margin-top: 10px; font-size: 13px; line-height: 1.5; max-width: 68ch; }
+.formmsg.ok { color: var(--ok); }
+.formmsg.err { color: var(--err); }
+.formmsg.busy { color: var(--muted); }
 
 button {
   border: 1px solid var(--edge-line); background: var(--glass-strong);
