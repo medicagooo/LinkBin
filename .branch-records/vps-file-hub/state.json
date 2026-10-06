@@ -1,0 +1,38 @@
+{
+  "task": "vps-file-hub",
+  "purpose": "Collect designated files from multiple VPS hosts into Cloudflare storage (R2 for file bodies, D1 for metadata) and let other devices download them by association.",
+  "requirements": [
+    "Files at designated paths on multiple VPS hosts are collected into non-filesystem durable storage.",
+    "Other devices can discover and download those files.",
+    "Storage stack is Cloudflare Workers + D1 (metadata) + R2 (file bodies).",
+    "Synchronisation is scheduled, incremental, and content-hash deduplicated: only new or changed files are pushed.",
+    "Data flow is VPS-side agent push -> Worker ingest API -> R2 write -> D1 metadata write -> consumer download.",
+    "No multi-statement atomicity may be assumed on D1; use object-level atomicity, idempotent writes, and compensating actions."
+  ],
+  "constraints": [
+    "Cloudflare Workers have no long-lived process and cannot open SSH/SFTP sessions, so the Worker cannot initiate collection; the VPS side must push.",
+    "The VPS-side agent runs on machines outside this repository's control; once the ingest API ships it must stay backward compatible.",
+    "Authorization: code writes, local commits, and pushes to a remote PR are allowed; deploying to VPS or mutating live Cloudflare resources is NOT authorized.",
+    "web_fetch is unavailable on this machine, so platform limits must never be asserted from memory.",
+    "Node/pnpm/Python are not on PATH; use DSH-bundled runtimes."
+  ],
+  "acceptance": [
+    "A VPS-side agent can push a designated file and it becomes retrievable by a second device.",
+    "Re-running the sync with no file changes produces no new objects (idempotent, hash-deduplicated).",
+    "A changed file produces a new version while the previous version remains resolvable.",
+    "Metadata in D1 lets a consumer find a file by VPS/path without knowing the R2 object key.",
+    "Documented partial-failure and recovery behaviour for an interrupted push."
+  ],
+  "status": "active",
+  "integration": "unmerged",
+  "evidence": [
+    "D:\\proj\\LinkBin\\.scratch\\vps-file-hub\\STATE.md (phase 0 complete, scenario card)",
+    "D:\\proj\\LinkBin\\docs\\agents\\issue-tracker.md",
+    "D:\\proj\\LinkBin\\docs\\agents\\domain.md",
+    "D:\\proj\\LinkBin\\docs\\agents\\triage-labels.md",
+    "D:\\proj\\LinkBin\\AGENTS.md"
+  ],
+  "next": "Run flow step 1 (grill-with-docs) to close open questions Q1-Q7 in STATE.md, then write GLOSSARY.md and the first ADR.",
+  "created_at": "2026-10-07T02:44:25+08:00",
+  "updated_at": "2026-10-07T02:44:25+08:00"
+}

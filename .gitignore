@@ -1,0 +1,37 @@
+# --- Local / scratch ---
+.scratch/*/tmp/
+*.local
+
+# --- Secrets: never commit Cloudflare credentials or per-host config ---
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Node / Workers toolchain ---
+node_modules/
+.wrangler/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Python (VPS-side agent, if used) ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+*.swp

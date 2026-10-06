@@ -1,0 +1,24 @@
+# Normalise line endings in the repository, and keep the ones that carry meaning.
+#
+# Why this file exists: the branch registry (BRANCHES.md, .branch-records/**.jsonl, state.json) is
+# parsed mechanically — one JSON object per line for events.jsonl. Letting autocrlf rewrite those
+# files to CRLF makes them fragile to parse across machines and shells, so they are pinned to LF in
+# the working tree as well as in the repository.
+* text=auto eol=lf
+
+*.jsonl text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+
+# Binary assets must never be line-ending converted.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.webp binary
+*.ico  binary
+*.pdf  binary
+*.zip  binary
+*.gz   binary
+*.woff binary
+*.woff2 binary
