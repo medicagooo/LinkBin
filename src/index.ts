@@ -33,6 +33,8 @@ import { resolveRules, type RemoteHost } from './remote';
 import { connectRemote } from './ssh-remote';
 import { planAdmission, type BudgetObject } from './budget';
 import { makeRoomFor, type EvictionOutcome } from './evict';
+import { collectFrom, type CollectionPorts } from './collect';
+import { closeRun, collectionPorts, cursorFor, openRun } from './collect-store';
 import { buildObjectQuery, type BrowseFilter, type BrowseSort, type ObjectRow } from './browse';
 import { issuesForHost, runDetail, summarizeRuns, toIssueDetail, type IssueRow, type RunRow } from './receipts';
 import { parseCursor, planRun } from './schedule';
@@ -1396,18 +1398,129 @@ export default {
 					budgetMs: DEFAULT_RUN_BUDGET_MS,
 				});
 
+				// Nothing to run: say so rather than opening a connection to record nothing. This is the answer the
+				// route gave for everything until now, and it is still the right answer when the schedule declines —
+				// but `collectionImplemented` is now TRUE, because collection exists and this particular request
+				// simply had nothing to do. Leaving it false would tell a caller that the code cannot collect,
+				// which stopped being true, and `run: false` already says this request did nothing.
+				if (!plan.run || !plan.machineId) {
+					return json({
+						ok: true,
+						accepted: true,
+						by: byScheduler ? 'scheduler' : 'operator',
+						run: false,
+						reason: plan.reason ?? null,
+						notes: plan.notes,
+						// The distinction matters for the same reason it did before: `run: false` means nothing was
+						// collected, and a caller must not believe a machine was updated.
+						machineId: plan.machineId ?? null,
+						resumeFrom: plan.resumeFrom ?? null,
+						collectionImplemented: true,
+					});
+				}
+
+				const hostRow = await getHost(env.DB, plan.machineId);
+				if (!hostRow) throw new HttpError(409, 'the chosen machine is no longer stored');
+
+				if (hostRow.enabled !== 1) throw new HttpError(409, 'the chosen machine is disabled');
+
+				// THE RUN ROW IS OPENED BEFORE ANYTHING ELSE HAPPENS, so an invocation killed mid-collection leaves
+				// a run that is visibly unfinished rather than no run at all. Everything after this point either
+				// closes it or leaves it `running` for the next invocation to see.
+				const runId = await openRun(env.DB, hostRow.id, plan.resumeFrom ? JSON.stringify({ hostId: hostRow.id, position: plan.resumeFrom }) : null);
+
+				const deadline = Date.now() + DEFAULT_RUN_BUDGET_MS;
+				const api = collectionPorts(env, hostRow.id, runId, { deadline });
+
+				// The substituted remote is a TEST-ONLY binding. Production never sets it, so the SSH path below is
+				// the only one a deployment can take — and this is what makes the whole pipeline exercisable
+				// through the HTTP edge with no machine, which is how ticket 05 is verified.
+				let remote: RemoteHost | null = env.TEST_REMOTE ?? null;
+				let close = async (): Promise<void> => {};
+
+				if (!remote) {
+					try {
+						const options = await connectOptionsFor(env, hostRow);
+						const connected = await connectRemote(options);
+						remote = connected.remote;
+						close = connected.close;
+					} catch (err) {
+						// A machine that cannot be reached is RECORDED and the run is closed, rather than throwing:
+						// an unreachable machine must not abort anything else, and the reason belongs in the
+						// receipt where the operator will look for it.
+						await api.recordIssue({ path: null, kind: 'unreachable', reason: `could not reach ${hostRow.id}: ${(err as Error).message}`, size: null });
+						const refused = { stored: 0, skipped: 0, failed: 1, unchanged: 0, bytesStored: 0 };
+						await closeRun(env.DB, runId, 'finished', refused, null);
+						// `run: true` even though nothing was collected, because a run WAS started and recorded — the
+						// field answers "did the schedule pick a machine", not "did it succeed". `connected: false`
+						// and the error carry the rest, and every field a caller might read is present so the
+						// response has one shape rather than three.
+						return json({
+							ok: true,
+							accepted: true,
+							by: byScheduler ? 'scheduler' : 'operator',
+							run: true,
+							runId,
+							machineId: hostRow.id,
+							resumeFrom: plan.resumeFrom ?? null,
+							connected: false,
+							stoppedEarly: false,
+							// The plan's notes are carried even on this path, and that is a fix rather than tidiness:
+							// they include the explanation of what happened to a stored cursor — "the cursor belongs
+							// to another machine, so this one starts from the beginning". Dropping them here made an
+							// ignored cursor indistinguishable from a cursor that was never written, which is the
+							// exact confusion the note exists to prevent.
+							notes: plan.notes,
+							totals: refused,
+							collectionImplemented: true,
+							error: (err as Error).message,
+						}, 200);
+					}
+				}
+
+				let totals = { stored: 0, skipped: 0, failed: 0, unchanged: 0, bytesStored: 0 };
+				let outcomes: { path: string }[] = [];
+				let stoppedEarly = false;
+
+				try {
+					const rules = await rulesForHost(env.DB, hostRow.id);
+					const result = await collectFrom(remote, {
+						rules,
+						store: api.store,
+						recordIssue: api.recordIssue,
+						recordProgress: api.recordProgress,
+						deadline,
+					});
+					totals = result.totals;
+					outcomes = result.outcomes;
+					stoppedEarly = result.stoppedEarly;
+
+					// `stopped` rather than `finished` when the budget ran out: marking it finished would claim a
+					// scan that did not happen, and the next run would not resume from the cursor.
+					await closeRun(env.DB, runId, stoppedEarly ? 'stopped' : 'finished', totals, stoppedEarly ? cursorFor(hostRow.id, outcomes) : null);
+				} catch (err) {
+					// The run row is deliberately LEFT as `running`. The next invocation reads it as an unfinished
+					// run and its cursor, which is exactly what it is — and closing it as `finished` here would
+					// hide a failure that nobody has been told about yet.
+					await api.recordIssue({ path: null, kind: 'run_failed', reason: (err as Error).message || 'the run did not finish', size: null });
+					return json({ ok: false, accepted: true, run: true, runId, machineId: hostRow.id, totals, error: (err as Error).message }, 500);
+				} finally {
+					await close();
+				}
+
 				return json({
 					ok: true,
 					accepted: true,
 					by: byScheduler ? 'scheduler' : 'operator',
-					run: plan.run,
-					machineId: plan.machineId ?? null,
+					run: true,
+					runId,
+					machineId: hostRow.id,
 					resumeFrom: plan.resumeFrom ?? null,
-					reason: plan.reason ?? null,
-					notes: plan.notes,
-					// Stated because it is true: the decision was made, nothing was collected. A caller that
-					// assumed otherwise would believe a machine had been updated.
-					collectionImplemented: false,
+					stoppedEarly,
+					totals,
+					// The files themselves are not returned: this is a receipt, and a machine with a large directory
+					// would make the response unbounded. The interface reads them from the run detail.
+					collectionImplemented: true,
 				});
 			}
 

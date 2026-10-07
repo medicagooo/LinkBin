@@ -54,17 +54,35 @@ describe('starting a collection on demand', () => {
 		expect(body.reason).toBe('nothing-to-do');
 	});
 
-	it('names the machine it would collect', async () => {
+	it('names the machine it would collect, and reports the attempt when it cannot reach it', async () => {
+		// The route no longer stops at the decision: it opens a run and tries to connect. With no machine to reach
+		// — `web-01.invalid` resolves nowhere — the honest answer is that a run was started and failed, so `run` is
+		// true (the schedule DID pick a machine) while `connected` is false and the totals are zero.
+		//
+		// `run` answers "did the schedule pick a machine", not "did it succeed". Conflating the two would make a
+		// failure look like an idle scheduler, which is the one thing an operator must be able to tell apart.
 		await addHost('web-01');
 		const body = (await (await collect()).json()) as any;
 		expect(body.run).toBe(true);
 		expect(body.machineId).toBe('web-01');
+		expect(body.connected, 'the machine was not reachable').toBe(false);
+		expect(body.runId, 'and the attempt is recorded as a run').toBeGreaterThan(0);
+		expect(body.totals.stored).toBe(0);
 	});
 
-	it('says plainly that collection is not implemented, so no one believes a machine was updated', async () => {
-		await addHost('web-01');
+	it('says plainly when a request collected nothing, so no one believes a machine was updated', async () => {
+		// `run: false` is the field that carries this. It used to be `collectionImplemented: false`, which meant
+		// something different and stopped being true: collection IS implemented, and this request simply had
+		// nothing to do. A flag meaning "the code cannot do this" must not be used to mean "this call did
+		// nothing", or the two states become indistinguishable and one of them is a lie.
+		//
+		// NO machine is configured here, which is the only way to reach `run: false` now that the route actually
+		// collects: with a machine configured it opens a run and attempts a connection, however that ends.
 		const body = (await (await collect()).json()) as any;
-		expect(body.collectionImplemented).toBe(false);
+		expect(body.collectionImplemented, 'collection exists').toBe(true);
+		expect(body.run, 'and this request collected nothing').toBe(false);
+		expect(body.reason).toBe('nothing-to-do');
+		expect(body.machineId).toBeNull();
 	});
 
 	it('reports that the operator asked, as distinct from the scheduler', async () => {
