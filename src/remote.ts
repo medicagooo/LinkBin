@@ -55,6 +55,8 @@ export interface RuleEvaluation {
 	status: RuleStatus;
 	matchCount?: number;
 	matches?: string[];
+    /** Concrete paths for a pattern spanning wildcard directories; names remain preview-compatible. */
+    paths?: string[];
 	detail?: string;
 }
 
@@ -84,14 +86,14 @@ export function filesToCollect(evaluations: RuleEvaluation[]): { path: string; p
 	const excluded = new Set<string>();
 	for (const evaluation of evaluations) {
 		if (!evaluation.isExclude || evaluation.status !== 'ok') continue;
-		for (const name of evaluation.matches ?? []) excluded.add(`${dirOf(evaluation.pattern)}/${name}`);
+		for (const name of evaluation.matches ?? []) excluded.add((evaluation.paths?.[evaluation.matches?.indexOf(name) ?? -1] ?? `${dirOf(evaluation.pattern)}/${name}`));
 	}
 
 	const wanted = new Map<string, string>();
 	for (const evaluation of evaluations) {
 		if (evaluation.isExclude || evaluation.status !== 'ok') continue;
 		for (const name of evaluation.matches ?? []) {
-			const path = `${dirOf(evaluation.pattern)}/${name}`;
+			const path = (evaluation.paths?.[evaluation.matches?.indexOf(name) ?? -1] ?? `${dirOf(evaluation.pattern)}/${name}`);
 			if (excluded.has(path)) continue;
 			if (!wanted.has(path)) wanted.set(path, evaluation.pattern);
 		}
@@ -162,6 +164,7 @@ export async function resolveRules(
 	remote: RemoteHost,
 	rules: ResolvableRule[],
 	matchLimit: number = DEFAULT_MATCH_LIMIT,
+    collection = false,
 ): Promise<RuleEvaluation[]> {
 	const evaluations: RuleEvaluation[] = [];
 
@@ -176,7 +179,7 @@ export async function resolveRules(
 		const dir = slash > 0 ? rule.pattern.slice(0, slash) : '/';
 		const name = slash >= 0 ? rule.pattern.slice(slash + 1) : rule.pattern;
 
-		if (/[*?[]/.test(dir)) {
+		if (/[*?[]/.test(dir) && !collection) {
 			evaluations.push({
 				...base,
 				status: 'needs_collection_step',
@@ -186,6 +189,26 @@ export async function resolveRules(
 		}
 
 		try {
+            if (/[*?[]/.test(dir) && collection) {
+                let directories = ['/'];
+                for (const segment of dir.split('/').filter(Boolean)) {
+                    const next: string[] = [];
+                    for (const parent of directories) {
+                        if (!/[*?[]/.test(segment)) next.push(`${parent === '/' ? '' : parent}/${segment}`);
+                        else for (const entry of await remote.list(parent)) {
+                            if (entry.isDirectory && globToRegExp(segment).test(entry.name)) next.push(`${parent === '/' ? '' : parent}/${entry.name}`);
+                        }
+                    }
+                    directories = next.sort();
+                }
+                const paths: string[] = [];
+                for (const directory of directories) for (const entry of await remote.list(directory)) {
+                    if (!entry.isDirectory && globToRegExp(name).test(entry.name)) paths.push(`${directory}/${entry.name}`);
+                }
+                paths.sort();
+                evaluations.push({ ...base, status: 'ok', matchCount: paths.length, matches: paths.slice(0, matchLimit), paths: paths.slice(0, matchLimit) });
+                continue;
+            }
 			const entries = await remote.list(dir);
 			const regex = globToRegExp(name);
 			// Directories are excluded: a directory whose name fits the pattern is not a file to collect.

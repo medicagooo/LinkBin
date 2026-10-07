@@ -19,50 +19,11 @@ import { storeStream } from './store';
 import { nowIso } from './db';
 import { closeSession, recordMultipartSession } from './multipart';
 
-/** The per-file ceiling and the total capacity budget. Duplicated from the router deliberately; see below. */
-const MAX_FILE_BYTES = 100 * 1024 * 1024;
-const STORAGE_BUDGET_BYTES = 10 * 1024 * 1024 * 1024;
+import { MAX_FILE_BYTES, STORAGE_BUDGET_BYTES, measureStorage, reclaimFor, publishVersion, withStorageWriter } from './storage';
 
-/**
- * What the store currently holds, for the capacity check.
- *
- * A narrow read rather than `measureStorage`, so this module does not depend on the router — the two constants
- * above are duplicated for the same reason. A single number with one definition matters more than one location:
- * a mismatch here would be caught by the test that a file above the limit is refused, which asserts the exact
- * figure.
- *
- * Reclaimed objects are excluded, for the reason `planAdmission` documents: their bytes are gone, so charging
- * for them would have the store refuse new files forever after its first eviction.
- */
-async function heldBytes(db: D1Database): Promise<number> {
-	const row = await db
-		.prepare(
-			`SELECT COALESCE(SUM(o.size_bytes), 0) AS n
-			 FROM objects o
-			 LEFT JOIN object_reclaims r ON r.object_id = o.id
-			 WHERE r.object_id IS NULL`,
-		)
-		.first<{ n: number }>();
-	return Number(row?.n ?? 0);
-}
-
-/** The key a collected file is stored under. */
+/** Prefix only; each upload appends a random version id so failure and reclamation cannot touch its predecessor. */
 export function objectKeyFor(hostId: string, path: string): string {
-	// The host is part of the key, not only of the row: two machines holding `/etc/app.conf` are two different
-	// files, and a key without the host would have the second overwrite the first.
-	//
-	// The PATH is the key, with no version component, and that is forced by the schema rather than chosen:
-	// `idx_objects_host_path` is a plain unique index over (host_id, path) covering every row, so two versions of
-	// one file cannot both have rows — and therefore cannot both have keys worth distinguishing. The consequence
-	// is stated because it is easy to assume otherwise: **superseding a file overwrites its predecessor's BYTES.**
-	// The older row survives as a record of what the file hash and size were and when it was replaced, and the
-	// newer row says what replaced it, but the older CONTENT is gone.
-	//
-	// That is a deliberate trade rather than an oversight: this is a distribution store for current files, not a
-	// version archive, and keeping every previous version of every collected file would spend the 10 GB budget on
-	// history. The `history` view in the interface is honest about it — it offers a replaced file's record, not
-	// its bytes — and a versioned key would need a schema change and a different retention policy.
-	return `objects/${hostId}${path}`;
+    return `objects/${hostId}${path}`;
 }
 
 /** One content hash, as lowercase hex. */
@@ -125,51 +86,29 @@ export function collectionPorts(
 	};
 
 	return {
-		/**
-		 * Whether this file could be stored, asked before its bytes are requested.
-		 *
-		 * Two refusals, and both are cheaper to make now than after a transfer:
-		 *
-		 *   - **Above the per-file limit.** Nothing can make room for a file that is too large, so reading it
-		 *     would transfer bytes that are then discarded. The ticket states this as "its bytes are never
-		 *     requested", and this is the check that makes that true.
-		 *   - **No capacity.** A full store refuses before the read rather than after it. Room is not reclaimed
-		 *     here: eviction is a decision with data loss attached, and it belongs where an operator can see it,
-		 *     not buried inside a file-sized decision during a collection.
-		 *
-		 * A size the machine did not report is `null`, and `null` cannot be checked in advance — so the file is
-		 * ATTEMPTED, and the store's own running total is what stops it. Treating an unknown size as "small
-		 * enough" would let a huge file through the gate; treating it as "too large" would skip files that fit.
-		 */
-		async canStore({ size }) {
-			if (size === null) return { ok: true as const };
+        /** Preflight enforces file size and executes the configured oldest-unprotected eviction policy. */
+        async canStore({ path, size }) {
+            if (size === null) return { ok: true as const };
+            if (size > MAX_FILE_BYTES) return { ok: false as const, reason: `the file is ${size} bytes, above the ${MAX_FILE_BYTES} byte per-file limit, so its bytes were not requested`, skipped: true, size };
+            return await withStorageWriter(env, async () => {
+                const previous = await liveObject(env.DB, hostId, path);
+                const room = await reclaimFor(env.DB, env.BUCKET, size, nowIso(), previous?.id);
+                return room.admitted ? { ok: true as const } : { ok: false as const, reason: room.problem ?? 'the storage capacity budget is full', skipped: false, size };
+            });
+        },
 
-			if (size > MAX_FILE_BYTES) {
-				return {
-					ok: false as const,
-					reason: `the file is ${size} bytes, above the ${MAX_FILE_BYTES} byte per-file limit, so its bytes were not requested`,
-					skipped: true,
-					size,
-				};
-			}
-
-			const held = await heldBytes(env.DB);
-			if (held + size > STORAGE_BUDGET_BYTES) {
-				return {
-					ok: false as const,
-					reason: `storing ${size} bytes would take the bucket past its ${STORAGE_BUDGET_BYTES} byte budget, of which ${Math.max(0, STORAGE_BUDGET_BYTES - held)} bytes remain`,
-					skipped: false,
-					size,
-				};
-			}
-
-			return { ok: true as const };
-		},
-
-		async store({ path, stream, mtime }) {
-			const key = objectKeyFor(hostId, path);
+        async store({ path, stream, mtime }) {
+            return await withStorageWriter(env, async () => {
+            const key = `${objectKeyFor(hostId, path)}/${crypto.randomUUID()}`;
+            const usage = await measureStorage(env.DB, env.BUCKET);
+            const remaining = Math.max(0, STORAGE_BUDGET_BYTES - usage.totalBytes);
+            const maxBytes = Math.min(MAX_FILE_BYTES, remaining);
 
 			const outcome = await storeStream(stream, env.BUCKET, key, {
+                maxBytes,
+                partSize: options.partSize ?? 8 * 1024 * 1024,
+                multipartThreshold: options.multipartThreshold ?? 8 * 1024 * 1024,
+                deadline: options.deadline ?? Date.now() + 5 * 60 * 1000,
 				...(options.deadline === undefined ? {} : { deadline: options.deadline }),
 				...(options.partSize === undefined ? {} : { partSize: options.partSize }),
 				...(options.multipartThreshold === undefined ? {} : { multipartThreshold: options.multipartThreshold }),
@@ -185,7 +124,7 @@ export function collectionPorts(
 				}
 				// A file refused for size is a SKIP and everything else is a failure. That distinction is what
 				// `DELIBERATE_KINDS` reads to decide whether an operator needs to look.
-				const tooLarge = /larger than|limit/i.test(outcome.problem ?? '');
+				const tooLarge = maxBytes === MAX_FILE_BYTES && /larger than|limit/i.test(outcome.problem ?? '');
 				return { ok: false as const, reason: outcome.problem ?? 'the file was not stored', skipped: tooLarge, size: null };
 			}
 
@@ -205,59 +144,14 @@ export function collectionPorts(
 			// get backwards.
 			const existing = await liveObject(env.DB, hostId, path);
 			if (existing && existing.content_hash === hash) {
+                await env.BUCKET.delete(key);
 				return { ok: true as const, bytes, hash, unchanged: true };
 			}
 
-			// BYTES ARE ALREADY DURABLE at this point — `storeStream` completed. Only now is any row written.
-			//
-			// A changed file SUPERSEDES its previous version rather than overwriting it, which is what ticket 05
-			// asks for. That takes two writes, and their order is dictated by a constraint rather than chosen.
-			//
-			// **The order here is the opposite of what was first written, and only the database could show why.**
-			// The first attempt inserted the new version and then pointed the old one at it, reasoning that
-			// superseding first "risks leaving no live version". `idx_objects_host_path` refused the insert
-			// outright: it is a PLAIN unique index over (host_id, path) with no partial clause, so two rows for one
-			// path are impossible whether or not either is live. The two-row moment was not merely visible, it was
-			// unreachable.
-			//
-			// So the old version is retired FIRST, and "retired" has to mean `deleted_at` rather than
-			// `superseded_by`, because `superseded_by` needs the new row's id and the new row cannot exist yet.
-			// The new row then takes the path, and the two rows are linked afterwards.
-			//
-			// What an interruption leaves, in each gap:
-			//
-			//   - after retiring, before inserting: no live row for the path. The next run scans, finds no live
-			//     row, and stores the file again. The bytes from this attempt are orphaned under a key nothing
-			//     references — the budget counts them, and evicts them. The FILE is not lost.
-			//   - after inserting, before linking: a live row for the newest version and a retired row for the
-			//     older one, unlinked. The listing is correct; only the "replaced by" link is missing.
-			//
-			// Neither is the unrecoverable state, which would be a live row with no bytes behind it — and no
-			// ordering can produce that, because `storeStream` has already reported success before either write.
-			const now = nowIso();
-
-			if (existing) {
-				await env.DB.prepare('UPDATE objects SET deleted_at = ? WHERE id = ?').bind(now, existing.id).run();
-			}
-
-			const inserted = await env.DB.prepare(
-				`INSERT INTO objects (host_id, path, object_key, size_bytes, content_hash, mtime, created_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			)
-				.bind(hostId, path, key, bytes, hash, mtime, now)
-				.run();
-
-			// Linked after the fact, and this write is the one that can be lost without harm: it turns "a retired
-			// version and a current one" into "a current one, with its predecessor recorded". A failure here
-			// leaves the older row looking deleted rather than superseded, which the history view shows as a
-			// removal instead of a replacement — wrong, but recoverable, and better than losing the file.
-			if (existing) {
-				await env.DB.prepare('UPDATE objects SET superseded_by = ? WHERE id = ?')
-					.bind(Number(inserted.meta.last_row_id), existing.id)
-					.run();
-			}
+            await publishVersion(env, { hostId, path, key, bytes, hash, mtime });
 
 			return { ok: true as const, bytes, hash, unchanged: false };
+            });
 		},
 
 		async recordIssue(issue) {

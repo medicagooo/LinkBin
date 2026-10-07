@@ -10,7 +10,9 @@
     "Preserve the pre-existing BRANCHES.md pending-clear edit in the original checkout, outside task commits",
     "No direct cloud/database writes or deployment",
     "D1 multi-statement atomicity must not be assumed; only SSH_MASTER_KEY is a deployment secret",
-    "Limits: 50 hosts, 100 MiB per file, 10 GiB total"
+    "Limits: 50 hosts, 100 MiB per file, 10 GiB total",
+    "Derived text merge input is bounded to 8 MiB aggregate; larger selections are refused while preserving prior output",
+    "Unchanged files still transfer to determine hash; no live throughput or deployment verification in this task"
   ],
   "acceptance": [
     "Independent standards/spec reviews completed",
@@ -23,9 +25,14 @@
   "evidence": [
     "Review source: b851c02e49746a53fac1f720e308af418a3b3dca",
     "GitHub API main verified equal to review source",
-    "HTTPS fetch with temporary gh credential helper succeeded"
+    "HTTPS fetch with temporary gh credential helper succeeded",
+    "Isolated worktree creation verified at 90ed13f",
+    "Full-code standards/spec reviews completed; final recovery change independently reviewed",
+    "686 tests in 43 files passed offline; 20 added regression tests cover fixes",
+    "UI/migration guards and wrangler offline dry-run passed",
+    "src/storage.ts centralizes capacity, writer lease and durable publication recovery; no new migration/secret"
   ],
-  "next": "Create predeclared isolated worktree, reproduce review findings and repair them",
+  "next": "Execute predeclared e004 local-main integration after checking source commit, ancestry and unchanged user-owned ledger delta; then e005 non-force push and verify remote SHA",
   "created_at": "2026-10-08T01:45:56.4799298+08:00",
-  "updated_at": "2026-10-08T01:45:56.4799298+08:00"
+  "updated_at": "2026-10-08T02:33:34.6459962+08:00"
 }

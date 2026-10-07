@@ -60,7 +60,7 @@ describe('storing one collected file', () => {
 		expect(result.unchanged).toBe(false);
 
 		// The bytes are readable under the key the row names, and the row's hash is of those bytes.
-		const stored = await env.BUCKET.get(objectKeyFor('h1', '/data/a.log'));
+		const stored = await env.BUCKET.get((await liveObject(env.DB, 'h1', '/data/a.log'))!.object_key);
 		expect(await stored!.text()).toBe('hello');
 		const row = await liveObject(env.DB, 'h1', '/data/a.log');
 		expect(row!.content_hash).toBe(result.hash);
@@ -79,8 +79,8 @@ describe('storing one collected file', () => {
 		await one.store({ path: '/etc/app.conf', stream: streamOf('from one'), mtime: null });
 		await two.store({ path: '/etc/app.conf', stream: streamOf('from two'), mtime: null });
 
-		expect(await (await env.BUCKET.get(objectKeyFor('h1', '/etc/app.conf')))!.text()).toBe('from one');
-		expect(await (await env.BUCKET.get(objectKeyFor('h2', '/etc/app.conf')))!.text()).toBe('from two');
+		expect(await (await env.BUCKET.get((await liveObject(env.DB, 'h1', '/etc/app.conf'))!.object_key))!.text()).toBe('from one');
+		expect(await (await env.BUCKET.get((await liveObject(env.DB, 'h2', '/etc/app.conf'))!.object_key))!.text()).toBe('from two');
 	});
 
 	it('treats an unchanged file as unchanged, and writes no second row', async () => {
@@ -142,8 +142,9 @@ describe('storing one collected file', () => {
 
 		const older = rows.find((r) => r.superseded_by !== null)!;
 		const keys = await env.DB.prepare('SELECT object_key FROM objects WHERE id = ?').bind(older.id).first<{ object_key: string }>();
-		expect(keys!.object_key, 'there is one key, because there is one row allowed per path').toBe(objectKeyFor('h1', '/data/a.log'));
-		expect(await (await env.BUCKET.get(objectKeyFor('h1', '/data/a.log')))!.text(), 'and it holds the newest content').toBe('v2');
+		expect(keys!.object_key).not.toBe((await liveObject(env.DB, 'h1', '/data/a.log'))!.object_key);
+        expect(await env.BUCKET.get(keys!.object_key), 'old bytes reclaimed after successor commits').toBeNull();
+		expect(await (await env.BUCKET.get((await liveObject(env.DB, 'h1', '/data/a.log'))!.object_key))!.text(), 'and it holds the newest content').toBe('v2');
 	});
 
 	it('records a file refused for size as a skip with a reason', async () => {

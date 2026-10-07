@@ -243,18 +243,10 @@ describe('running a merge', () => {
 	it('cannot take its own previous output as a source', async () => {
 		await addHostWithFiles('h1', [{ path: '/etc/app/a.yaml', content: 'proxies:\n  - name: p\n' }]);
 		// The pattern is broad enough to match the derived object's own path `/merged.yaml`, so the exclusion of
-		// derived objects is what has to hold — not merely the cycle check, which reasons about output names.
-		const id = await rule([{ pattern: '/*.yaml' }, { pattern: '/etc/app/*.yaml' }]);
-
-		const first = await post('/api/derived/run', { id }, cookie);
-		expect(first.status).toBe(200);
-		const firstResult = (await first.json()) as { sourcesRecorded: number };
-		expect(firstResult.sourcesRecorded).toBe(1);
-
-		const second = await post('/api/derived/run', { id }, cookie);
-		expect(second.status).toBe(200);
-		// Still one real source: the previous result was not consumed, even though its path matches the pattern.
-		expect(((await second.json()) as { sourcesRecorded: number }).sourcesRecorded).toBe(1);
+		// the definition-time cycle check must use these same concrete source paths.
+		const defined = await post('/api/derived', { outputName: 'merged.yaml', combination: 'concat', sources: [{ pattern: '/*.yaml' }, { pattern: '/etc/app/*.yaml' }] }, cookie);
+		expect(defined.status).toBe(400);
+		expect(await defined.text()).toMatch(/cycle/);
 	});
 
 	it('replaces its own previous result rather than accumulating a second one', async () => {

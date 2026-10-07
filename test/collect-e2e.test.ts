@@ -232,6 +232,8 @@ describe('what is not collected', () => {
 			.bind(10 * 1024 * 1024 * 1024 - 10)
 			.run();
 
+        const held = await env.DB.prepare("SELECT id FROM objects WHERE path = '/filler'").first<{id:number}>();
+        await env.DB.prepare("INSERT INTO object_flags (object_id,important,created_at) VALUES (?,1,'2020-01-01')").bind(held!.id).run();
 		await addRule('/var/log/*.log');
 		const body = (await collect(machine({ '/var/log': [{ name: 'app.log', content: 'x', size: 1000 }] }))).body;
 
@@ -255,6 +257,8 @@ describe('what is not collected', () => {
 			.bind(10 * 1024 * 1024 * 1024 - 10)
 			.run();
 
+        const held = await env.DB.prepare("SELECT id FROM objects WHERE path = '/filler'").first<{id:number}>();
+        await env.DB.prepare("INSERT INTO object_flags (object_id,important,created_at) VALUES (?,1,'2020-01-01')").bind(held!.id).run();
 		await addRule('/var/log/*.log');
 		let reads = 0;
 		const base = machine({ '/var/log': [{ name: 'app.log', content: 'x', size: 1000 }] });

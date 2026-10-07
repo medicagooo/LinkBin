@@ -71,6 +71,9 @@ let cookie = '';
 
 async function reset(): Promise<void> {
 	await call('/api/admin/apply-schema', { method: 'POST' });
+    // R2 inventory now counts orphan bytes, so clearing only metadata is not a clean fixture.
+    const residue = await env.BUCKET.list();
+    if (residue.objects.length) await env.BUCKET.delete(residue.objects.map(object => object.key));
 	for (const table of ['derived_objects', 'derived_rules', 'object_sources', 'object_reclaims', 'object_flags', 'shares', 'objects', 'auth_attempts', 'auth_secret']) {
 		await env.DB.prepare(`DELETE FROM ${table}`).run();
 	}

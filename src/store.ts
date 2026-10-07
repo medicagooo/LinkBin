@@ -357,7 +357,15 @@ export async function storeStream(
 				};
 			}
 
-			const { done, value } = await reader.read();
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const read = reader.read();
+            const next = options.deadline === undefined ? read : Promise.race([
+                read,
+                new Promise<never>((_, reject) => {
+                    timer = setTimeout(() => reject(new Error("the run's time budget ran out while waiting for source bytes")), Math.max(0, options.deadline! - now()));
+                }),
+            ]);
+            const { done, value } = await next.finally(() => { if (timer !== undefined) clearTimeout(timer); });
 
 			if (done) {
 				// The source ended, so whatever is buffered is the file's last batch and may be any size.
@@ -408,6 +416,10 @@ export async function storeStream(
 			uploadId: completedUploadId ?? undefined,
 		};
 	} catch (err) {
+        if (!useMultipart && committedBytes > 0) {
+            // Collection supplies an isolated staging key; a callback failure must not publish it.
+            await bucket.delete(key);
+        }
 		await abortMultipart();
 		// `committedBytes: 0` for the same reason as the deadline path: the abort above discarded every uploaded
 		// part, so reporting them as a resume point would tell a caller to skip bytes that are gone. Reporting
@@ -420,6 +432,8 @@ export async function storeStream(
 			parts,
 		};
 	} finally {
+		// Cancellation releases a stalled upstream too; do not wait on a source's unbounded cancel callback.
+		void reader.cancel().catch(() => {});
 		reader.releaseLock();
 	}
 }

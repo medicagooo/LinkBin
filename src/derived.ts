@@ -97,9 +97,15 @@ export function ruleDefinitionProblem(
 	// its own output names is refused here rather than becoming an infinite rebuild later.
 	const refs: MergeRuleRef[] = [
 		...existing.filter((rule) => rule.outputName !== name),
-		{ outputName: name, uses: definition.sources.map((spec) => spec.pattern) },
+		{ outputName: name, uses: definition.sources.filter(spec => spec.hostId === undefined || spec.hostId === '@derived').map(spec => spec.pattern) },
 	];
-	const cycle = detectCycle(refs);
+	// Match dependencies with the same paths/globs as source selection, plus legacy bare names.
+    const cycle = detectCycle(refs.map(rule => ({ outputName: rule.outputName,
+        uses: refs.filter(target => rule.uses.some(pattern => {
+            const regex = globToRegExp(pattern);
+            return regex.test(`/${target.outputName}`) || regex.test(target.outputName);
+        })).map(target => target.outputName),
+    })));
 	if (cycle) {
 		return `this would make a cycle: ${cycle.join(' → ')}; a merge cannot take itself as a source, directly or through another merge`;
 	}

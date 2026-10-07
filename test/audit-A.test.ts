@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:test';
 import worker from '../src/index';
-import { scheduleToken, sessionMaxAgeSeconds, signSession } from '../src/auth';
+import { scheduleToken, sessionMaxAgeSeconds, signSession, attemptLimits } from '../src/auth';
 import { TEST_BASE_URL, TEST_MASTER_KEY } from './fixtures';
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -207,7 +207,7 @@ describe('LIVE: the attempt limit is keyed on a client-supplied header', () => {
 		await setPassword(GOOD);
 		const victim = '203.0.113.7';
 
-		for (let i = 0; i < 9; i++) {
+		for (let i = 0; i < attemptLimits().max; i++) {
 			await signIn(`wrong attempt ${i}`, { 'x-forwarded-for': victim });
 		}
 		const refused = await signIn('wrong attempt 9', { 'x-forwarded-for': victim });
@@ -259,7 +259,7 @@ describe('LIVE: guessing a share password is not limited at all', () => {
 		const cookie = await configured();
 		const objectId = await seedObject();
 
-		const created = await post('/api/shares', { objectId, password: 'k9!x' }, withCookie(cookie));
+		const created = await post('/api/shares', { objectId, password: 'k9!x-long-enough' }, withCookie(cookie));
 		expect(created.status, 'the share is created').toBe(200);
 		const token = ((await created.json()) as any).share.token;
 
@@ -717,7 +717,7 @@ describe('DISPROVED: the share password cannot be bypassed', () => {
 		};
 
 		const protectedToken = await shareOf('hunter2x');
-		expect((await call(`/s/${protectedToken}?password=hunter2`)).status, 'the right password serves the file').toBe(200);
+		expect((await call(`/s/${protectedToken}?password=hunter2x`)).status, 'the right password serves the file').toBe(200);
 		expect((await call(`/s/${protectedToken}?password=hunter3`)).status, 'a near miss does not').toBe(401);
 		expect((await call(`/s/${protectedToken}?password=`)).status, 'an empty submission does not').toBe(401);
 		expect((await call(`/s/${protectedToken}`)).status, 'no password at all does not').toBe(401);

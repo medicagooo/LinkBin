@@ -15,9 +15,9 @@
  * the Worker connects with `cloudflare:sockets` using a Workers-native SSH stack. `ssh2` cannot be
  * used at all because it compiles WebAssembly at import time and workerd forbids runtime compilation.
  *
- * Not built yet: collection into R2, the download path, and scheduling. The `objects` and
- * `multipart_sessions` tables exist, and the byte budget below is measured against them, but nothing
- * ingests yet.
+ * Collection, sharing, scheduling and declarative merges are wired below. Physical-byte accounting,
+ * writer leases and recoverable version publication live in `storage.ts`; collection uses `collect.ts`
+ * and `collect-store.ts`. Remote SSH/throughput verification remains a separate operational step.
  *
  * Constraint that shapes every write path: **D1 has no transactions.** The only atomic unit is a
  * single `db.batch()`. So multi-step intentions are expressed as independently repeatable statements
@@ -31,8 +31,7 @@ import { statementsOf } from './sql';
 import { REQUIRED_SCHEMA, SCHEMA_MIGRATIONS } from './migrations';
 import { resolveRules, type RemoteHost } from './remote';
 import { connectRemote } from './ssh-remote';
-import { planAdmission, type BudgetObject } from './budget';
-import { makeRoomFor, type EvictionOutcome } from './evict';
+import { MAX_FILE_BYTES, STORAGE_BUDGET_BYTES, measureStorage, checkFileBudget, reclaimFor, reclaimVersion, publishVersion, withStorageWriter } from './storage';
 import { collectFrom, type CollectionPorts } from './collect';
 import { closeRun, collectionPorts, cursorFor, openRun } from './collect-store';
 import { abandonStaleSessions } from './multipart';
@@ -46,6 +45,7 @@ import {
 	previewDerived,
 	ruleDefinitionProblem,
 	runDerived,
+	specMatches,
 	type DerivedRuleDefinition,
 	type DerivedRunOutcome,
 	type MergeSourceSpec,
@@ -106,8 +106,6 @@ interface Env {
  * used to walk straight past every one of them.
  */
 const MAX_HOSTS = 50;
-const MAX_FILE_BYTES = 100 * 1024 * 1024; // 100 MB per file
-const STORAGE_BUDGET_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB total in R2, a capacity budget
 
 /**
  * How long one collection invocation may spend before it must leave.
@@ -629,7 +627,7 @@ async function shareByToken(db: D1Database, token: string): Promise<ShareJoinRow
 	try {
 		return await db
 			.prepare(
-				`SELECT s.*, o.object_key, o.path, o.size_bytes, o.content_hash, o.host_id
+				`SELECT s.*, o.object_key, o.path, o.size_bytes, o.content_hash, o.host_id, o.deleted_at, o.superseded_by
 				 FROM shares s
 				 JOIN objects o ON o.id = s.object_id
 				 WHERE s.token = ?`,
@@ -791,6 +789,7 @@ async function createShare(env: Env, request: Request, baseUrl: string): Promise
  */
 async function serveShare(env: Env, request: Request, token: string, baseUrl: string): Promise<Response> {
 	const row = await shareByToken(env.DB, token);
+    if (row && ((row as any).deleted_at || (row as any).superseded_by)) return json({ ok: false, error: 'this file is no longer stored' }, 410);
 	if (!row) {
 		// The same shape as an expired or cancelled link, so a wrong token cannot be distinguished from a
 		// dead one by probing.
@@ -862,180 +861,6 @@ async function serveShare(env: Env, request: Request, token: string, baseUrl: st
 // Storage budget
 // ---------------------------------------------------------------------------------------------
 
-interface StorageUsage {
-	/** Bytes in live objects — rows that are neither superseded nor soft-deleted. */
-	liveBytes: number;
-	/** Bytes retained by superseded or soft-deleted rows that have not been collected yet. */
-	retainedBytes: number;
-	/** Live + retained: what R2 is actually holding, which is what the 10 GB ceiling applies to. */
-	totalBytes: number;
-	objectCount: number;
-	budgetBytes: number;
-	remainingBytes: number;
-	usedFraction: number;
-	/**
-	 * True when the store is full and every remaining file is protected, so new files are being refused and
-	 * nothing may be reclaimed. The interface needs this distinctly from simply being full: only this case is
-	 * resolved by unmarking a file.
-	 */
-	saturatedByImportant: boolean;
-	/** Bytes that are protected from eviction. */
-	importantBytes: number;
-}
-
-/**
- * Every object the bucket holds, in any state, with its protection flag.
- *
- * Superseded and soft-deleted objects are included because they still occupy storage and are still
- * charged — a figure counting only live objects could pass the ceiling while the real total was over it.
- * `object_flags` is joined rather than a column on `objects`, because adding a column is the one migration
- * change that cannot be applied twice (see migration 0003).
- *
- * **Bounded at 5000 rows, and the trade is stated rather than hidden.** An adversarial audit found this
- * reading every row with no limit. The limit is not free: past 5000 objects the total under-reports what is
- * held, so the budget would be judged on a subset — the wrong direction for a storage ceiling to be wrong in.
- * 5000 is at the point where the documented design says "this is as large as it gets": 50 machines each
- * holding 100 files. `objectCount` is returned alongside the total precisely so a deployment large enough to
- * reach the bound is visible rather than quietly mis-measured.
- */
-async function storageObjects(db: D1Database): Promise<BudgetObject[]> {
-	const { results } = await db
-		.prepare(
-			`SELECT o.id                AS id,
-			        o.size_bytes        AS size,
-			        CASE WHEN f.object_id IS NULL THEN 0 ELSE 1 END AS important,
-			        CASE WHEN o.superseded_by IS NULL THEN 0 ELSE 1 END AS superseded,
-			        CASE WHEN o.deleted_at IS NULL THEN 0 ELSE 1 END AS deleted,
-			        CASE WHEN r.object_id IS NULL THEN 0 ELSE 1 END AS reclaimed,
-			        o.created_at        AS created_at
-			 FROM objects o
-			 LEFT JOIN object_flags f ON f.object_id = o.id
-			 LEFT JOIN object_reclaims r ON r.object_id = o.id
-			 ORDER BY o.created_at DESC
-			 LIMIT 5000`,
-		)
-		.all<{ id: number; size: number; important: number; superseded: number; deleted: number; reclaimed: number; created_at: string }>();
-
-	return (results ?? []).map((row) => ({
-		id: Number(row.id),
-		size: Number(row.size ?? 0),
-		important: Number(row.important) === 1,
-		superseded: Number(row.superseded) === 1,
-		deleted: Number(row.deleted) === 1,
-		reclaimed: Number(row.reclaimed) === 1,
-		createdAt: String(row.created_at),
-	}));
-}
-
-/**
- * Measures what the store is holding, and reports the budget state.
- *
- * The totals and the used fraction come from `planAdmission` rather than being computed here as well. They
- * were computed here originally; having the same arithmetic in two places means the number the operator
- * sees and the number the policy acts on can disagree, and the one that is wrong is invisible until the
- * ceiling is crossed.
- */
-async function measureStorage(db: D1Database): Promise<StorageUsage> {
-	const objects = await storageObjects(db);
-	const plan = planAdmission({ ceilingBytes: STORAGE_BUDGET_BYTES, newSize: 0, objects });
-
-	// Reclaimed rows are excluded from every total, and not only from `plan.heldBytes`. A row whose bytes were
-	// removed is not occupying anything, so counting it here would have `liveBytes` plus `retainedBytes` disagree
-	// with `totalBytes` — and the figure the operator reads would exceed the one the policy acts on, which is the
-	// drift `measureStorage` delegates to `planAdmission` in order to avoid.
-	//
-	// Excluded by `reclaimed` and NOT by `deleted`, which is the distinction that matters: a soft-deleted row has
-	// been asked to go but its bytes are still in the bucket and still charged. Excluding those would report room
-	// that does not exist.
-	const held = objects.filter((o) => !o.reclaimed);
-	const liveBytes = held.filter((o) => !o.superseded && !o.deleted).reduce((total, o) => total + o.size, 0);
-	const importantBytes = held.filter((o) => o.important).reduce((total, o) => total + o.size, 0);
-
-	return {
-		liveBytes,
-		retainedBytes: plan.heldBytes - liveBytes,
-		totalBytes: plan.heldBytes,
-		objectCount: objects.length,
-		budgetBytes: STORAGE_BUDGET_BYTES,
-		remainingBytes: Math.max(0, STORAGE_BUDGET_BYTES - plan.heldBytes),
-		usedFraction: plan.usedFraction,
-		// Saturation is a property of what is held, not of a particular incoming file, so it is asked as
-		// "would the smallest possible file fit, and if not, is it because everything left is protected".
-		saturatedByImportant: planAdmission({ ceilingBytes: STORAGE_BUDGET_BYTES, newSize: 1, objects }).saturatedByImportant,
-		importantBytes,
-	};
-}
-
-/**
- * Decides whether one more file of `size` bytes fits, before anything is transferred.
- *
- * Called before an upload rather than after, so a file that cannot fit is refused instead of being
- * read from the host and then discarded. Nothing calls this yet — the ingest path is not built — and
- * that is exactly why it exists now: the alternative is discovering the ceiling in production.
- */
-async function checkFileBudget(db: D1Database, size: number): Promise<{ ok: true } | { ok: false; reason: string }> {
-	if (!Number.isFinite(size) || size < 0) return { ok: false, reason: 'file size is not a valid non-negative number' };
-	if (size > MAX_FILE_BYTES) {
-		return { ok: false, reason: `file is ${size} bytes, above the ${MAX_FILE_BYTES} byte per-file limit` };
-	}
-	const usage = await measureStorage(db);
-	if (usage.totalBytes + size > STORAGE_BUDGET_BYTES) {
-		return {
-			ok: false,
-			reason: `storing ${size} bytes would take the bucket to ${usage.totalBytes + size} of a ${STORAGE_BUDGET_BYTES} byte budget; ${usage.remainingBytes} bytes remain`,
-		};
-	}
-	return { ok: true };
-}
-
-/**
- * Reclaims room for an incoming file, against the real database and bucket.
- *
- * The two steps are ordered bytes-then-record, and the reasoning is in `evict.ts` where the order is decided:
- * an interruption between them must leave a file that looks present but is not, rather than one that looks
- * reclaimed while still occupying the budget.
- *
- * Returns what actually happened rather than what was intended, so a caller cannot report space as free that
- * nothing freed.
- */
-async function reclaimFor(db: D1Database, bucket: R2Bucket, size: number, at: string): Promise<EvictionOutcome> {
-	const objects = await storageObjects(db);
-	return await makeRoomFor({
-		ceilingBytes: STORAGE_BUDGET_BYTES,
-		newSize: size,
-		objects,
-		at,
-		ports: {
-			async objectKey(id) {
-				const row = await db.prepare('SELECT object_key FROM objects WHERE id = ?').bind(id).first<{ object_key: string }>();
-				return row?.object_key ?? null;
-			},
-			async deleteBytes(key) {
-				await bucket.delete(key);
-			},
-			async markDeleted(id, when) {
-				// TWO writes, and both are needed rather than one standing in for the other:
-				//
-				//   - `deleted_at` takes the row out of the live listing, so the browse view stops offering a
-				//     download. The row itself is kept, because it is what makes "this file existed and was removed
-				//     to make room" answerable afterwards.
-				//   - `object_reclaims` is the fact that the BYTES are gone. Without it the budget keeps charging
-				//     for space it has already freed, and the store reports itself full forever.
-				//
-				// The reclaimed row is written first, and it is the one that must not be lost: an interruption
-				// after it leaves a row still listed as live whose bytes are gone, which the browse view reports
-				// honestly. The other order would leave space charged for bytes that no longer exist.
-				const row = await db.prepare('SELECT size_bytes FROM objects WHERE id = ?').bind(id).first<{ size_bytes: number }>();
-				await db
-					.prepare('INSERT OR REPLACE INTO object_reclaims (object_id, bytes_freed, reclaimed_at) VALUES (?, ?, ?)')
-					.bind(id, Number(row?.size_bytes ?? 0), when)
-					.run();
-				await db.prepare('UPDATE objects SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL').bind(when, id).run();
-			},
-		},
-	});
-}
-
 // ---------------------------------------------------------------------------------------------
 // Hosts
 // ---------------------------------------------------------------------------------------------
@@ -1101,7 +926,7 @@ async function upsertHost(env: Env, body: Record<string, unknown>): Promise<Resp
 	// The host ceiling applies to CREATING a host, not to updating one. Checking the total on every
 	// write would make the 50th host uneditable — the operator could no longer rotate its password.
 	if (!existing) {
-		const countRow = await env.DB.prepare('SELECT COUNT(*) AS n FROM hosts').first<{ n: number }>();
+		const countRow = await env.DB.prepare("SELECT COUNT(*) AS n FROM hosts WHERE id != '@derived'").first<{ n: number }>();
 		const count = Number(countRow?.n ?? 0);
 		if (count >= MAX_HOSTS) {
 			throw new HttpError(400, `this deployment is designed for at most ${MAX_HOSTS} hosts and already has ${count}; delete one first`);
@@ -1474,15 +1299,9 @@ export default {
 					 GROUP BY h.id`,
 				).all<{ id: string; enabled: number; last_started_at: string | null; last_completed_at: string | null }>();
 
-				// A previous run that never finished left a cursor; either it belongs to the machine chosen now,
-				// in which case it is resumed, or it is ignored and said so.
-				const open = await env.DB.prepare(
-					`SELECT host_id, cursor_json FROM collection_runs WHERE state = 'running' ORDER BY started_at DESC LIMIT 1`,
-				).first<{ host_id: string; cursor_json: string | null }>();
-
 				const now = Date.now();
 				const startedAt = now;
-				const plan = planRun({
+				let plan = planRun({
 					machines: (machines.results ?? []).map((m) => ({
 						id: m.id,
 						enabled: Number(m.enabled) === 1,
@@ -1490,7 +1309,7 @@ export default {
 						lastSucceededAt: m.last_completed_at,
 						lastOutcome: null,
 					})),
-					cursor: open ? parseCursor(open.cursor_json) : null,
+					cursor: null,
 					now,
 					startedAt,
 					// The wall-clock budget. The platform ceiling is far above this; the figure itself is a
@@ -1520,6 +1339,17 @@ export default {
 					});
 				}
 
+                // Rotation chooses a host first; resume reads its latest run, including deliberate stops.
+                const latest = await env.DB.prepare('SELECT state, cursor_json FROM collection_runs WHERE host_id = ? ORDER BY started_at DESC, id DESC LIMIT 1')
+                    .bind(plan.machineId).first<{ state: string; cursor_json: string | null }>();
+                if (latest && latest.state !== 'finished') {
+                    const cursor = parseCursor(latest.cursor_json);
+                    if (cursor?.hostId === plan.machineId) plan.resumeFrom = cursor.position;
+                    else if (latest.cursor_json) plan.notes.push('the stored cursor is unreadable or belongs to another machine; starting from the beginning');
+                } else if (!latest) {
+                    const foreign = await env.DB.prepare("SELECT id FROM collection_runs WHERE host_id != ? AND state IN ('running', 'stopped') AND cursor_json IS NOT NULL LIMIT 1").bind(plan.machineId).first();
+                    if (foreign) plan.notes.push('another machine has a stored cursor; this machine starts from the beginning');
+                }
 				const hostRow = await getHost(env.DB, plan.machineId);
 				if (!hostRow) throw new HttpError(409, 'the chosen machine is no longer stored');
 
@@ -1535,7 +1365,7 @@ export default {
 				// THE RUN ROW IS OPENED BEFORE ANYTHING ELSE HAPPENS, so an invocation killed mid-collection leaves
 				// a run that is visibly unfinished rather than no run at all. Everything after this point either
 				// closes it or leaves it `running` for the next invocation to see.
-				const runId = await openRun(env.DB, hostRow.id, plan.resumeFrom ? JSON.stringify({ hostId: hostRow.id, position: plan.resumeFrom }) : null);
+				const runId = await openRun(env.DB, hostRow.id, plan.resumeFrom ? cursorFor(hostRow.id, cursorPosition(plan.resumeFrom), new Date(startedAt).toISOString()) : null);
 
 				const deadline = Date.now() + DEFAULT_RUN_BUDGET_MS;
 				const api = collectionPorts(env, hostRow.id, runId, { deadline });
@@ -1625,6 +1455,8 @@ export default {
 				} finally {
 					await close();
 				}
+
+                await refreshDerivedObjects(env, api.recordIssue);
 
 				return json({
 					ok: true,
@@ -1859,15 +1691,10 @@ if (path === '/api/status' && method === 'GET') {
 				const exists = await env.DB.prepare('SELECT id FROM objects WHERE id = ?').bind(id).first<{ id: number }>();
 				if (!exists) throw new HttpError(404, 'no stored file with that id');
 
-				if (body.important) {
-					// `INSERT OR REPLACE` rather than an update: presence of the row IS the flag, so marking twice
-					// is not an error and needs no read first.
-					await env.DB.prepare('INSERT OR REPLACE INTO object_flags (object_id, important, created_at) VALUES (?, 1, ?)')
-						.bind(id, nowIso())
-						.run();
-				} else {
-					await env.DB.prepare('DELETE FROM object_flags WHERE object_id = ?').bind(id).run();
-				}
+                await withStorageWriter(env, async () => {
+                    if (body.important) await env.DB.prepare('INSERT OR REPLACE INTO object_flags (object_id, important, created_at) VALUES (?, 1, ?)').bind(id, nowIso()).run();
+                    else await env.DB.prepare('DELETE FROM object_flags WHERE object_id = ?').bind(id).run();
+                });
 
 				return json({ ok: true, id, important: body.important === true });
 			}
@@ -1875,7 +1702,7 @@ if (path === '/api/status' && method === 'GET') {
 			if (path === '/api/usage' && method === 'GET') {
 				// The per-file limit travels with the totals: both are numbers the operator has to plan around,
 				// and a limit that is only enforced is one they discover by having a file refused.
-				return json({ ok: true, usage: { ...(await measureStorage(env.DB)), maxFileBytes: MAX_FILE_BYTES } });
+				return json({ ok: true, usage: { ...(await measureStorage(env.DB, env.BUCKET)), maxFileBytes: MAX_FILE_BYTES } });
 			}
 
 			// How stale each machine is, and the worst case across all of them.
@@ -1965,7 +1792,7 @@ if (path === '/api/status' && method === 'GET') {
 				const size = body.sizeBytes ?? 0;
 				if (!Number.isFinite(size) || size < 0) throw new HttpError(400, 'sizeBytes must be a non-negative number');
 
-				const before = await measureStorage(env.DB);
+				const before = await measureStorage(env.DB, env.BUCKET);
 				if (size > MAX_FILE_BYTES) {
 					throw new HttpError(400, `that file is ${size} bytes, above the ${MAX_FILE_BYTES} byte per-file limit, so no amount of reclaiming would admit it`);
 				}
@@ -1975,8 +1802,8 @@ if (path === '/api/status' && method === 'GET') {
 					throw new HttpError(400, `that file is larger than the whole ${STORAGE_BUDGET_BYTES} byte budget, so it can never be admitted and nothing was reclaimed`);
 				}
 
-				const outcome = await reclaimFor(env.DB, env.BUCKET, size, nowIso());
-				const after = await measureStorage(env.DB);
+				const outcome = await withStorageWriter(env, () => reclaimFor(env.DB, env.BUCKET, size, nowIso()));
+				const after = await measureStorage(env.DB, env.BUCKET);
 
 				return json({
 					ok: outcome.admitted,
@@ -2036,7 +1863,12 @@ if (path === '/api/status' && method === 'GET') {
 				const body = (await request.json()) as { id?: string };
 				const id = slugify(String(body.id ?? ''));
 				if (!id) throw new HttpError(400, 'id is required');
-				await env.DB.prepare('DELETE FROM hosts WHERE id = ?').bind(id).run();
+				await withStorageWriter(env, async () => {
+                    // Keep metadata until every owned key has been reclaimed. A failed delete remains accounted.
+                    const rows = await env.DB.prepare('SELECT id FROM objects WHERE host_id = ?').bind(id).all<{ id: number }>();
+                    for (const row of rows.results ?? []) await reclaimVersion(env.DB, env.BUCKET, row.id, nowIso());
+                    await env.DB.prepare('DELETE FROM hosts WHERE id = ?').bind(id).run();
+                });
 				return json({ ok: true, deleted: id });
 			}
 
@@ -2171,33 +2003,53 @@ if (path === '/api/status' && method === 'GET') {
 					if (problem) throw new HttpError(400, problem);
 				}
 
-				const selection = await loadMergeSelection(env, definition);
-				const read = await readMergeContents(env, selection.objects);
-
-				// An unreadable source refuses the whole run, and this check is why `readMergeContents` reports one
-				// instead of quietly substituting empty text. WITHOUT IT the run would proceed with the missing
-				// file contributing nothing, produce a result that looks complete, and replace a good previous
-				// result with a short one — the silent partial success this entire feature is built to avoid.
-				// Found by its own test, which is the only reason it is not still here.
-				if (read.problem) {
-					return json({ ok: false, error: read.problem, notes: [], outputName: definition.outputName }, 409);
-				}
-
-				if (path === '/api/derived/preview') {
-					return json({ ok: true, preview: previewDerived(definition, selection.objects, read.contents) });
-				}
-
-				const outcome = runDerived(definition, selection.objects, read.contents);
-				if (!outcome.ok || outcome.content === undefined) {
-					// Nothing is written, so a previous result stays exactly as it was. That is the whole point of
-					// refusing a run rather than storing a partial one, and it is why `runDerived` never returns
-					// content alongside `ok: false`.
-					return json({ ok: false, error: outcome.problem, notes: outcome.notes, outputName: outcome.outputName }, 409);
-				}
-
-				const stored = await storeDerivedObject(env, definition, outcome, selection, ruleId);
-				return json({ ok: true, ...stored });
+                const execute = async () => {
+                    const selection = await loadMergeSelection(env, definition);
+                    const read = await readMergeContents(env, selection.objects);
+                    if (read.problem) return json({ ok: false, error: read.problem, notes: [], outputName: definition.outputName }, 409);
+                    if (path === '/api/derived/preview') return json({ ok: true, preview: previewDerived(definition, selection.objects, read.contents) });
+                    const outcome = runDerived(definition, selection.objects, read.contents);
+                    if (!outcome.ok || outcome.content === undefined) return json({ ok: false, error: outcome.problem, notes: outcome.notes, outputName: outcome.outputName }, 409);
+                    const stored = await storeDerivedObject(env, definition, outcome, selection, ruleId);
+                    return json({ ok: true, ...stored });
+                };
+                return path === '/api/derived/run' ? await withStorageWriter(env, execute) : await execute();
 			}
+
+/**
+ * Collection calls this after committing changed sources. Saved rules run in dependency order and only
+ * when their built signature differs; scheduler credentials stay confined to collection. A failed merge
+ * preserves its last result and records a run issue. No user scripts or production fake remote are involved.
+ */
+async function refreshDerivedObjects(env: Env, recordIssue: CollectionPorts['recordIssue']): Promise<void> {
+    const rows = await env.DB.prepare('SELECT id, rule_json, signature, created_at, updated_at FROM derived_rules ORDER BY id').all<any>();
+    const pending = (rows.results ?? []).map(row => parseStoredRule(row));
+    while (pending.length) {
+        const index = pending.findIndex(rule => !pending.some(other => other.id !== rule.id && rule.sources.some(source =>
+            specMatches(source, { id: 0, hostId: derivedHostId(), path: `/${other.outputName}`, objectKey: '', sizeBytes: 0, contentHash: '' }))));
+        if (index < 0) {
+            await recordIssue({ path: null, kind: 'merge_failed', reason: 'saved merge rules contain a dependency cycle', size: null });
+            return;
+        }
+        const [rule] = pending.splice(index, 1);
+        try {
+            await withStorageWriter(env, async () => {
+                const selection = await loadMergeSelection(env, rule);
+                const signature = mergeSignature(rule, selection.objects);
+                const previous = await env.DB.prepare(`SELECT d.rule_signature FROM derived_objects d JOIN objects o ON o.id = d.object_id
+                    WHERE d.rule_id = ? AND o.deleted_at IS NULL AND o.superseded_by IS NULL`).bind(rule.id).first<{rule_signature: string}>();
+                if (previous?.rule_signature === signature) return;
+                const read = await readMergeContents(env, selection.objects);
+                if (read.problem) throw new Error(read.problem);
+                const outcome = runDerived(rule, selection.objects, read.contents);
+                if (!outcome.ok || outcome.content === undefined) throw new Error(outcome.problem ?? 'merge failed');
+                await storeDerivedObject(env, rule, outcome, selection, rule.id);
+            });
+        } catch (error) {
+            await recordIssue({ path: `/${rule.outputName}`, kind: 'merge_failed', reason: (error as Error).message, size: null });
+        }
+    }
+}
 
 /**
  * The machine id a derived object is filed under.
@@ -2253,7 +2105,7 @@ function definitionFrom(body: Partial<DerivedRuleDefinition>): DerivedRuleDefini
 
 /** The cycle check, against the rules actually stored rather than a list the caller supplied. */
 async function ruleProblemAgainstStored(env: Env, definition: DerivedRuleDefinition): Promise<string | null> {
-	const { results } = await env.DB.prepare('SELECT output_name, rule_json FROM derived_rules LIMIT 500').all<{
+	const { results } = await env.DB.prepare('SELECT output_name, rule_json FROM derived_rules').all<{
 		output_name: string;
 		rule_json: string;
 	}>();
@@ -2262,7 +2114,7 @@ async function ruleProblemAgainstStored(env: Env, definition: DerivedRuleDefinit
 	for (const row of results ?? []) {
 		try {
 			const record = parseStoredRule({ id: '', rule_json: row.rule_json, signature: '', created_at: '', updated_at: '' });
-			existing.push({ outputName: record.outputName, uses: record.sources.map((spec) => spec.pattern) });
+			existing.push({ outputName: record.outputName, uses: record.sources.filter(spec => spec.hostId === undefined || spec.hostId === derivedHostId()).map(spec => spec.pattern) });
 		} catch {
 			// A stored rule that cannot be parsed cannot participate in a cycle, and refusing every new rule
 			// because an old one is corrupt would make the corruption unrecoverable through the interface.
@@ -2275,10 +2127,9 @@ async function ruleProblemAgainstStored(env: Env, definition: DerivedRuleDefinit
 /**
  * The stored objects a rule takes, and the ids of objects that are themselves derived.
  *
- * Both reads are bounded for the same reason every other listing here is. The derived ids are needed so a rule
- * cannot consume a previous result — belt as well as the cycle braces, because the cycle check reasons about
- * output NAMES while this reasons about actual rows, and a rule renamed after storing a result would otherwise
- * slip past the first check.
+ * Selection includes all live candidates; a fixed prefix could produce a silently partial output.
+ * Own-output ids are excluded, while other derived outputs can feed dependency-ordered rules.
+ * Aggregate input bytes are checked before text materialization by readMergeContents.
  */
 async function loadMergeSelection(
 	env: Env,
@@ -2290,10 +2141,9 @@ async function loadMergeSelection(
 			        o.size_bytes AS size_bytes, o.content_hash AS content_hash
 			 FROM objects o
 			 WHERE o.deleted_at IS NULL AND o.superseded_by IS NULL
-			 ORDER BY o.host_id, o.path
-			 LIMIT 5000`,
+			 ORDER BY o.host_id, o.path`,
 		).all<{ id: number; host_id: string; path: string; object_key: string; size_bytes: number; content_hash: string }>(),
-		env.DB.prepare('SELECT object_id FROM derived_objects LIMIT 5000').all<{ object_id: number }>(),
+		env.DB.prepare('SELECT d.object_id FROM derived_objects d JOIN objects o ON o.id = d.object_id WHERE o.deleted_at IS NULL AND o.superseded_by IS NULL').all<{ object_id: number }>(),
 	]);
 
 	const derivedIds = new Set((derived.results ?? []).map((row) => Number(row.object_id)));
@@ -2306,7 +2156,8 @@ async function loadMergeSelection(
 		contentHash: row.content_hash,
 	}));
 
-	return { objects: planMergeSources(definition, stored, derivedIds), derivedIds };
+	const selfIds = new Set(stored.filter(object => object.hostId === derivedHostId() && object.path === `/${definition.outputName}`).map(object => object.id));
+    return { objects: planMergeSources(definition, stored, selfIds), derivedIds };
 }
 
 /**
@@ -2321,6 +2172,11 @@ async function readMergeContents(
 	objects: StoredObject[],
 ): Promise<{ contents: Map<number, string>; problem?: string }> {
 	const contents = new Map<number, string>();
+    const MERGE_INPUT_BYTES = 8 * 1024 * 1024;
+    if (objects.reduce((sum, object) => sum + object.sizeBytes, 0) > MERGE_INPUT_BYTES) {
+        return { contents, problem: 'the merge inputs exceed the 8 MiB in-memory text merge limit' };
+    }
+    let readBytes = 0;
 	const unreadable: string[] = [];
 
 	for (const object of objects) {
@@ -2329,7 +2185,9 @@ async function readMergeContents(
 			unreadable.push(`${object.hostId}:${object.path}`);
 			continue;
 		}
-		contents.set(object.id, await stored.text());
+		readBytes += stored.size;
+        if (readBytes > MERGE_INPUT_BYTES) return { contents, problem: 'the merge inputs exceed the 8 MiB in-memory text merge limit' };
+        contents.set(object.id, await stored.text());
 	}
 
 	if (unreadable.length > 0) {
@@ -2368,69 +2226,20 @@ async function storeDerivedObject(
 
 	const now = nowIso();
 	const hostId = derivedHostId();
-	const objectKey = `derived/${definition.outputName}`;
+	const objectKey = `derived/${crypto.randomUUID()}/${definition.outputName}`;
 	const path = `/${definition.outputName}`;
 
-	// The previous result is REPLACED, not added to. One output name means one live file, and a re-run that left
-	// two objects under `/merged.yaml` would break the uniqueness the object model and the browse view both rest
-	// on: `idx_objects_live` is a unique index over (host, path) for live rows, so a second insert would be
-	// refused anyway — but refused as a constraint error rather than as the intended replacement.
-	//
-	// The old row is tombstoned with `deleted_at` rather than deleted, so its idempotency spine is released
-	// while anything referring to it — a share, a run's issue — keeps resolving. The bytes are removed because
-	// nothing can legitimately read them again, and leaving them would hold capacity against a budget that
-	// counts every object in the bucket.
-	const previous = await env.DB.prepare(
-		"SELECT id, object_key FROM objects WHERE host_id = ? AND path = ? AND deleted_at IS NULL",
-	)
-		.bind(hostId, path)
-		.first<{ id: number; object_key: string }>();
-
-	if (previous) {
-		await env.DB.prepare('UPDATE objects SET deleted_at = ? WHERE id = ?').bind(now, previous.id).run();
-		try {
-			await env.BUCKET.delete(previous.object_key);
-		} catch {
-			// Best effort: the row is already tombstoned, so the object is unreachable either way. Capacity is the
-			// only thing at stake, and reporting a successful merge as failed over an uncollected orphan would be
-			// the worse trade.
-		}
-	}
-
-	await env.BUCKET.put(objectKey, bytes);
-
-	// The object row, then everything that refers to it. Not a transaction — D1 has none, and this project does
-	// not pretend otherwise — so the order is chosen so that an interruption leaves the least misleading state:
-	// the bytes are already durable, and a row without its source record is a derived object that appears as an
-	// ordinary file rather than one claiming provenance it does not have.
-	const inserted = await env.DB.prepare(
-		`INSERT INTO objects (host_id, path, object_key, size_bytes, content_hash, mtime, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-	)
-		.bind(hostId, path, objectKey, bytes.byteLength, hash, null, now)
-		.run();
-
-	const objectId = Number(inserted.meta.last_row_id);
-
-	if (ruleId) {
-		await env.DB.prepare('INSERT INTO derived_objects (object_id, rule_id, rule_signature, built_at) VALUES (?, ?, ?, ?)')
-			.bind(objectId, ruleId, outcome.signature, now)
-			.run();
-	}
-
-	// `INSERT OR REPLACE` and the columns the table actually has, matching how the importance route writes it.
-	// A re-run of a merge replaces the object row, so the flag has to be re-established for the new id; the old
-	// object's flag row goes with it when that row is tombstoned, but stating the flag unconditionally is what
-	// makes this correct whether or not a previous result existed.
-	await env.DB.prepare('INSERT OR REPLACE INTO object_flags (object_id, important, created_at) VALUES (?, 1, ?)')
-		.bind(objectId, now)
-		.run();
-
-	for (const source of selection.objects) {
-		await env.DB.prepare('INSERT INTO object_sources (object_id, source_object_id, source_hash) VALUES (?, ?, ?)')
-			.bind(objectId, source.id, source.contentHash)
-			.run();
-	}
+    if (bytes.byteLength > MAX_FILE_BYTES) throw new HttpError(413, 'the derived output exceeds the per-file limit');
+    const admission = await checkFileBudget(env.DB, bytes.byteLength, env.BUCKET);
+    if (!admission.ok) throw new HttpError(409, admission.reason);
+    await env.BUCKET.put(objectKey, bytes);
+    const objectId = await publishVersion(env, { hostId, path, key: objectKey, bytes: bytes.byteLength, hash, mtime: null }, async id => {
+        if (ruleId) await env.DB.prepare('INSERT INTO derived_objects (object_id, rule_id, rule_signature, built_at) VALUES (?, ?, ?, ?)')
+            .bind(id, ruleId, outcome.signature, now).run();
+        await env.DB.prepare('INSERT OR REPLACE INTO object_flags (object_id, important, created_at) VALUES (?, 1, ?)').bind(id, now).run();
+        for (const source of selection.objects) await env.DB.prepare('INSERT INTO object_sources (object_id, source_object_id, source_hash) VALUES (?, ?, ?)')
+            .bind(id, source.id, source.contentHash).run();
+    });
 
 	return {
 		objectId,

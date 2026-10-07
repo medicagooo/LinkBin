@@ -39,15 +39,16 @@
   ],
   "pending": [
     "vps-file-hub-e038: push main to origin to deploy the UI authentication fix (predeclared; awaiting execution)",
-    "1008-review-bug-repair-e002: create isolated repair worktree (predeclared)"
+    "1008-review-bug-repair-e004: integrate repairs into local main preserving user ledger delta (predeclared)",
+    "1008-review-bug-repair-e005: push verified repaired main to origin (predeclared)"
   ],
   "remote": {
     "origin": "git@github.com:medicagooo/LinkBin.git",
     "url": "https://github.com/medicagooo/LinkBin",
     "visibility": "PUBLIC",
     "default_branch": "main",
-    "last_verified_main": "a1ffe65",
-    "verified_at": "2026-10-07T05:15:00+08:00"
+    "last_verified_main": "b851c02e49746a53fac1f720e308af418a3b3dca",
+    "verified_at": "2026-10-08T02:33:34.6459962+08:00"
   },
   "read": [],
   "changes": [
@@ -101,7 +102,67 @@
       "rules": "An empty credential field still means keep what is already stored, which is what allows a host to be edited without re-entering its credential. A key-mode save no longer sends an empty password and vice versa, so a host never accumulates an unused second credential.",
       "side_effects": "The form no longer closes after a successful save, because closing it would hide the confirmation that was just added. The UI template guard gained an absolute rule against backticks in the script body after a backtick in a comment shipped a page that failed only at runtime.",
       "status": "done; code complete and verified locally against wrangler dev, not yet deployed"
+    },
+    {
+      "main_integration_date": null,
+      "rules": "No multi-statement atomicity, new migration or secret. Capacity includes retained and orphan bytes. Derived source identities remain protected. Predecessor is protected during replacement admission; replacement may need temporary room for both versions.",
+      "request": "1008-review-bug-repair-e001",
+      "before": "Size estimates and incomplete metadata accounting could exceed capacity; concurrent writes could race. Replacement reused keys, could destroy a prior version or lose importance, and stale shares could read replacement bytes. Host deletion left bytes behind.",
+      "requirement_date": "2026-10-08",
+      "after": "Actual streams obey 100 MiB per file and 10 GiB total, inventory includes orphan bytes and all metadata pages, and admissions reclaim oldest unprotected objects. A renewing D1 writer lease serializes mutations. Unique version keys and durable publication recovery preserve the predecessor and protection on failure; retired shares return 410. Host deletion removes owned bytes before metadata.",
+      "deployment_date": null,
+      "status": "implemented and verified offline; main integration and deployment not yet evidenced",
+      "evidence": [
+        "src/storage.ts: storageObjects, withStorageWriter, publishVersion, recoverPublications",
+        "src/collect-store.ts: collectionPorts",
+        "src/store.ts: storeStream",
+        "test/review-regressions.test.ts",
+        "1008-review-bug-repair-e003"
+      ],
+      "id": "C-004",
+      "implementation_date": "2026-10-08",
+      "domain": "storage / retention / downloads"
+    },
+    {
+      "main_integration_date": null,
+      "rules": "Preview remains bounded separately. 50-host count excludes the internal derived host. No VPS agent or probe routes added; unchanged files still transfer for hash comparison.",
+      "request": "1008-review-bug-repair-e001",
+      "before": "An old stopped cursor could revive after a finished run; a timed-out file advanced the cursor and disappeared. More than 2,000 resolved paths and directory wildcards could be skipped; unresolved exclusion rules could allow collection.",
+      "requirement_date": "2026-10-08",
+      "after": "Resume uses the selected host latest run, a completed run invalidates earlier cursors, and an incomplete file remains next. Collection resolves the complete path set then stops explicitly at its per-run walk bound. Directory wildcards expand to concrete paths; unresolved exclusions stop collection.",
+      "deployment_date": null,
+      "status": "implemented and verified offline; real-host throughput not verified",
+      "evidence": [
+        "src/index.ts: collection route",
+        "src/collect.ts: collectFrom",
+        "src/remote.ts: resolveRules",
+        "test/review-regressions.test.ts",
+        "1008-review-bug-repair-e003"
+      ],
+      "id": "C-005",
+      "implementation_date": "2026-10-08",
+      "domain": "collection / rules / resume"
+    },
+    {
+      "main_integration_date": null,
+      "rules": "At most 8 MiB aggregate text input is materialized; larger selections are refused with the old output preserved. Live outputs protect their source host/path identities across replacement. Scheduled credentials do not grant management authority.",
+      "request": "1008-review-bug-repair-e001",
+      "before": "Derived outputs did not refresh after successful source collection; broad derived exclusion prevented chains while wildcard/absolute-path cycles escaped definition checks. Aggregate source reads could exhaust memory and writes bypassed shared admission.",
+      "requirement_date": "2026-10-08",
+      "after": "Successful collections refresh changed derived inputs in dependency order and retry earlier failed refreshes. Derived chains are supported, own output is excluded, and cycles are rejected at definition time. Manual and automatic publication share storage admission and recoverable version switching.",
+      "deployment_date": null,
+      "status": "implemented and verified offline; deployment not verified",
+      "evidence": [
+        "src/index.ts: refreshDerivedObjects, storeDerivedObject",
+        "src/derived.ts: cycle checks",
+        "test/review-regressions.test.ts",
+        "test/derived-routes.test.ts",
+        "1008-review-bug-repair-e003"
+      ],
+      "id": "C-006",
+      "implementation_date": "2026-10-08",
+      "domain": "derived objects / dependencies"
     }
   ],
-  "notes": "C-001 and C-002 concern a deployment of an incomplete feature, not a finished capability. Collection, download and the consumer-facing surface are still unbuilt. C-002 was a security cleanup of state created during the probe; C-003 is the first change to the operator-facing surface itself. See .scratch/vps-file-hub/STATE.md for the current phase."
+  "notes": "C-001/C-002 describe historical deployment and security cleanup before authentication and probe removal; their before/after statements are not current architecture. C-003 records the host form change. Collection, downloads and derived routes now exist; C-004/C-005/C-006 record the 2026-10-08 full-code repairs with offline verification, separately from unverified live deployment. See the latest checkpoint in .scratch/vps-file-hub/STATE.md."
 }

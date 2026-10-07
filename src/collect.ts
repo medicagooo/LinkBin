@@ -29,7 +29,7 @@
  * would be the one unrecoverable state, and step 3 is what prevents it.
  */
 
-import { COLLECTION_MATCH_LIMIT, filesToCollect, resolveRules, type RemoteHost } from './remote';
+import { filesToCollect, resolveRules, type RemoteHost } from './remote';
 import type { RuleEvaluation } from './remote';
 
 /** One file the rules selected. */
@@ -127,13 +127,13 @@ export async function collectFrom(
 	// otherwise, and `filesToCollect` consumes exactly those names — so using the default would collect the first
 	// 50 files per rule and report a successful run while silently leaving the rest. Found by a test that asked a
 	// rule to match more than 50 files.
-	const evaluations = await resolveRules(remote, ports.rules, COLLECTION_MATCH_LIMIT);
+	const evaluations = await resolveRules(remote, ports.rules, Number.POSITIVE_INFINITY, true);
 	const wanted: CollectedFile[] = filesToCollect(evaluations);
 
 	// Rules that could not be resolved are recorded, not silently dropped. "The directory could not be read" and
 	// "the directory is empty" look identical in a count of stored files, and only one of them needs fixing.
 	for (const evaluation of evaluations) {
-		if (evaluation.status === 'error') {
+		if (evaluation.status !== 'ok') {
 			await ports.recordIssue({
 				path: null,
 				kind: 'rule_unreadable',
@@ -145,6 +145,8 @@ export async function collectFrom(
 		}
 	}
 
+    // An unresolved exclusion must fail closed: otherwise an inclusion can disclose explicitly excluded files.
+    if (evaluations.some(e => e.isExclude && e.status !== 'ok')) return { totals, outcomes, evaluations, stoppedEarly: false, resumed: 0 };
 	let stoppedEarly = false;
 
 	// HOW FAR A PREVIOUS RUN GOT, in files from the front of the resolved order.
@@ -231,6 +233,13 @@ export async function collectFrom(
 		}
 
 		const result = await ports.store({ path: file.path, stream, mtime });
+        if (!result.ok && ((ports.deadline !== undefined && now() >= ports.deadline) || /time budget ran out/.test(result.reason))) {
+            // Aborted bytes are not a completed file. Retry this same position next time.
+            handled -= 1;
+            stoppedEarly = true;
+            break;
+        }
+
 
 		if (result.ok) {
 			if (result.unchanged) {
@@ -263,5 +272,6 @@ export async function collectFrom(
 		if (ports.recordProgress) await ports.recordProgress(totals);
 	}
 
+	stoppedEarly ||= from + handled < wanted.length;
 	return { totals, outcomes, evaluations, stoppedEarly, resumed: from + handled };
 }

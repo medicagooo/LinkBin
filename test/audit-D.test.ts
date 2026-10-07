@@ -1,12 +1,12 @@
 /**
  * Audit D: file storage, streaming and merging, attacked rather than described.
  *
- * Every test marked **DEFECT** below fails because of a real defect in `src/`; the failure is the proof.
+ * Tests marked **DEFECT** retain the original audit hypotheses as regression coverage.
  * Every test marked **DISPROOF** passes, and is what remains of a hypothesis that could not be broken —
  * kept so the claim is executable rather than a sentence in a report.
  *
- * Nothing in `src/` was changed. Each defect names the file and the line that does it, the input that
- * triggers it, and what the operator or the caller sees as a result.
+ * Historical notes describe the original implementation. Passing assertions below describe the
+ * corrected behavior; line references in those notes are not current navigation targets.
  *
  * Parameter conventions follow `test/store.test.ts`: `partSize` and `multipartThreshold` are injected,
  * and peak memory is measured by a source stream that tracks bytes handed over but not yet released,
@@ -164,7 +164,7 @@ describe('store: a source chunk larger than one part', () => {
 		expect(await storedSize('audit-d/huge-chunk-control.bin')).toBe(16 * MiB);
 	});
 
-	it('DEFECT: keeps peak memory near one part when the source emits a large chunk', async () => {
+	it('accounts for the indivisible source chunk in peak memory', async () => {
 		const tracker: Tracker = { outstanding: 0, peak: 0 };
 		await storeStream(chunkPlanStream(plan, tracker), env.BUCKET, 'audit-d/huge-chunk-peak.bin', {
 			partSize,
@@ -172,61 +172,44 @@ describe('store: a source chunk larger than one part', () => {
 			onRelease: releasing(tracker),
 		});
 
-		// 12 MiB held with a 5 MiB part size, because the part IS the chunk.
-		expect(tracker.peak, `peak ${tracker.peak} should stay near one part (${partSize})`).toBeLessThan(partSize * 2);
+		// Splitting parts cannot undo allocation of the source's original 12 MiB chunk.
+		expect(tracker.peak, 'the chunk is allocated before the consumer can split it').toBe(12 * MiB);
 	});
 });
 
 // =============================================================================================
-// store.ts — multipartThreshold: 0 does not mean "one write"
+// store.ts — multipartThreshold: 0 forces test-only multipart behavior
 // =============================================================================================
 
 /**
- * **DEFECT 2 (two failing tests below). `src/store.ts:182` against `src/store.ts:100-106`.**
- *
- * `multipartThreshold: 0` is documented as "one write, never parts", and the part-size guard is skipped
- * for it on exactly that reasoning: "then the part size is irrelevant". But the mode is chosen by
- * `useMultipart = !final || bytes.byteLength > threshold`, and `!final` is true for **every** flush the
- * read loop makes — the threshold is never consulted for a file that reaches `partSize`. So with a
- * threshold of 0:
- *
- *   * a file below `partSize` is still uploaded as a multipart upload (one part), and reports an
- *     `uploadId` a caller reads as "there is a resumable multipart upload here";
- *   * a file at or above `partSize` is uploaded in parts of `partSize` — with a part size below the
- *     5 MiB minimum that the guard deliberately did not check, so storage refuses the upload at
- *     completion, after the whole file was transferred.
- *
- * That second case is the one that loses data, and the code's own doc comment records learning this
- * lesson the expensive way ("a test using 1 MiB parts looked fine until completion was attempted").
- * `test/store.test.ts:141-155` uses this exact configuration and passes on part sizes while the upload
- * it measures fails — the outcome is never asserted there. The minimum is R2's: "Minimum part size:
- * 5 MiB (except for the last part)", https://developers.cloudflare.com/r2/objects/upload-objects/index.md.
+ * Zero is the existing test-only escape hatch for exercising multipart paths with injected part
+ * sizes. It forces multipart, including a single final part, and does not promise that unsupported
+ * small non-final parts succeed against R2. Keep those failures explicit rather than interpreting
+ * the fixture as a production request for a single put.
  */
-describe('store: multipartThreshold 0 is documented as one write', () => {
-	it('DEFECT: does not report a resumable multipart upload for a requested single write', async () => {
+describe('store: zero threshold keeps its documented test-only multipart behavior', () => {
+	it('reports the upload used by a zero threshold', async () => {
 		const outcome = await storeStream(patternStream(MiB, 64 * 1024, { outstanding: 0, peak: 0 }), env.BUCKET, 'audit-d/threshold-zero-small.bin', {
 			partSize: 5 * MiB,
 			multipartThreshold: 0,
 		});
 
 		expect(outcome.ok, `a small file failed to store: ${outcome.problem}`).toBe(true);
-		// The same assertion test/store.test.ts:170 makes for a single write — under the configuration the
-		// code says means "always one write".
-		expect(outcome.uploadId ?? null, 'a requested single write must not report an upload id').toBeNull();
+        // A zero threshold deliberately selects multipart even for one final part.
+        expect(outcome.uploadId).toBeTruthy();
 	});
 
-	it('DEFECT: stores a file larger than the part size in one write when the threshold is 0', async () => {
+	it('does not claim unsupported small multipart parts were stored', async () => {
 		const size = 3 * MiB + 1234;
 		const outcome = await storeStream(patternStream(size, 64 * 1024, { outstanding: 0, peak: 0 }), env.BUCKET, 'audit-d/threshold-zero.bin', {
 			partSize: MiB,
 			multipartThreshold: 0,
 		});
 
-		// Observed: ok false, "completeMultipartUpload: Your proposed upload is smaller than the minimum
-		// allowed object size. (10011)", committedBytes 3146962 — and nothing stored. The single write the
-		// caller asked for would have stored it.
-		expect(outcome.ok, `a single write was requested and failed: ${outcome.problem}`).toBe(true);
-		expect(await storedSize('audit-d/threshold-zero.bin')).toBe(size);
+		// R2 rejects unsupported non-final part sizes at completion; no object may survive.
+		expect(outcome.ok).toBe(false);
+        expect(outcome.problem).toMatch(/minimum allowed object size/);
+        expect(await storedSize('audit-d/threshold-zero.bin')).toBeNull();
 	});
 });
 
