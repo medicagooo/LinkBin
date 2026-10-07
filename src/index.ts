@@ -30,6 +30,7 @@ import { LOCALES, pickLocale, renderIndexPage, type Locale } from './ui';
 import { statementsOf } from './sql';
 import { resolveRules, type RemoteHost } from './remote';
 import { connectRemote } from './ssh-remote';
+import { planAdmission, type BudgetObject } from './budget';
 import {
 	attemptLimits,
 	hashPassword,
@@ -453,39 +454,75 @@ interface StorageUsage {
 	budgetBytes: number;
 	remainingBytes: number;
 	usedFraction: number;
+	/**
+	 * True when the store is full and every remaining file is protected, so new files are being refused and
+	 * nothing may be reclaimed. The interface needs this distinctly from simply being full: only this case is
+	 * resolved by unmarking a file.
+	 */
+	saturatedByImportant: boolean;
+	/** Bytes that are protected from eviction. */
+	importantBytes: number;
 }
 
 /**
- * Measures what the store is actually holding.
+ * Every object the bucket holds, in any state, with its protection flag.
  *
- * `liveBytes` is what a consumer can reach; `totalBytes` is what the bucket holds, and R2 charges
- * for the bucket. The budget therefore has to be judged on the total, or superseded objects would
- * let the store grow past 10 GB while every visible number still looked healthy.
+ * Superseded and soft-deleted objects are included because they still occupy storage and are still
+ * charged — a figure counting only live objects could pass the ceiling while the real total was over it.
+ * `object_flags` is joined rather than a column on `objects`, because adding a column is the one migration
+ * change that cannot be applied twice (see migration 0003).
+ */
+async function storageObjects(db: D1Database): Promise<BudgetObject[]> {
+	const { results } = await db
+		.prepare(
+			`SELECT o.id                AS id,
+			        o.size_bytes        AS size,
+			        CASE WHEN f.object_id IS NULL THEN 0 ELSE 1 END AS important,
+			        CASE WHEN o.superseded_by IS NULL THEN 0 ELSE 1 END AS superseded,
+			        CASE WHEN o.deleted_at IS NULL THEN 0 ELSE 1 END AS deleted,
+			        o.created_at        AS created_at
+			 FROM objects o
+			 LEFT JOIN object_flags f ON f.object_id = o.id`,
+		)
+		.all<{ id: number; size: number; important: number; superseded: number; deleted: number; created_at: string }>();
+
+	return (results ?? []).map((row) => ({
+		id: Number(row.id),
+		size: Number(row.size ?? 0),
+		important: Number(row.important) === 1,
+		superseded: Number(row.superseded) === 1,
+		deleted: Number(row.deleted) === 1,
+		createdAt: String(row.created_at),
+	}));
+}
+
+/**
+ * Measures what the store is holding, and reports the budget state.
  *
- * One aggregate query, not a scan: D1 allows 1000 queries per Worker invocation and the row ceiling
- * is what matters here, not the row count.
+ * The totals and the used fraction come from `planAdmission` rather than being computed here as well. They
+ * were computed here originally; having the same arithmetic in two places means the number the operator
+ * sees and the number the policy acts on can disagree, and the one that is wrong is invisible until the
+ * ceiling is crossed.
  */
 async function measureStorage(db: D1Database): Promise<StorageUsage> {
-	const row = await db
-		.prepare(
-			`SELECT
-			   COALESCE(SUM(CASE WHEN superseded_by IS NULL AND deleted_at IS NULL THEN size_bytes ELSE 0 END), 0) AS live_bytes,
-			   COALESCE(SUM(CASE WHEN superseded_by IS NOT NULL OR deleted_at IS NOT NULL THEN size_bytes ELSE 0 END), 0) AS retained_bytes,
-			   COALESCE(SUM(size_bytes), 0) AS total_bytes,
-			   COUNT(*) AS object_count
-			 FROM objects`,
-		)
-		.first<{ live_bytes: number; retained_bytes: number; total_bytes: number; object_count: number }>();
+	const objects = await storageObjects(db);
+	const plan = planAdmission({ ceilingBytes: STORAGE_BUDGET_BYTES, newSize: 0, objects });
 
-	const totalBytes = Number(row?.total_bytes ?? 0);
+	const liveBytes = objects.filter((o) => !o.superseded && !o.deleted).reduce((total, o) => total + o.size, 0);
+	const importantBytes = objects.filter((o) => o.important).reduce((total, o) => total + o.size, 0);
+
 	return {
-		liveBytes: Number(row?.live_bytes ?? 0),
-		retainedBytes: Number(row?.retained_bytes ?? 0),
-		totalBytes,
-		objectCount: Number(row?.object_count ?? 0),
+		liveBytes,
+		retainedBytes: plan.heldBytes - liveBytes,
+		totalBytes: plan.heldBytes,
+		objectCount: objects.length,
 		budgetBytes: STORAGE_BUDGET_BYTES,
-		remainingBytes: Math.max(0, STORAGE_BUDGET_BYTES - totalBytes),
-		usedFraction: totalBytes / STORAGE_BUDGET_BYTES,
+		remainingBytes: Math.max(0, STORAGE_BUDGET_BYTES - plan.heldBytes),
+		usedFraction: plan.usedFraction,
+		// Saturation is a property of what is held, not of a particular incoming file, so it is asked as
+		// "would the smallest possible file fit, and if not, is it because everything left is protected".
+		saturatedByImportant: planAdmission({ ceilingBytes: STORAGE_BUDGET_BYTES, newSize: 1, objects }).saturatedByImportant,
+		importantBytes,
 	};
 }
 
@@ -870,7 +907,9 @@ if (path === '/api/status' && method === 'GET') {
 			}
 
 			if (path === '/api/usage' && method === 'GET') {
-				return json({ ok: true, usage: await measureStorage(env.DB) });
+				// The per-file limit travels with the totals: both are numbers the operator has to plan around,
+				// and a limit that is only enforced is one they discover by having a file refused.
+				return json({ ok: true, usage: { ...(await measureStorage(env.DB)), maxFileBytes: MAX_FILE_BYTES } });
 			}
 
 			// Generates a candidate master key. It cannot install the key itself — a secret is
