@@ -32,6 +32,15 @@ import { resolveRules, type RemoteHost } from './remote';
 import { connectRemote } from './ssh-remote';
 import { planAdmission, type BudgetObject } from './budget';
 import {
+	describeShare,
+	newShareToken,
+	hashSharePassword,
+	resolveLifetime,
+	shareLifetimeProblem,
+	sharePasswordProblem,
+	type ShareRow,
+} from './share';
+import {
 	attemptLimits,
 	hashPassword,
 	minPasswordLength,
@@ -437,6 +446,177 @@ async function handleAuth(path: string, request: Request, env: Env): Promise<Res
 	}
 
 	throw new HttpError(404, `unknown auth route ${path}`);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Sharing
+// ---------------------------------------------------------------------------------------------
+
+const PUBLIC_SHARE_PREFIX = '/s/';
+
+interface ShareJoinRow extends ShareRow {
+	object_key: string;
+	path: string;
+	size_bytes: number;
+	content_hash: string;
+	host_id: string;
+}
+
+async function shareByToken(db: D1Database, token: string): Promise<ShareJoinRow | null> {
+	// Joined to the object so the recipient's page can state the size before anything is sent, as the
+	// ticket requires, without a second query.
+	return await db
+		.prepare(
+			`SELECT s.*, o.object_key, o.path, o.size_bytes, o.content_hash, o.host_id
+			 FROM shares s
+			 JOIN objects o ON o.id = s.object_id
+			 WHERE s.token = ?`,
+		)
+		.bind(token)
+		.first<ShareJoinRow>();
+}
+
+/** What the recipient is told before any bytes move. Never includes the object key or the machine. */
+function publicShareView(row: ShareJoinRow): Record<string, unknown> {
+	return {
+		token: row.token,
+		// The filename is the last path segment, not the full source path: the recipient has no business
+		// learning the directory layout of a machine they were not given access to.
+		filename: row.path.split('/').pop() || row.path,
+		sizeBytes: row.size_bytes,
+		expiresAt: row.expires_at,
+		needsPassword: Boolean(row.password_hash),
+	};
+}
+
+/** The operator's list: what each share points at, and when it dies. */
+function operatorShareView(row: ShareJoinRow): Record<string, unknown> {
+	return {
+		token: row.token,
+		hostId: row.host_id,
+		path: row.path,
+		sizeBytes: row.size_bytes,
+		createdAt: row.created_at,
+		expiresAt: row.expires_at,
+		revokedAt: row.revoked_at,
+		hasPassword: Boolean(row.password_hash),
+		useCount: row.use_count,
+		lastUsedAt: row.last_used_at,
+		// Precomputed so the interface does not have to decide what "expired" means.
+		active: !row.revoked_at && Date.now() < Date.parse(row.expires_at),
+	};
+}
+
+async function createShare(env: Env, request: Request, baseUrl: string): Promise<Response> {
+	const body = (await request.json()) as { objectId?: number; seconds?: number; password?: unknown };
+
+	const objectId = Number(body.objectId);
+	if (!Number.isInteger(objectId) || objectId <= 0) throw new HttpError(400, 'objectId must be the id of a stored file');
+
+	const row = await env.DB.prepare('SELECT id, size_bytes FROM objects WHERE id = ? AND deleted_at IS NULL AND superseded_by IS NULL')
+		.bind(objectId)
+		.first<{ id: number; size_bytes: number }>();
+	if (!row) throw new HttpError(404, 'no live stored file with that id');
+
+	const lifetimeProblem = shareLifetimeProblem(body.seconds === undefined ? undefined : Number(body.seconds));
+	if (lifetimeProblem) throw new HttpError(400, lifetimeProblem);
+
+	// A password of "" would create a share that reads as protected while being open to anyone. That check
+	// lives at creation, where it is a real boundary, rather than only at verification where it is not.
+	let password: { salt: string; hash: string; iterations: number } | null = null;
+	if (body.password !== undefined && body.password !== null) {
+		const problem = sharePasswordProblem(body.password);
+		if (problem) throw new HttpError(400, problem);
+		password = await hashSharePassword(String(body.password));
+	}
+
+	const token = newShareToken();
+	const now = new Date();
+	const expiresAt = new Date(now.getTime() + resolveLifetime(body.seconds === undefined ? undefined : Number(body.seconds)) * 1000);
+
+	await env.DB.prepare(
+		`INSERT INTO shares (token, object_id, password_salt, password_hash, password_iterations, expires_at, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+	)
+		.bind(
+			token,
+			objectId,
+			password?.salt ?? null,
+			password?.hash ?? null,
+			password?.iterations ?? null,
+			expiresAt.toISOString(),
+			now.toISOString(),
+		)
+		.run();
+
+	return json({
+		ok: true,
+		share: {
+			token,
+			// The link is built from the request's own origin, so it works on a custom domain rather than
+			// naming a storage hostname or a hard-coded deployment address.
+			url: `${baseUrl}${PUBLIC_SHARE_PREFIX}${token}`,
+			expiresAt: expiresAt.toISOString(),
+			hasPassword: password !== null,
+		},
+	});
+}
+
+/**
+ * Serves a share to a recipient who has no account and no other access.
+ *
+ * The password is checked **here**, before any byte of the file is produced. That is the whole reason the
+ * link is issued by this Worker rather than by storage: a check anywhere else is bypassed by going to
+ * storage directly, and a refusal that happens after the first bytes have been sent is not a refusal.
+ */
+async function serveShare(env: Env, request: Request, token: string, baseUrl: string): Promise<Response> {
+	const row = await shareByToken(env.DB, token);
+	if (!row) {
+		// The same shape as an expired or cancelled link, so a wrong token cannot be distinguished from a
+		// dead one by probing.
+		return json({ ok: false, error: 'this link is not valid', reason: 'unknown' }, 404);
+	}
+
+	// A password may arrive as a query parameter or an explicit header. The header is preferred so the
+	// password does not end up in a URL that gets logged or shared; the query form exists because a plain
+	// browser download cannot set a header.
+	const supplied = request.headers.get('x-share-password') ?? new URL(request.url).searchParams.get('password');
+
+	const decision = await describeShare(row, supplied);
+	if (!decision.usable) {
+		// `needsPassword` is not a failure — the recipient is being asked for one thing, not told no — so it
+		// is answered with the metadata they need to decide, and no content.
+		const status = decision.needsPassword ? 401 : 410;
+		return json({ ok: false, error: decision.message, reason: decision.reason, file: publicShareView(row) }, status);
+	}
+
+	const object = await env.BUCKET.get(row.object_key);
+	if (!object) {
+		// The record says the file should exist and the bucket disagrees. That is a real fault worth naming
+		// rather than dressing up as a missing share.
+		return json({ ok: false, error: 'the stored file is missing', reason: 'gone' }, 410);
+	}
+
+	// Bookkeeping only: a lost update here costs a count, not correctness, so it needs no atomicity.
+	await env.DB.prepare('UPDATE shares SET use_count = use_count + 1, last_used_at = ? WHERE token = ?')
+		.bind(new Date().toISOString(), row.token)
+		.run();
+
+	const filename = row.path.split('/').pop() || 'download';
+
+	// Streamed, not buffered: the per-file limit is far larger than this runtime's memory, so reading the
+	// object into a variable here would defeat the entire streaming pipeline that stored it.
+	return new Response(object.body, {
+		status: 200,
+		headers: {
+			'content-type': 'application/octet-stream',
+			'content-length': String(object.size),
+			// The size is stated before the download starts, and the filename is quoted so a name with a space
+			// or a semicolon cannot break the header.
+			'content-disposition': `attachment; filename="${filename.replace(/["\\]/g, '_')}"`,
+			'cache-control': 'no-store',
+		},
+	});
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -848,6 +1028,15 @@ export default {
 			// so the two are genuinely distinct: revoking one does not disable the other. Collection
 			// itself arrives with ticket 08; this exists now because a credential nobody can present is
 			// not evidence that the distinction works.
+			// A share link is deliberately reachable without signing in: the recipient has no account and must
+			// not need one. This is the one place where an unauthenticated request can obtain file bytes, and
+			// what bounds it is that a token grants exactly one file and is checked here rather than at storage.
+			if (path.startsWith(PUBLIC_SHARE_PREFIX)) {
+				const token = decodeURIComponent(path.slice(PUBLIC_SHARE_PREFIX.length));
+				if (!token) throw new HttpError(404, 'no share token given');
+				return await serveShare(env, request, token, new URL(request.url).origin);
+			}
+
 			if (path === '/api/collect' && method === 'POST') {
 				if (!(await isScheduler(env, request))) {
 					throw new HttpError(401, 'this endpoint takes the scheduler credential');
@@ -904,6 +1093,34 @@ if (path === '/api/status' && method === 'GET') {
 					hosts: { count: Number(hosts?.n ?? 0), max: MAX_HOSTS },
 					limits: { maxFileBytes: MAX_FILE_BYTES, storageBudgetBytes: STORAGE_BUDGET_BYTES },
 				});
+			}
+
+			if (path === '/api/shares' && method === 'POST') {
+				return await createShare(env, request, new URL(request.url).origin);
+			}
+
+			if (path === '/api/shares' && method === 'GET') {
+				const { results } = await env.DB.prepare(
+					`SELECT s.*, o.object_key, o.path, o.size_bytes, o.content_hash, o.host_id
+					 FROM shares s
+					 JOIN objects o ON o.id = s.object_id
+					 ORDER BY s.created_at DESC`,
+				).all<ShareJoinRow>();
+				return json({ ok: true, shares: (results ?? []).map(operatorShareView) });
+			}
+
+			if (path === '/api/shares/revoke' && method === 'POST') {
+				const body = (await request.json()) as { token?: string };
+				const token = String(body.token ?? '');
+				if (!token) throw new HttpError(400, 'token is required');
+
+				// Revoking is a timestamp rather than a delete, so the recipient is told the link was cancelled
+				// rather than being shown a missing one, and the operator's list keeps the history.
+				const result = await env.DB.prepare('UPDATE shares SET revoked_at = ? WHERE token = ? AND revoked_at IS NULL')
+					.bind(nowIso(), token)
+					.run();
+				if (!result.meta.changes) throw new HttpError(404, 'no active share with that token');
+				return json({ ok: true, revoked: token });
 			}
 
 			if (path === '/api/usage' && method === 'GET') {
