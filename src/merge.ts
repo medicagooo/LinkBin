@@ -44,11 +44,58 @@ export type Combination =
 	/** Parse every source as a document and union the list-valued top-level keys, removing duplicates. */
 	| 'yaml-list-union';
 
+/**
+ * A field to rewrite using where an entry came from.
+ *
+ * This is the operator that makes a union of several documents **usable** rather than merely correct. The
+ * real case: every source lists groups named `负载均衡`, `自动选择` and `选择`, identical names with
+ * different contents, so a merged file has twenty-four groups with three names between them and no way to
+ * tell which is which. The operator's hand-merged file avoids that by renaming each group after its source
+ * and its type, and a declarative rule could not express it — which is why this exists.
+ *
+ * Declarative, not code (ADR-0003): a field name, a separator and whether to include a second field. If a
+ * transformation cannot be expressed this way, the answer is another bounded operator with its own tests,
+ * never an execution hatch.
+ */
+export interface NameFromSource {
+	/** The field to rewrite, for example `name`. */
+	field: string;
+	/**
+	 * Which top-level keys to rewrite. **Required**, and the reason is a real near-miss.
+	 *
+	 * Without a scope this operator rewrites *every* list entry that happens to carry the field. In the real
+	 * configuration, individual proxy nodes also have a `name`, so the provider name is already in it
+	 * (`vless-reality-vision-node.dartnode.com`) — and renaming those too would have made forty node names
+	 * worse while looking like it had done its job. Only `proxy-groups` should be renamed, and saying so is
+	 * the rule's business rather than something inferred.
+	 */
+	keys: string[];
+	/** Placed between the parts. Defaults to a single space. */
+	separator?: string;
+	/**
+	 * A second field to include, for example `type`.
+	 *
+	 * Needed because one source usually contains several entries that share a name and differ only by type —
+	 * three proxy groups called `负载均衡`, `自动选择` and `选择`, distinguished by `load-balance`,
+	 * `url-test` and `select`. Naming by source alone would still collide.
+	 */
+	includeField?: string;
+	/** Where the qualifiers go relative to the entry's own value. Defaults to `after`. */
+	order?: 'before' | 'after';
+	/**
+	 * Rewrites a qualifier value before it is used, for example mapping `load-balance` to a symbol.
+	 * Keys are the exact values; anything absent is used as-is.
+	 */
+	replace?: Record<string, string>;
+}
+
 export interface MergeRule {
 	outputName: string;
 	combination: Combination;
 	/** Hash of the source set and this rule, for deciding whether a stored result is current. */
 	signature?: string;
+	/** Rewrite a field using its source's name, so entries from different sources stay distinguishable. */
+	nameFromSource?: NameFromSource;
 }
 
 export interface MergeResult {
@@ -168,7 +215,7 @@ export function mergeText(rule: MergeRule, sources: MergeSource[], options: { ex
 
 	let content: string;
 	if (rule.combination === 'yaml-list-union') {
-		const structured = unionDocuments(usable);
+		const structured = unionDocuments(usable, rule.nameFromSource);
 		if (!structured.ok) {
 			return { ok: false, sourceCount: normalized.length, sourceBytes, notes, problem: structured.problem };
 		}
@@ -194,6 +241,91 @@ function byteLength(text: string): number {
 }
 
 /**
+ * The name of a source, as used when rewriting a field.
+ *
+ * The file's base name without its extension: `racknerd.107.172.99.23.yaml` becomes
+ * `racknerd.107.172.99.23`. The whole path would be unusable in a field, and the directory is the same for
+ * every source anyway.
+ */
+export function sourceName(path: string): string {
+	const base = path.split('/').pop() ?? path;
+	return base.replace(/\.(ya?ml|json|txt|conf|cfg)$/i, '');
+}
+
+/**
+ * Rewrites a field on each entry using the source it came from.
+ *
+ * Applied after the union, because it needs to know which source each surviving entry came from — and that
+ * is only known once duplicates have been removed.
+ *
+ * An entry whose source is unknown is left alone rather than given a name built from nothing: a field that
+ * says `undefined 负载均衡` is worse than one that says `负载均衡`, because it looks deliberate.
+ */
+export function applyNameFromSource(
+	out: Record<string, unknown>,
+	provenance: Map<string, string>,
+	rule: NameFromSource,
+): { rewritten: number; skipped: number } {
+	const separator = rule.separator ?? ' ';
+	const scope = new Set(rule.keys);
+	let rewritten = 0;
+	let skipped = 0;
+
+	// The union orders keys alphabetically, so the output order stays deterministic whether or not this
+	// operator runs — which is what makes an unchanged merge produce identical bytes.
+	for (const key of Object.keys(out).sort()) {
+		// Only the keys the rule names. Everything else is left exactly as it was.
+		if (!scope.has(key)) continue;
+
+		const value = out[key];
+		if (!Array.isArray(value)) continue;
+
+		out[key] = value.map((entry) => {
+			if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return entry;
+			const record = { ...(entry as Record<string, unknown>) };
+
+			// An entry whose source cannot be determined is left alone. Naming it from nothing would produce a
+			// field that looks deliberate and says nothing true.
+			const source = provenance.get(canonicalForm(entry));
+			if (!source) {
+				skipped += 1;
+				return record;
+			}
+
+			// The entry's OWN value is kept at the end when it has one, so the result stays recognisable as the
+			// thing it was: `负载均衡` becomes `dartnode load-balance 负载均衡` rather than a name with its
+			// identity swapped out for the provider. An entry with no value of its own — a group that was never
+			// named — takes the qualifiers alone, because the rule is only applied to keys it was told to
+			// rewrite, so leaving it untouched would defeat the point of naming it.
+			const own = record[rule.field] === undefined ? null : String(record[rule.field]);
+			const parts: string[] = [];
+			const sourcePart = sourceName(source);
+			const typePart = rule.includeField ? renderPart(record[rule.includeField], rule.replace) : null;
+
+			const qualifiers = typePart === null ? [sourcePart] : rule.order === 'before' ? [typePart, sourcePart] : [sourcePart, typePart];
+			parts.push(...qualifiers);
+			// The entry's own value goes last when it has one, so the qualifiers read as a prefix and the
+			// original name stays intact at the end of it.
+			if (own !== null) parts.push(own);
+
+			record[rule.field] = parts.join(separator);
+			rewritten += 1;
+			return record;
+		});
+	}
+
+	return { rewritten, skipped };
+}
+
+/** Renders a field's value for use in a name, applying the replacement map when there is one. */
+function renderPart(value: unknown, replace?: Record<string, string>): string | null {
+	if (value === undefined || value === null) return null;
+	const text = String(value);
+	if (replace && Object.prototype.hasOwnProperty.call(replace, text)) return replace[text];
+	return text;
+}
+
+/**
  * Unions list-valued top-level keys across documents, removing duplicates.
  *
  * The comparison is **structural, not textual**: two entries that differ only in key order, quoting or
@@ -214,11 +346,21 @@ function byteLength(text: string): number {
  * source was read last — a merge whose result depends on read order cannot be reasoned about, and the
  * operator would have no way to tell it had happened.
  */
-function unionDocuments(sources: MergeSource[]): { ok: boolean; content: string; notes: string[]; problem?: string } {
+function unionDocuments(
+	sources: MergeSource[],
+	naming?: NameFromSource,
+): { ok: boolean; content: string; notes: string[]; problem?: string } {
 	const notes: string[] = [];
 	// Sources are visited in the order given, which `mergeText` has already made deterministic, so "the
 	// first source that mentions this key" is itself deterministic.
 	const perKey = new Map<string, Map<string, unknown>>();
+	/**
+	 * Which source each surviving entry came from, keyed by its canonical form.
+	 *
+	 * Kept because naming an entry after its source is only possible if the link between them survives the
+	 * union — and after duplicates are removed, the link is no longer derivable from the entry itself.
+	 */
+	const provenance = new Map<string, string>();
 	const scalars = new Map<string, { value: unknown; from: string }>();
 	const conflicts: string[] = [];
 
@@ -253,7 +395,13 @@ function unionDocuments(sources: MergeSource[]): { ok: boolean; content: string;
 				const bucket = perKey.get(key) ?? new Map<string, unknown>();
 				for (const entry of value) {
 					const canonical = canonicalForm(entry);
-					if (!bucket.has(canonical)) bucket.set(canonical, entry);
+					if (!bucket.has(canonical)) {
+						bucket.set(canonical, entry);
+						// Recorded on the entry that SURVIVES. A duplicate from a later source does not overwrite
+						// this, so the name reflects the source that actually contributed the entry — which is the
+						// one a reader would expect to see.
+						provenance.set(canonical, src.path);
+					}
 				}
 				perKey.set(key, bucket);
 				continue;
@@ -284,6 +432,27 @@ function unionDocuments(sources: MergeSource[]): { ok: boolean; content: string;
 		out[key] = entries;
 	}
 
+	// After the union, because naming needs to know which source each surviving entry came from.
+	if (naming) {
+		const before = countNames(out, naming.field);
+		const { rewritten } = applyNameFromSource(out, provenance, naming);
+		const after = distinctNames(out, naming.field);
+
+		if (rewritten > 0) {
+			notes.push(`renamed ${rewritten} entries in ${naming.field} after their source (${after} distinct names)`);
+		}
+		if (rewritten > after) {
+			// Said out loud, because colliding names are the thing this operator exists to remove, and a partial
+			// fix looks exactly like a complete one.
+			notes.push(`${rewritten - after} entries still share a name, so the naming rule does not distinguish them fully`);
+		}
+		if (before !== rewritten) {
+			// Entries that carry the field but were not renamed — which means their source is unknown. Silence
+			// here would hide half a job.
+			notes.push(`${before - rewritten} entries carry ${naming.field} but were not renamed`);
+		}
+	}
+
 	const content = stringifyYaml(out, { lineWidth: 0 });
 	// Parsing the output is the check, not reading it. A merge that produces something the parser cannot
 	// read is broken regardless of how it looks.
@@ -294,6 +463,33 @@ function unionDocuments(sources: MergeSource[]): { ok: boolean; content: string;
 	}
 
 	return { ok: true, content, notes };
+}
+
+/** How many list entries carry a value in a given field at all. */
+function countNames(out: Record<string, unknown>, field: string): number {
+	let count = 0;
+	for (const value of Object.values(out)) {
+		if (!Array.isArray(value)) continue;
+		for (const entry of value) {
+			if (entry && typeof entry === 'object' && (entry as Record<string, unknown>)[field] !== undefined) count++;
+		}
+	}
+	return count;
+}
+
+/** How many distinct values a field has across all list entries. */
+function distinctNames(out: Record<string, unknown>, field: string): number {
+	const seen = new Set<string>();
+	for (const value of Object.values(out)) {
+		if (!Array.isArray(value)) continue;
+		for (const entry of value) {
+			if (entry && typeof entry === 'object') {
+				const name = (entry as Record<string, unknown>)[field];
+				if (name !== undefined) seen.add(String(name));
+			}
+		}
+	}
+	return seen.size;
 }
 
 /** A stable text form for comparison: keys sorted, so formatting differences do not create duplicates. */
