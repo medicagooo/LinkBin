@@ -28,6 +28,7 @@ import { credentialFingerprint, decryptField, encryptField, generateMasterKey } 
 import { getHost, listHosts, nowIso, rulesForHost, slugify, type HostRow, type SourceRuleRow } from './db';
 import { LOCALES, pickLocale, renderIndexPage, type Locale } from './ui';
 import { statementsOf } from './sql';
+import { REQUIRED_SCHEMA, SCHEMA_MIGRATIONS } from './migrations';
 import { resolveRules, type RemoteHost } from './remote';
 import { connectRemote } from './ssh-remote';
 import { planAdmission, type BudgetObject } from './budget';
@@ -56,13 +57,10 @@ import {
 	timingSafeEqual,
 	verifySession,
 } from './auth';
-// Wrangler's default bundling treats `.sql` as a `Text` module, so these are plain strings at
-// runtime. Importing the migration files keeps the CLI path and the in-Worker path on one schema.
-// A new migration must be added here AND to the list below, or a CLI-less deployment would never
-// apply it.
-import initSchemaSql from '../migrations/0001_init.sql';
-import usageIndexSql from '../migrations/0002_usage_index.sql';
-import receiptsSql from '../migrations/0003_receipts_importance_and_sources.sql';
+// Wrangler's default bundling treats `.sql` as a `Text` module, so these are plain strings at runtime.
+// Importing the migration files keeps the CLI path and the in-Worker path on one schema. The list itself
+// lives in `src/migrations.ts` so a test can check it against the files: a migration that is not listed is
+// never applied by a CLI-less deployment, and that is not visible from anywhere the running Worker can see.
 
 interface Env {
 	DB: D1Database;
@@ -129,26 +127,9 @@ function requireMasterKey(env: Env): string {	if (!env.SSH_MASTER_KEY) {
 // ---------------------------------------------------------------------------------------------
 // Schema bootstrap
 // ---------------------------------------------------------------------------------------------
-
-/**
- * Every migration a CLI-less deployment has to apply, in order.
- *
- * This list is the in-Worker equivalent of `wrangler d1 migrations apply`. It has to be extended
- * whenever a migration file is added, which is the one maintenance cost of not having a CLI attached
- * to a release. `applySchema` reports what it applied so a missing entry is visible rather than
- * silent.
- *
- * **Every statement in every migration must be idempotent, and that is a constraint on the migration
- * file rather than something this code compensates for.** `CREATE ... IF NOT EXISTS` is naturally
- * repeatable; `ALTER TABLE ... ADD COLUMN` is not, and the database has no `ADD COLUMN IF NOT
- * EXISTS`. An earlier draft learned this by failing its own "safe to run again" test. Prefer a new
- * table over a new column on an existing one.
- */
-const SCHEMA_MIGRATIONS: { name: string; sql: string }[] = [
-	{ name: '0001_init', sql: initSchemaSql },
-	{ name: '0002_usage_index', sql: usageIndexSql },
-	{ name: '0003_receipts_importance_and_sources', sql: receiptsSql },
-];
+// The migration list and the required-object list now live in `src/migrations.ts`, so they can be checked
+// against the migration files themselves by a test rather than by reading. Both have drifted before, and
+// both times the symptom was a readiness check that reported a healthy schema while a route could not run.
 
 /**
  * The column a migration statement would add, or null when the statement adds no column.
@@ -207,49 +188,13 @@ async function applySchema(env: Env): Promise<Response> {
 }
 
 /**
- * Reports whether the schema is present, so the UI can tell the operator what to do next.
+ * Reports whether the schema is present, so the interface can tell the operator what to do next.
  *
- * Indexes are checked alongside tables: a table can exist from an older deployment while a later
- * migration never ran, and that is precisely the state this returns `ready: false` for.
+ * The list of required objects lives in `src/migrations.ts` so a test can check it against the migration
+ * files. It has drifted before: two features added tables without extending it, and the result was a
+ * readiness check reporting a healthy schema while a route could not run at all — worse than no check,
+ * because it is believed.
  */
-/**
- * What the Worker's own queries depend on, per feature.
- *
- * One list in one place, rather than a bare array inside the check: this is what `/api/status` reports and
- * what the schema guard refuses on, so a feature that adds a table has exactly one place to declare it.
- *
- * It was previously a single list that two later features did not extend, with the result that
- * `/api/status` reported a healthy schema while `/api/shares` could not run at all. A readiness check that
- * says ready when it is not is worse than no check, because it is believed.
- *
- * Indexes are listed alongside tables because some carry correctness rather than speed — the uniqueness
- * spine over `objects` is what makes collection idempotent — and because a table can exist from an older
- * deployment while a later migration never ran.
- */
-const REQUIRED_SCHEMA = [
-	// Core: machines, their rules, stored files, and in-progress uploads.
-	'hosts',
-	'source_rules',
-	'objects',
-	'multipart_sessions',
-	'idx_objects_usage',
-	// Receipts: one row per run, and one per file that was not handled.
-	'collection_runs',
-	'collection_issues',
-	'idx_runs_host_started',
-	// Derived objects, and the record of what one was built from.
-	'object_sources',
-	// The importance flag, in its own table because adding a column is the one migration change that
-	// cannot be applied twice.
-	'object_flags',
-	'idx_objects_eviction',
-	// Authentication.
-	'auth_secret',
-	'auth_attempts',
-	// Sharing.
-	'shares',
-] as const;
-
 async function schemaStatus(env: Env): Promise<{ ready: boolean; missing: string[] }> {
 	const { results } = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','index')").all<{
 		name: string;

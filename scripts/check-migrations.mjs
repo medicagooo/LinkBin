@@ -65,4 +65,56 @@ if (problems.length) {
 	process.exit(1);
 }
 
-console.log(`Migration guard: ${total} statements across ${files.length} files, all repeatable and well-formed`);
+// --- every migration file is listed by the Worker -----------------------------------------------
+//
+// A migration file that exists but is not named in `src/migrations.ts` is **never applied** by a
+// deployment with no CLI, and nothing the running Worker can see would reveal it: it reports the
+// migrations it holds, and it does not hold that one. This has already gone wrong in the other direction
+// here — a feature added a table without extending the required list, and the readiness check kept
+// reporting a healthy schema while its routes could not run.
+//
+// Checked by reading the file rather than by importing it, because importing TypeScript here would need a
+// build step this guard deliberately does not have.
+const registryPath = 'src/migrations.ts';
+let registryProblems = [];
+try {
+	const registry = readFileSync(registryPath, 'utf8');
+	const block = /SCHEMA_MIGRATIONS\s*:\s*Migration\[\]\s*=\s*\[([\s\S]*?)\];/.exec(registry);
+	if (!block) {
+		registryProblems.push(`${registryPath}: could not find the SCHEMA_MIGRATIONS list to check`);
+	} else {
+		const listed = [...block[1].matchAll(/name:\s*'([^']+)'/g)].map((m) => m[1]);
+		// Each migration's SQL is imported from a file; check the imports line up with the list.
+		const importedSql = [...registry.matchAll(/from\s+'\.\.\/migrations\/([^']+)\.sql'/g)].map((m) => m[1]);
+
+		for (const file of files) {
+			const stem = file.replace(/\.sql$/, '');
+			const named = listed.some((name) => name === stem);
+			const imported = importedSql.includes(stem);
+			if (!named || !imported) {
+				registryProblems.push(
+					`${file} exists but the Worker does not apply it (named in the list: ${named}, imported: ${imported}); it would never run on a deployment with no CLI`,
+				);
+			}
+		}
+
+		for (const name of listed) {
+			if (!files.includes(`${name}.sql`)) {
+				registryProblems.push(`${registryPath} lists ${name}, but migrations/${name}.sql does not exist`);
+			}
+		}
+	}
+} catch (err) {
+	registryProblems.push(`${registryPath}: ${err.message}`);
+}
+
+if (registryProblems.length) {
+	console.error(`\nMigration guard: ${registryProblems.length} problem(s) with the migration registry\n`);
+	for (const p of registryProblems) console.error(`  ${p}`);
+	console.error('');
+	process.exit(1);
+}
+
+console.log(
+	`Migration guard: ${total} statements across ${files.length} files, all repeatable, well-formed and applied by the Worker`,
+);
