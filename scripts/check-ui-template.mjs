@@ -170,6 +170,42 @@ for (let i = 0; i < lines.length; i++) {
 	}
 }
 
+// Third hazard: a CSS custom property that is used but never defined.
+//
+// This fails silently, which is why it needs a check rather than care. An undefined custom property is
+// not an error in CSS: it resolves to nothing, so `border: 1px solid var(--missing)` simply renders no
+// border and `background: var(--missing)` renders no background. The page still loads and still passes
+// every test, and the only symptom is a panel that looks slightly wrong — which is easy to attribute to
+// taste rather than to a typo.
+//
+// It happened while adding the shared-links panel: four variable names were invented that did not exist
+// in this stylesheet, and every one of them would have quietly done nothing.
+const undefinedVars = [];
+{
+	const defined = new Set();
+	for (const match of source.matchAll(/(--[a-z0-9-]+)\s*:/g)) defined.add(match[1]);
+
+	for (let i = 0; i < lines.length; i++) {
+		// Only the stylesheet uses these; a `var(--x)` elsewhere would be prose about CSS.
+		for (const match of lines[i].matchAll(/var\((--[a-z0-9-]+)/g)) {
+			const name = match[1];
+			if (!defined.has(name)) {
+				undefinedVars.push({ line: i + 1, text: lines[i].trim(), reason: `${name} is used but never defined in this stylesheet` });
+			}
+		}
+	}
+}
+
+if (undefinedVars.length) {
+	console.error('\nUI template guard: undefined CSS custom properties in src/ui.ts\n');
+	console.error('  These resolve to nothing and fail silently, so the page renders without them.\n');
+	for (const o of undefinedVars) {
+		console.error(`  line ${o.line}: ${o.reason}`);
+		console.error(`    ${o.text}\n`);
+	}
+	process.exit(1);
+}
+
 if (newlineInString.length) {
 	console.error('\nUI template guard: a JS string literal spans a line break in src/ui.ts\n');
 	console.error('  Inside the template, write \\\\n instead of \\n so the escape reaches the browser.\n');

@@ -168,6 +168,25 @@ export function renderIndexPage(locale: Locale = 'en'): string {
         <div id="rulelist"></div>
       </section>
 
+      <section class="glass shares" aria-labelledby="shares-h">
+        <h2 id="shares-h" data-i18n="shares.title">Shared links</h2>
+        <p class="lede" data-i18n="shares.lede"></p>
+        <div class="fields">
+          <label class="f narrow"><span data-i18n="shares.objectId">Stored file id</span><input id="s-object" inputmode="numeric" spellcheck="false" placeholder="1"></label>
+          <label class="f narrow"><span data-i18n="shares.lifetime">Lasts</span><select id="s-seconds">
+            <option value="900" data-i18n="shares.15m">15 minutes</option>
+            <option value="3600" data-i18n="shares.1h">1 hour</option>
+            <option value="7200" selected data-i18n="shares.2h">2 hours</option>
+            <option value="43200" data-i18n="shares.12h">12 hours</option>
+            <option value="86400" data-i18n="shares.24h">24 hours</option>
+          </select></label>
+          <label class="f"><span data-i18n="shares.password">Password (optional)</span><input id="s-password" type="text" autocomplete="off" spellcheck="false"></label>
+        </div>
+        <div class="actions"><button class="quiet" id="makeShare" data-i18n="shares.create">Create link</button></div>
+        <div id="shareResult"></div>
+        <div id="sharelist"></div>
+      </section>
+
       <section class="glass panel" id="panel" aria-labelledby="result-h">
         <h2 id="result-h" data-i18n="result.title">Connection test</h2>
         <div id="result"><p class="lede" data-i18n="result.empty"></p></div>
@@ -808,6 +827,129 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     host.appendChild(list);
   }
 
+  // --- shared links --------------------------------------------------------------------------
+  /** Formats a byte count for a human. Powers of 1024, because that is what storage is sold in. */
+  function bytes(n) {
+    if (!n) return '0 B';
+    var units = ['B', 'KiB', 'MiB', 'GiB'];
+    var i = 0;
+    var value = n;
+    while (value >= 1024 && i < units.length - 1) { value = value / 1024; i++; }
+    return (i === 0 ? value : value.toFixed(value < 10 ? 2 : 1)) + ' ' + units[i];
+  }
+
+  /** "in 2 hours" / "3 minutes ago", so a lifetime is readable without arithmetic. */
+  function until(iso) {
+    var ms = Date.parse(iso) - Date.now();
+    var past = ms < 0;
+    var secs = Math.abs(ms) / 1000;
+    var text;
+    if (secs < 90) text = Math.round(secs) + 's';
+    else if (secs < 5400) text = Math.round(secs / 60) + 'm';
+    else if (secs < 172800) text = Math.round(secs / 3600) + 'h';
+    else text = Math.round(secs / 86400) + 'd';
+    return past ? t('shares.ago').replace('{v}', text) : t('shares.in').replace('{v}', text);
+  }
+
+  /**
+   * Shows the link the moment it is created.
+   *
+   * The password is shown alongside it only here, and only because the operator just typed it: it cannot
+   * be read back from the server, which is the point. Saying that plainly is better than a bare link that
+   * looks like it will still be recoverable later.
+   */
+  function renderShareResult(share, password) {
+    var host = $('shareResult');
+    clear(host);
+    if (!share) return;
+
+    var box = node('div', 'share-made');
+    box.appendChild(node('p', 'share-made-title', t('shares.made')));
+
+    var link = node('input', 'share-link');
+    link.readOnly = true;
+    link.value = share.url;
+    link.setAttribute('aria-label', t('shares.linkLabel'));
+    box.appendChild(link);
+
+    var copy = node('button', 'ghost small', t('shares.copy'));
+    copy.type = 'button';
+    copy.addEventListener('click', function () {
+      link.select();
+      // The clipboard API is unavailable on plain HTTP, which a self-hosted deployment may well be, so
+      // the selection above is the fallback rather than an error the operator has to interpret.
+      if (navigator.clipboard) navigator.clipboard.writeText(share.url);
+    });
+
+    var row = node('div', 'share-made-row');
+    row.appendChild(copy);
+    row.appendChild(chip(until(share.expiresAt), 'quiet'));
+    if (share.hasPassword) row.appendChild(chip(t('shares.protected'), 'ok'));
+    box.appendChild(row);
+
+    if (password) {
+      var note = node('p', 'hint');
+      note.textContent = t('shares.passwordOnce').replace('{v}', password);
+      box.appendChild(note);
+    }
+    host.appendChild(box);
+  }
+
+  function renderShares(shares) {
+    var host = $('sharelist');
+    clear(host);
+    if (!shares.length) {
+      var empty = node('div', 'empty');
+      empty.appendChild(node('p', 'empty-line', t('shares.empty')));
+      empty.appendChild(node('p', 'hint', t('shares.emptyHint')));
+      host.appendChild(empty);
+      return;
+    }
+
+    var list = node('ul', 'rules-list');
+    shares.forEach(function (s) {
+      var li = node('li', 'rule');
+
+      var label = node('div', 'share-target');
+      label.appendChild(node('code', 'pattern', s.path));
+      label.appendChild(node('span', 'share-size', bytes(s.sizeBytes)));
+      li.appendChild(label);
+
+      li.appendChild(chip(s.active ? until(s.expiresAt) : (s.revokedAt ? t('shares.revoked') : t('shares.expired')), s.active ? 'quiet' : 'warn'));
+      if (s.hasPassword) li.appendChild(chip(t('shares.protected'), 'ok'));
+      if (s.useCount) li.appendChild(chip(t('shares.downloads').replace('{n}', s.useCount), 'quiet'));
+
+      var tail = node('div', 'rule-tail');
+      if (s.active) {
+        var copyBtn = node('button', 'ghost small', t('shares.copy'));
+        copyBtn.type = 'button';
+        copyBtn.addEventListener('click', function () {
+          var url = location.origin + '/s/' + s.token;
+          if (navigator.clipboard) navigator.clipboard.writeText(url);
+          copyBtn.textContent = t('shares.copied');
+        });
+        tail.appendChild(copyBtn);
+
+        var revoke = node('button', 'ghost small', t('shares.revoke'));
+        revoke.type = 'button';
+        revoke.addEventListener('click', function () {
+          api('/api/shares/revoke', { method: 'POST', body: JSON.stringify({ token: s.token }) }).then(function () { loadShares(); });
+        });
+        tail.appendChild(revoke);
+      }
+
+      li.appendChild(tail);
+      list.appendChild(li);
+    });
+    host.appendChild(list);
+  }
+
+  function loadShares() {
+    return api('/api/shares').then(function (r) {
+      if (r.ok) renderShares(r.body.shares || []);
+    });
+  }
+
   // --- data ----------------------------------------------------------------------------------
   function loadStatus() {
     return api('/api/status').then(function (r) {
@@ -832,9 +974,43 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     loadStatus();
     loadHosts();
     loadRules();
+    loadShares();
   }
 
   // --- events --------------------------------------------------------------------------------
+  $('makeShare').addEventListener('click', function () {
+    var button = $('makeShare');
+    var objectId = Number($('s-object').value);
+    var password = $('s-password').value;
+
+    if (!objectId) {
+      renderShareResult(null);
+      var hint = $('shareResult');
+      clear(hint);
+      hint.appendChild(node('p', 'hint error', t('shares.needId')));
+      return;
+    }
+
+    button.disabled = true;
+    var payload = { objectId: objectId, seconds: Number($('s-seconds').value) };
+    // Omitted entirely when blank, so "no password" and "empty password" stay different requests. An empty
+    // one is refused by the server, which is right: a share that only looks protected is worse than an open
+    // one, because the operator would believe otherwise.
+    if (password) payload.password = password;
+
+    api('/api/shares', { method: 'POST', body: JSON.stringify(payload) }).then(function (r) {
+      button.disabled = false;
+      if (!r.ok) {
+        clear($('shareResult'));
+        $('shareResult').appendChild(node('p', 'hint error', r.body.error || t('shares.failed')));
+        return;
+      }
+      $('s-password').value = '';
+      renderShareResult(r.body.share, password);
+      loadShares();
+    });
+  });
+
   $('addToggle').addEventListener('click', function () {
     var form = $('hostform');
     form.hidden = !form.hidden;
@@ -1081,6 +1257,33 @@ function translationsLiteral(): string {
 			'auth.password': 'Password',
 			'auth.current': 'Current password',
 			'auth.failed': 'That did not work.',
+			'shares.title': 'Shared links',
+			'shares.lede': 'Hand out a link to one stored file. It stops working on its own, and you can cancel it sooner.',
+			'shares.objectId': 'Stored file id',
+			'shares.lifetime': 'Lasts',
+			'shares.15m': '15 minutes',
+			'shares.1h': '1 hour',
+			'shares.2h': '2 hours',
+			'shares.12h': '12 hours',
+			'shares.24h': '24 hours',
+			'shares.password': 'Password (optional)',
+			'shares.create': 'Create link',
+			'shares.needId': 'Enter the id of a stored file first.',
+			'shares.failed': 'The link could not be created.',
+			'shares.made': 'Link created',
+			'shares.copy': 'Copy',
+			'shares.copied': 'Copied',
+			'shares.linkLabel': 'Share link',
+			'shares.protected': 'password',
+			'shares.revoke': 'Cancel link',
+			'shares.revoked': 'cancelled',
+			'shares.expired': 'expired',
+			'shares.empty': 'No links yet.',
+			'shares.emptyHint': 'A link works for one stored file, for as long as you choose.',
+			'shares.downloads': '{n} download(s)',
+			'shares.in': 'in {v}',
+			'shares.ago': '{v} ago',
+			'shares.passwordOnce': 'Password: {v} — shown only now. It cannot be read back from the server, so give it to the recipient along with the link.',
 			'theme.dark': 'Dark',
 		},
 		'zh-CN': {
@@ -1175,6 +1378,33 @@ function translationsLiteral(): string {
 			'auth.password': '密码',
 			'auth.current': '当前密码',
 			'auth.failed': '没有成功。',
+			'shares.title': '分享链接',
+			'shares.lede': '为某个已存文件发一条链接。它会自行失效，你也可以提前取消。',
+			'shares.objectId': '已存文件 id',
+			'shares.lifetime': '有效期',
+			'shares.15m': '15 分钟',
+			'shares.1h': '1 小时',
+			'shares.2h': '2 小时',
+			'shares.12h': '12 小时',
+			'shares.24h': '24 小时',
+			'shares.password': '密码（可选）',
+			'shares.create': '创建链接',
+			'shares.needId': '请先填写已存文件的 id。',
+			'shares.failed': '链接创建失败。',
+			'shares.made': '链接已创建',
+			'shares.copy': '复制',
+			'shares.copied': '已复制',
+			'shares.linkLabel': '分享链接',
+			'shares.protected': '有密码',
+			'shares.revoke': '取消链接',
+			'shares.revoked': '已取消',
+			'shares.expired': '已过期',
+			'shares.empty': '还没有链接。',
+			'shares.emptyHint': '一条链接对应一个已存文件，有效期由你决定。',
+			'shares.downloads': '已下载 {n} 次',
+			'shares.in': '{v}后',
+			'shares.ago': '{v}前',
+			'shares.passwordOnce': '密码：{v} —— 只在此刻显示。服务器无法读回它，请连同链接一起交给接收方。',
 			'theme.dark': '深色',
 		},
 		'zh-TW': {
@@ -1269,6 +1499,33 @@ function translationsLiteral(): string {
 			'auth.password': '密碼',
 			'auth.current': '目前密碼',
 			'auth.failed': '沒有成功。',
+			'shares.title': '分享連結',
+			'shares.lede': '為某個已存檔案發一條連結。它會自行失效，你也可以提前取消。',
+			'shares.objectId': '已存檔案 id',
+			'shares.lifetime': '有效期',
+			'shares.15m': '15 分鐘',
+			'shares.1h': '1 小時',
+			'shares.2h': '2 小時',
+			'shares.12h': '12 小時',
+			'shares.24h': '24 小時',
+			'shares.password': '密碼（可選）',
+			'shares.create': '建立連結',
+			'shares.needId': '請先填寫已存檔案的 id。',
+			'shares.failed': '連結建立失敗。',
+			'shares.made': '連結已建立',
+			'shares.copy': '複製',
+			'shares.copied': '已複製',
+			'shares.linkLabel': '分享連結',
+			'shares.protected': '有密碼',
+			'shares.revoke': '取消連結',
+			'shares.revoked': '已取消',
+			'shares.expired': '已過期',
+			'shares.empty': '還沒有連結。',
+			'shares.emptyHint': '一條連結對應一個已存檔案，有效期由你決定。',
+			'shares.downloads': '已下載 {n} 次',
+			'shares.in': '{v}後',
+			'shares.ago': '{v}前',
+			'shares.passwordOnce': '密碼：{v} —— 只在此刻顯示。伺服器無法讀回它，請連同連結一起交給接收方。',
 			'theme.dark': '深色',
 		},
 		ja: {
@@ -1363,6 +1620,33 @@ function translationsLiteral(): string {
 			'auth.password': 'パスワード',
 			'auth.current': '現在のパスワード',
 			'auth.failed': 'うまくいきませんでした。',
+			'shares.title': '共有リンク',
+			'shares.lede': '保存済みのファイル 1 つに対するリンクを発行します。期限が来れば自動で無効になり、それより早く取り消すこともできます。',
+			'shares.objectId': '保存ファイルの id',
+			'shares.lifetime': '有効期間',
+			'shares.15m': '15 分',
+			'shares.1h': '1 時間',
+			'shares.2h': '2 時間',
+			'shares.12h': '12 時間',
+			'shares.24h': '24 時間',
+			'shares.password': 'パスワード（任意）',
+			'shares.create': 'リンクを作成',
+			'shares.needId': '先に保存ファイルの id を入力してください。',
+			'shares.failed': 'リンクを作成できませんでした。',
+			'shares.made': 'リンクを作成しました',
+			'shares.copy': 'コピー',
+			'shares.copied': 'コピーしました',
+			'shares.linkLabel': '共有リンク',
+			'shares.protected': 'パスワードあり',
+			'shares.revoke': 'リンクを取り消す',
+			'shares.revoked': '取り消し済み',
+			'shares.expired': '期限切れ',
+			'shares.empty': 'リンクはまだありません。',
+			'shares.emptyHint': 'リンク 1 つにつき保存ファイル 1 つ、期間は指定できます。',
+			'shares.downloads': '{n} 回ダウンロード',
+			'shares.in': '{v}後',
+			'shares.ago': '{v}前',
+			'shares.passwordOnce': 'パスワード：{v} —— 表示は今回だけです。サーバーから読み戻すことはできないため、リンクと一緒に相手へ渡してください。',
 			'theme.dark': 'ダーク',
 		},
 	};
@@ -1593,6 +1877,20 @@ body {
 .gate .actions button { width: 100%; }
 .hint.error { color: var(--err); }
 @media (max-width: 560px) { .gate { margin-top: 4vh; padding: 20px 18px; } }
+
+/* ---------- shared links ---------- */
+/* The created link is the one thing here the operator must copy before leaving, so it gets a raised
+   treatment rather than blending into the list of existing links below it.
+
+   Variable names are the ones this stylesheet actually defines: an earlier version of these rules used
+   invented names, and an undefined custom property does not error — it resolves to nothing, so the border
+   and background simply disappear. */
+.share-made { border: 1px solid var(--glass-line); border-radius: var(--r-md); padding: 12px 14px; margin: 10px 0 4px; background: var(--code-bg); box-shadow: var(--inset); }
+.share-made-title { font-size: 12.5px; font-weight: 640; margin: 0 0 8px; letter-spacing: -.005em; }
+.share-link { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+.share-made-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.share-target { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.share-size { font-size: 12px; color: var(--muted); }
 
 /* ---------- headings ---------- */
 h2 { font-size: 15px; font-weight: 660; letter-spacing: -.005em; margin: 0 0 4px; }
