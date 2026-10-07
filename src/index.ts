@@ -31,6 +31,7 @@ import { statementsOf } from './sql';
 import { resolveRules, type RemoteHost } from './remote';
 import { connectRemote } from './ssh-remote';
 import { planAdmission, type BudgetObject } from './budget';
+import { buildObjectQuery, type BrowseFilter, type BrowseSort, type ObjectRow } from './browse';
 import { issuesForHost, runDetail, summarizeRuns, toIssueDetail, type IssueRow, type RunRow } from './receipts';
 import {
 	describeShare,
@@ -552,6 +553,32 @@ function operatorShareView(row: ShareJoinRow): Record<string, unknown> {
 		lastUsedAt: row.last_used_at,
 		// Precomputed so the interface does not have to decide what "expired" means.
 		active: !row.revoked_at && Date.now() < Date.parse(row.expires_at),
+	};
+}
+
+/**
+ * A stored file as the interface reads it.
+ *
+ * The storage key is included deliberately, unlike in a share view: this is the operator's own listing, on
+ * the authenticated side, and the key is what identifies the row if it ever needs looking up directly. A
+ * share view withholds it because the recipient has no business with it.
+ */
+function objectView(row: ObjectRow): Record<string, unknown> {
+	return {
+		id: row.id,
+		hostId: row.host_id,
+		path: row.path,
+		sizeBytes: row.size_bytes,
+		contentHash: row.content_hash,
+		// Whole seconds, as the machine reports. Null when the machine did not report one, which is different
+		// from zero and must not be rendered as 1970.
+		mtime: row.mtime,
+		createdAt: row.created_at,
+		important: Number(row.important ?? 0) === 1,
+		superseded: row.superseded_by !== null,
+		// Lets the interface offer a download or a share without a second request to find out whether the file
+		// is reachable. False for a superseded version, whose bytes may since have been reclaimed.
+		live: row.superseded_by === null && row.deleted_at === null,
 	};
 }
 
@@ -1253,6 +1280,34 @@ if (path === '/api/status' && method === 'GET') {
 					: (rows.results ?? []).map(toIssueDetail);
 
 				return json({ ok: true, ...(hostFilter ? { hostId: hostFilter } : {}), issues });
+			}
+
+			if (path === '/api/objects' && method === 'GET') {
+				const params = new URL(request.url).searchParams;
+				const filter: BrowseFilter = {
+					hostId: params.get('host') ?? undefined,
+					pattern: params.get('pattern') ?? undefined,
+					search: params.get('q') ?? undefined,
+					includeSuperseded: params.get('history') === '1',
+					sort: (params.get('sort') as BrowseSort) ?? undefined,
+					limit: params.get('limit') ? Number(params.get('limit')) : undefined,
+				};
+
+				const query = buildObjectQuery(filter);
+				const rows = await env.DB.prepare(query.sql).bind(...query.params).all<ObjectRow>();
+				// The count is a second bounded query rather than a window function, which would repeat the total
+				// on every row. The interface needs it to say "showing 50 of 214" rather than leaving a truncated
+				// list looking like the whole answer.
+				const total = await env.DB.prepare(query.countSql)
+					.bind(...query.countParams)
+					.first<{ n: number }>();
+
+				return json({
+					ok: true,
+					objects: (rows.results ?? []).map(objectView),
+					total: Number(total?.n ?? 0),
+					limit: query.limit,
+				});
 			}
 
 			if (path === '/api/usage' && method === 'GET') {
