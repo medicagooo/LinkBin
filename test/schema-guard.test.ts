@@ -54,6 +54,40 @@ describe('a deployment whose schema is not applied', () => {
 		expect(res.status).not.toBe(500);
 	});
 
+	it('answers the sign-in state cleanly instead of crashing, and leaks nothing internal', async () => {
+		// `/api/auth/state` is a route EVERY first visitor hits. It was the one defect the schema guard missed,
+		// because `/api/auth/*` returned before the guard ran — found by auditing the live deployment, which
+		// answered 500 with a stack trace and `no such table: auth_secret`.
+		const res = await call('/api/auth/state');
+		expect(res.status).not.toBe(500);
+
+		const raw = await res.text();
+		expect(raw).not.toContain('no such table');
+		expect(raw).not.toContain('at async');
+		expect(raw).not.toContain('stack');
+	});
+
+	it('refuses a sign-in attempt cleanly, because it cannot read the password', async () => {
+		const res = await call('/api/auth/login', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ password: 'anything at all' }),
+		});
+		expect(res.status).not.toBe(500);
+		expect(await res.text()).not.toContain('no such table');
+	});
+
+	it('still lets setup be attempted, because that is the only way out of this state', async () => {
+		// Setup is the bootstrap. Refusing it would leave a deployment with an unapplied migration unable to
+		// create the tables it needs, which is a dead end rather than a safeguard.
+		const res = await call('/api/auth/setup', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ password: 'a sufficiently long password' }),
+		});
+		expect(res.status).not.toBe(503);
+	});
+
 	it('answers a share link cleanly instead of crashing, and leaks nothing internal', async () => {
 		// The live deployment returned a 500 here with a stack trace and `no such table: shares` in the body.
 		// A recipient cannot act on that, and handing internal detail to whoever holds a link is a defect in

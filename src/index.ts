@@ -1051,19 +1051,26 @@ export default {
 		const method = request.method;
 
 		try {
-			// --- authentication ---------------------------------------------------------------
-			// Auth routes come first, and the guard below comes before anything that touches a stored
-			// credential. The interface itself stays public so there is somewhere to sign in.
-			if (path.startsWith('/api/auth/')) return await handleAuth(path, request, env);
-
-			// Before any route that would touch a table, check the tables exist. Without this a missing
-			// migration surfaces as a 500 whose body carries a stack trace and the failing SQL — internal
-			// detail handed to an anonymous caller, saying nothing useful about what to do. An unapplied
-			// migration is a configuration state, not a crash, and it is answered as one.
+			// --- schema, before anything reads a table -----------------------------------------
+			// This comes FIRST, ahead of the auth routes, and the ordering is a fix rather than a preference.
 			//
-			// `/api/status` and the schema bootstrap are exempt: the first is how the state is discovered, and
-			// the second is how it is fixed.
-			if (path.startsWith('/api/') && path !== '/api/status' && path !== '/api/admin/apply-schema') {
+			// The guard was originally placed after `/api/auth/*`, reasoning that those routes must be reachable
+			// so a first visitor can set a password. That left them unguarded, and the defect was found by
+			// auditing the live deployment: `/api/auth/state` — a route EVERY first visitor hits — returned 500
+			// with a stack trace and the failing SQL, because it reads `auth_secret` and the table did not exist.
+			//
+			// The exemption is the narrow one the bootstrap genuinely needs: setup must work on an empty
+			// database, because that is how the tables get created. Everything else in the auth group reads a
+			// table and is refused cleanly instead.
+			//
+			// `/api/status` is exempt because it is how the state is discovered, and apply-schema because it is
+			// how it is fixed.
+			if (
+				path.startsWith('/api/') &&
+				path !== '/api/status' &&
+				path !== '/api/admin/apply-schema' &&
+				path !== '/api/auth/setup'
+			) {
 				const state = await schemaReady(env);
 				if (!state.ready) {
 					return json(
@@ -1078,6 +1085,10 @@ export default {
 					);
 				}
 			}
+
+			// --- authentication ---------------------------------------------------------------
+			// The interface itself stays public so there is somewhere to sign in.
+			if (path.startsWith('/api/auth/')) return await handleAuth(path, request, env);
 
 			// The scheduler's entry point. It accepts the derived scheduler credential and NOT a session,
 			// so the two are genuinely distinct: revoking one does not disable the other. Collection
