@@ -1,5 +1,6 @@
 import { env } from 'cloudflare:test';
 import worker from '../src/index';
+import { COLLECTION_MATCH_LIMIT, resolveRules, type RemoteHost } from '../src/remote';
 import { TEST_BASE_URL, TEST_MASTER_KEY } from './fixtures';
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -338,5 +339,46 @@ describe('an exclusion beats an inclusion', () => {
 		await addRule({ pattern: '/etc/nginx.conf' });
 
 		expect(await collection('one', { '/etc': [{ name: 'nginx.conf' }] })).toEqual(['/etc/nginx.conf']);
+	});
+});
+
+describe('how many matched names a rule reports', () => {
+	beforeEach(bootstrap);
+
+	/** Resolves one pattern against a machine that offers the given names, without touching the routes. */
+	async function resolve(pattern: string, files: Record<string, { name: string; isDirectory?: boolean }[]>, limit?: number) {
+		const remote = fakeMachine(files) as unknown as RemoteHost;
+		const evaluations = await resolveRules(remote, [{ pattern, is_exclude: 0, host_id: null }], limit);
+		return evaluations[0];
+	}
+
+	it('reports the true count regardless of how many names it lists', async () => {
+		// `matchCount` is what a preview says ("214 files"), and it must not be clipped by a display limit — the
+		// whole value of the number is that it is the real one.
+		const files = Array.from({ length: 120 }, (_, i) => ({ name: `f${i}.log` }));
+		const resolved = await resolve('/var/log/*.log', { '/var/log': files });
+
+		expect(resolved.matchCount).toBe(120);
+		expect(resolved.matches?.length, 'the default is a display cap').toBe(50);
+	});
+
+	it('lists every name when a collection limit is asked for, so a run does not silently stop at 50', async () => {
+		// THE DEFECT THIS EXISTS FOR. `filesToCollect` consumes the names a rule reports, so a caller that used
+		// the display default collected the first 50 files per rule and reported a successful run while silently
+		// leaving the rest. Nothing said anything was wrong, which is the failure mode this codebase treats as
+		// the worst kind. `collectFrom` now passes `COLLECTION_MATCH_LIMIT`; this asserts the mechanism it relies
+		// on rather than the call site.
+		const files = Array.from({ length: 120 }, (_, i) => ({ name: `f${i}.log` }));
+		const resolved = await resolve('/var/log/*.log', { '/var/log': files }, COLLECTION_MATCH_LIMIT);
+
+		expect(resolved.matches?.length, 'a run sees every file it is willing to walk').toBe(120);
+		expect(resolved.matchCount).toBe(120);
+	});
+
+	it('never reports more names than the true count', async () => {
+		// The limit bounds a list; it must not be able to invent entries for a rule that matched fewer.
+		const resolved = await resolve('/var/log/*.log', { '/var/log': [{ name: 'only.log' }] }, COLLECTION_MATCH_LIMIT);
+		expect(resolved.matches).toEqual(['only.log']);
+		expect(resolved.matchCount).toBe(1);
 	});
 });

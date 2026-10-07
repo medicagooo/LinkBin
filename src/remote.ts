@@ -119,6 +119,29 @@ export function globToRegExp(pattern: string): RegExp {
 }
 
 /**
+ * How many matched names a rule reports, by default.
+ *
+ * A preview is read by a person, so it wants examples rather than an exhaustive list — a rule matching ten
+ * thousand files should not produce a ten-thousand-entry response.
+ *
+ * **It is a display cap, and it was being used as a work limit.** `filesToCollect` consumes these evaluations, so
+ * a caller that used the default silently collected the first 50 files per rule and reported success: the run
+ * looked complete and files were simply missing. That is the failure mode this codebase treats as the worst kind,
+ * because nothing says anything is wrong. Callers that intend to ACT on the result must pass a limit large
+ * enough for the job; see `COLLECTION_MATCH_LIMIT`.
+ */
+const DEFAULT_MATCH_LIMIT = 50;
+
+/**
+ * The match limit a collection run uses.
+ *
+ * Set to the same bound the walk enforces (`MAX_FILES_PER_RUN` in `collect.ts`), so a run sees every file it is
+ * willing to walk. If the two ever disagree the smaller one silently wins, which is exactly the defect the
+ * default caused.
+ */
+export const COLLECTION_MATCH_LIMIT = 2000;
+
+/**
  * Resolves each rule against the machine's real filesystem, as far as one listing can.
  *
  * Three outcomes, and keeping them distinct is the point:
@@ -131,8 +154,15 @@ export function globToRegExp(pattern: string): RegExp {
  *     problem is not mistaken for an empty directory.
  *
  * Read-only throughout: it lists and stats, and never asks the machine to change anything.
+ *
+ * `matchLimit` bounds `matches` and defaults to the DISPLAY cap. `matchCount` is always the true number, so a
+ * caller that only wants to say "214 files" is unaffected by the limit.
  */
-export async function resolveRules(remote: RemoteHost, rules: ResolvableRule[]): Promise<RuleEvaluation[]> {
+export async function resolveRules(
+	remote: RemoteHost,
+	rules: ResolvableRule[],
+	matchLimit: number = DEFAULT_MATCH_LIMIT,
+): Promise<RuleEvaluation[]> {
 	const evaluations: RuleEvaluation[] = [];
 
 	for (const rule of rules) {
@@ -167,7 +197,7 @@ export async function resolveRules(remote: RemoteHost, rules: ResolvableRule[]):
 				...base,
 				status: 'ok',
 				matchCount: matches.length,
-				matches: matches.slice(0, 50),
+				matches: matches.slice(0, matchLimit),
 				detail: `${matches.length} file(s) in ${dir}`,
 			});
 		} catch (err) {
