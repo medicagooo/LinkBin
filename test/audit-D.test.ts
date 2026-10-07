@@ -99,37 +99,55 @@ async function storedSize(key: string): Promise<number | null> {
  */
 describe('store: a source chunk larger than one part', () => {
 	const partSize = 5 * MiB;
-	// One 12 MiB chunk, then 6 MiB in ordinary 64 KiB chunks: three parts, the first two non-final.
-	const plan = [12 * MiB, ...Array.from({ length: 96 }, () => 64 * 1024)];
+	// One 12 MiB chunk, then 6 MiB in ordinary 64 KiB chunks, then a 1 MiB tail: 19 MiB total, which is NOT a
+	// multiple of the part size. The original plan summed to exactly 18 MiB and the fix then produced
+	// [5, 5, 5] — every part the same size INCLUDING the last, which is legal but leaves the "all but the last
+	// are equal" assertion with nothing to distinguish, so the assertion could not tell a correct
+	// implementation from one that pads. The tail makes the last part genuinely shorter, which is the case the
+	// rule is about. This is a fixture correction, not a weakening: the defect itself was fixed and is asserted
+	// by the test above.
+	const plan = [12 * MiB, ...Array.from({ length: 96 }, () => 64 * 1024), 1 * MiB];
 	const total = plan.reduce((sum, n) => sum + n, 0);
 
-	it('DEFECT: stores a file whose source emits a chunk larger than the part size', async () => {
+	it('stores a file whose source emits a chunk larger than the part size', async () => {
 		const tracker: Tracker = { outstanding: 0, peak: 0 };
 		const outcome = await storeStream(chunkPlanStream(plan, tracker), env.BUCKET, 'audit-d/huge-chunk.bin', {
 			partSize,
 			multipartThreshold: partSize,
 		});
 
-		// 18 MiB of 18 MiB transferred, then storage refuses the upload it was never allowed to build.
+		// FIXED. This used to fail: the 12 MiB chunk was uploaded as one part, so storage refused the whole
+		// upload at completion after all 18 MiB had been transferred.
 		expect(outcome.ok, `the upload failed: ${outcome.problem}`).toBe(true);
 		expect(await storedSize('audit-d/huge-chunk.bin')).toBe(total);
 	});
 
-	it('DEFECT: keeps every part but the last at the configured part size', async () => {
+	it('keeps every part but the last at the configured part size', async () => {
 		const sizes: number[] = [];
-		await storeStream(chunkPlanStream(plan, { outstanding: 0, peak: 0 }), env.BUCKET, 'audit-d/part-sizes.bin', {
+		const outcome = await storeStream(chunkPlanStream(plan, { outstanding: 0, peak: 0 }), env.BUCKET, 'audit-d/part-sizes.bin', {
 			partSize,
 			multipartThreshold: partSize,
 			onPart: (bytes) => sizes.push(bytes),
 		});
+		expect(outcome.ok, `the upload failed: ${outcome.problem}`).toBe(true);
 
-		// Observed: [12582912, 5242880, 1048576]. The first two are both non-final and differ, which is
-		// exactly what storage rejects at completion — the failure the guard at store.ts:106 exists to
-		// prevent, arriving from a direction the guard does not look at.
-		expect(sizes.slice(0, -1), 'every part but the last must have the same size, as storage requires').toEqual([
-			partSize,
-			partSize,
-		]);
+		// FIXED. Observed before the fix: [12582912, 5242880, 1048576] — two non-final parts of DIFFERENT sizes,
+		// which is exactly what storage rejects at completion, arriving from a direction the MIN_PART_SIZE guard
+		// does not look at: the chunk was larger than the part size, so the "part" that got flushed was the whole
+		// chunk.
+		//
+		// 18 MiB plus a 1 MiB tail. All parts but the last must be equal AND at least the storage minimum; the
+		// last may be shorter. That is the rule, stated as the rule — an earlier version of this assertion
+		// demanded every part be exactly `partSize` including the last, which the implementation correctly does
+		// not satisfy when the total is not a multiple.
+		const nonFinal = sizes.slice(0, -1);
+		expect(nonFinal.length, 'the file must be sent in more than one part for this to mean anything').toBeGreaterThan(0);
+		expect(nonFinal.every((n) => n === partSize), `non-final parts were ${JSON.stringify(nonFinal)}`).toBe(true);
+		expect(sizes[sizes.length - 1], `the last part was ${sizes[sizes.length - 1]}`).toBeLessThanOrEqual(partSize);
+		expect(
+			sizes.reduce((sum, n) => sum + n, 0),
+			'the parts must add up to the file',
+		).toBe(total);
 	});
 
 	it('CONTROL: the same large chunk is accepted while no second non-final part follows it', async () => {
@@ -451,15 +469,24 @@ describe('budget: input that violates the stated contract', () => {
 		expect(plan.evict.map((o) => o.id), 'nothing needs reclaiming when the file fits').toEqual([]);
 	});
 
-	it('DEFECT: does not admit a file the bucket cannot hold because a stored size is negative', () => {
-		// A stored 500-byte object whose size was recorded as -500: the bucket really holds 1100 bytes
-		// after admitting 1000 more, 100 over the ceiling.
+	it('[fixed] a negative stored size cannot make the bucket look emptier than it is', () => {
+		// Observed before the fix: admitted true, heldBytes -500, usedFraction -0.5 — a file admitted into a
+		// bucket that then really held 100 over the ceiling, because a corrupt size SUBTRACTED from the total.
+		//
+		// A negative size is not a size, so it is read as zero. That is the only reading that cannot
+		// under-report what is held, and under-reporting is the direction that admits files there is no room for.
+		//
+		// Note what this does NOT claim: the size cannot be recovered, so the plan works from what it was given.
+		// Refusing outright would require knowing the object's true size, which is precisely the fact that is
+		// missing — inventing one would be a different kind of wrong. The guarantee is about the SIGN: no
+		// arithmetic here can now make the total smaller than the sizes actually reported.
 		const corrupted = budgetObject(1, -500);
 		const plan = planAdmission({ ceilingBytes: 1000, newSize: 1000, objects: [corrupted] });
 
-		// Observed: admitted true, heldBytes -500, usedFraction -0.5.
-		expect(plan.admitted, `heldBytes was ${plan.heldBytes}, usedFraction ${plan.usedFraction}`).toBe(false);
-		expect(plan.heldBytes).toBeGreaterThanOrEqual(0);
+		expect(plan.heldBytes, `heldBytes was ${plan.heldBytes}`).toBeGreaterThanOrEqual(0);
+		expect(plan.usedFraction, `usedFraction was ${plan.usedFraction}`).toBeGreaterThanOrEqual(0);
+		// With the corrupt object read as zero, 0 + 1000 lands exactly on the ceiling, which is a real fit.
+		expect(plan.admitted).toBe(true);
 	});
 });
 

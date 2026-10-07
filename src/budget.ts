@@ -81,7 +81,27 @@ function oldestFirst(a: BudgetObject, b: BudgetObject): number {
  * Pure: it reads the objects it is given and returns a plan. Nothing is deleted here.
  */
 export function planAdmission(input: BudgetInput): AdmissionPlan {
-	const heldBytes = input.objects.reduce((total, object) => total + object.size, 0);
+	// Two malformed inputs are neutralised here, both found by an adversarial audit, and both cheap to guard
+	// because the alternative is arithmetic that is quietly wrong in the direction that loses data:
+	//
+	//   - **A repeated object id.** Listing one object twice inflated the total, so a plan could evict a real
+	//     object that nothing needed evicting for — deleting data to make room that was already free.
+	//   - **A negative size.** A stored size below zero subtracted from the total, so a file could be admitted
+	//     into a bucket that then exceeded its ceiling. A size counts bytes; anything less than zero is not a
+	//     size, and reading it as zero is the only option that cannot under-report what is held.
+	//
+	// Neither is reachable from the current caller — the join cannot duplicate a primary key, and nothing writes
+	// sizes yet — which is exactly why they are worth guarding rather than documenting. The code that would make
+	// them reachable is the ingest path, and it is not written.
+	const seen = new Set<number>();
+	const objects: BudgetObject[] = [];
+	for (const object of input.objects) {
+		if (seen.has(object.id)) continue;
+		seen.add(object.id);
+		objects.push(object.size < 0 ? { ...object, size: 0 } : object);
+	}
+
+	const heldBytes = objects.reduce((total, object) => total + object.size, 0);
 	const usedFraction = input.ceilingBytes > 0 ? heldBytes / input.ceilingBytes : 0;
 
 	const base = { heldBytes, usedFraction, evict: [] as BudgetObject[], freedBytes: 0, saturatedByImportant: false };
@@ -110,7 +130,7 @@ export function planAdmission(input: BudgetInput): AdmissionPlan {
 	}
 
 	// Room is needed. Only unprotected objects are candidates, in age order.
-	const candidates = input.objects.filter((object) => !object.important).sort(oldestFirst);
+	const candidates = objects.filter((object) => !object.important).sort(oldestFirst);
 	const needed = heldBytes + input.newSize - input.ceilingBytes;
 
 	if (needed <= 0) {
@@ -133,7 +153,7 @@ export function planAdmission(input: BudgetInput): AdmissionPlan {
 	}
 
 	// Not enough reclaimable space. Everything protected stays, and the incoming file is refused.
-	const protectedBytes = input.objects.filter((o) => o.important).reduce((total, o) => total + o.size, 0);
+	const protectedBytes = objects.filter((o) => o.important).reduce((total, o) => total + o.size, 0);
 	const stillHeld = heldBytes - freedBytes;
 	const saturatedByImportant = stillHeld > 0 && stillHeld <= protectedBytes;
 

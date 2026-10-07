@@ -265,9 +265,12 @@ export async function storeStream(
 		// Strictly greater: a full part is sent as soon as there is more than a full part buffered, so what is
 		// held back is the *remainder* rather than the whole part. Anything left when the source ends becomes the
 		// final batch, of whatever size it is, which is what storage requires of a last part.
+		//
+		// This is also where a chunk larger than the part size stops being a problem. `takeExactly(partSize)`
+		// issues a batch of exactly one part however big the incoming chunk was, so the parts are uniform — which
+		// an adversarial audit proved they were not, and storage refuses a whole upload at completion when two
+		// non-final parts differ, after the entire file has been transferred.
 		while (bufferedBytes > holdBack && bufferedBytes >= partSize) {
-			// `takeExactly` copies rather than viewing, so the released chunk is genuinely free afterwards and
-			// the buffer's accounting moves by exactly one part.
 			await sendBatch(takeExactly(partSize), false);
 		}
 	};
@@ -321,10 +324,16 @@ export async function storeStream(
 			// killed without warning, so the pipeline has to stop while it can still record where it got to.
 			if (options.deadline !== undefined && now() >= options.deadline) {
 				await abortMultipart();
+				// `committedBytes: 0`, not the running total, and the message no longer claims the file can be
+				// resumed. Both are corrections from an adversarial audit: the abort above discards every part
+				// that had been uploaded, so reporting those bytes as a resume point told a caller to skip data
+				// that no longer exists — and a caller following the documented contract would have written a
+				// silently truncated object. What is reported is what actually remains, which after an abort is
+				// nothing.
 				return {
 					ok: false,
-					problem: `the run's time budget ran out after ${committedBytes} bytes; this file is left to be resumed rather than half-written`,
-					committedBytes,
+					problem: `the run's time budget ran out after ${bytes} bytes read and ${committedBytes} uploaded; the upload was abandoned, so this file starts from the beginning next time`,
+					committedBytes: 0,
 					bytes,
 					parts,
 				};
@@ -382,10 +391,13 @@ export async function storeStream(
 		};
 	} catch (err) {
 		await abortMultipart();
+		// `committedBytes: 0` for the same reason as the deadline path: the abort above discarded every uploaded
+		// part, so reporting them as a resume point would tell a caller to skip bytes that are gone. Reporting
+		// what still exists is what the field promises; after an abort that is nothing.
 		return {
 			ok: false,
 			problem: (err as Error).message,
-			committedBytes,
+			committedBytes: 0,
 			bytes,
 			parts,
 		};
