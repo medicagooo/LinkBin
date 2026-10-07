@@ -34,6 +34,8 @@ export interface BrowseFilter {
 	includeSuperseded?: boolean;
 	sort?: BrowseSort;
 	limit?: number;
+	/** How many matching rows to skip. See `buildObjectQuery` for why this is an offset and not a cursor. */
+	offset?: number;
 }
 
 export type BrowseSort = 'newest' | 'oldest' | 'largest' | 'smallest' | 'path';
@@ -187,6 +189,7 @@ export interface ObjectQuery {
 	countSql: string;
 	countParams: unknown[];
 	limit: number;
+	offset: number;
 	/**
 	 * True when a filter term was too long for the database to evaluate, so the result is empty by decision
 	 * rather than because nothing matched. The interface says "your search was too long" for this, which is a
@@ -195,7 +198,21 @@ export interface ObjectQuery {
 	termTooLong: boolean;
 }
 
-/** Assembles the listing query, and the count that goes with it. */
+/** The largest number of rows one request may skip. */
+const MAX_OFFSET = 100_000;
+
+/**
+ * Assembles the listing query, and the count that goes with it.
+ *
+ * Paging is an **offset**, not a keyset cursor, and the trade is deliberate. Every sort already ends in a
+ * unique tie-break (`id`), so an offset over a fixed ORDER BY is stable for a reader that is not competing with
+ * a writer — which is this case: one operator looking at a list. A cursor would need a separate comparison per
+ * sort and a tuple comparison across two columns for most of them, and it would still be wrong for the "by
+ * path" sort unless the key matched the ordering exactly. The known weakness of an offset is that a file
+ * collected between two pages shifts the boundary by one, showing a duplicate or skipping a row; for a
+ * collection that runs on a schedule rather than continuously, that is a smaller cost than five bespoke
+ * cursors, and it is stated here rather than discovered later.
+ */
 export function buildObjectQuery(filter: BrowseFilter): ObjectQuery {
 	const { clauses, params, tooLong } = conditions(filter);
 	const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
@@ -207,18 +224,27 @@ export function buildObjectQuery(filter: BrowseFilter): ObjectQuery {
 	const requested = Number(filter.limit);
 	const limit = Number.isFinite(requested) && requested > 0 ? Math.min(Math.floor(requested), MAX_LIMIT) : DEFAULT_LIMIT;
 
+	const wantedOffset = Number(filter.offset);
+	const offset = Number.isFinite(wantedOffset) && wantedOffset > 0 ? Math.min(Math.floor(wantedOffset), MAX_OFFSET) : 0;
+
 	const qualified = where.replace(/\b(host_id|path|deleted_at|superseded_by)\b/g, 'o.$1');
+
+	// `OFFSET` is appended only when it is needed. `OFFSET 0` is a no-op the database still has to plan, and
+	// leaving it out keeps the statement for the common first-page case identical to what it was before paging
+	// existed — so a reader comparing the two sees a real change rather than a cosmetic one.
+	const paging = offset > 0 ? 'LIMIT ? OFFSET ?' : 'LIMIT ?';
 
 	return {
 		sql: `SELECT o.*, CASE WHEN f.object_id IS NULL THEN 0 ELSE 1 END AS important
 		      FROM objects o
 		      LEFT JOIN object_flags f ON f.object_id = o.id
 		      ${qualified}
-		      ORDER BY o.${order} LIMIT ?`,
-		params: [...params, limit],
+		      ORDER BY o.${order} ${paging}`,
+		params: offset > 0 ? [...params, limit, offset] : [...params, limit],
 		countSql: `SELECT COUNT(*) AS n FROM objects o ${qualified}`,
 		countParams: params,
 		limit,
+		offset,
 		termTooLong: tooLong,
 	};
 }

@@ -887,25 +887,37 @@ export function renderIndexPage(locale: Locale = 'en'): string {
    * Kept in state rather than read from the inputs on each render, so a response arriving after the operator
    * has typed something else cannot repaint the list with results for a query that is no longer on screen.
    */
-  var browseState = { search: '', host: '', sort: 'newest', history: false, limit: 50 };
+  var browseState = { search: '', host: '', sort: 'newest', history: false, limit: 50, skipped: 0 };
 
-  function renderObjects(objects, total, limit) {
+  /**
+   * The stored-file list.
+   *
+   * "Append" is set when this is a load-more request: the rows already on screen are kept and the new page is
+   * added below them. Re-rendering the whole list from an offset instead would be simpler here and wrong in
+   * practice — it would throw away the reader's scroll position and make "show me more" behave like "refresh".
+   */
+  function renderObjects(objects, total, limit, append) {
     var host = $('objectlist');
-    clear(host);
+    if (!append) clear(host);
 
     var count = $('browseCount');
-    clear(count);
+    if (!append) clear(count);
+    var shown = (append ? host.querySelectorAll('li').length : 0) + objects.length;
     if (total !== undefined) {
+      clear(count);
       // Says how many there are as well as how many are shown: a truncated list that looks like the whole
       // answer is worse than one that says it is truncated.
       count.appendChild(
-        node('span', 'hint', total > objects.length
-          ? t('browse.showing').replace('{n}', objects.length).replace('{total}', total)
+        node('span', 'hint', total > shown
+          ? t('browse.showing').replace('{n}', shown).replace('{total}', total)
           : t('browse.count').replace('{n}', total))
       );
     }
 
     if (!objects.length) {
+      // On a "load more" that returned nothing there is already a list on screen, so replacing it with an empty
+      // state would erase the results the reader was looking at.
+      if (append) return;
       var empty = node('div', 'empty');
       // Two different nothings, and they mean opposite things: nothing collected yet, or nothing matching
       // what was asked for. Showing the wrong one sends the operator looking in the wrong place.
@@ -916,7 +928,12 @@ export function renderIndexPage(locale: Locale = 'en'): string {
       return;
     }
 
-    var list = node('ul', 'rules-list');
+    var list = host.querySelector('ul.rules-list');
+    if (!list) {
+      list = node('ul', 'rules-list');
+      host.appendChild(list);
+    }
+
     objects.forEach(function (o) {
       var li = node('li', 'rule');
 
@@ -928,12 +945,35 @@ export function renderIndexPage(locale: Locale = 'en'): string {
       li.appendChild(chip(o.hostId, 'quiet'));
       if (o.important) li.appendChild(chip(t('browse.protected'), 'ok'));
       if (!o.live) li.appendChild(chip(t('browse.replaced'), 'warn'));
+      // Only when the server actually looked. An absent value means "not checked", and rendering that as gone
+      // would claim a present file had been reclaimed.
+      if (o.bytesPresent === false) li.appendChild(chip(t('browse.gone'), 'warn'));
 
       var tail = node('div', 'rule-tail');
 
+      // The path is long, machine-specific and easy to mistype, which is exactly the kind of value worth a
+      // button. Offered for every row, including one whose bytes are gone: the record of where a file lived
+      // outlives the file.
+      var copyPath = node('button', 'ghost small', t('browse.copyPath'));
+      copyPath.type = 'button';
+      copyPath.addEventListener('click', function () {
+        copyText(o.path, copyPath, t('browse.copyPath'), t('browse.copied'));
+      });
+      tail.appendChild(copyPath);
+
+      // The id is what the share panel and the merge sources are configured by, so copying it beats reading it
+      // off the screen and retyping it.
+      var copyId = node('button', 'ghost small', t('browse.copyId'));
+      copyId.type = 'button';
+      copyId.addEventListener('click', function () {
+        copyText(String(o.id), copyId, t('browse.copyId'), t('browse.copied'));
+      });
+      tail.appendChild(copyId);
+
       // Only a live file can be shared: a replaced version may already have had its bytes reclaimed, so
-      // offering a link to it would promise a download that cannot happen.
-      if (o.live) {
+      // offering a link to it would promise a download that cannot happen. And a file whose bytes the server
+      // has confirmed are gone is not shareable either, for the same reason.
+      if (o.live && o.bytesPresent !== false) {
         var share = node('button', 'ghost small', t('browse.share'));
         share.type = 'button';
         share.addEventListener('click', function () {
@@ -957,19 +997,62 @@ export function renderIndexPage(locale: Locale = 'en'): string {
       li.appendChild(tail);
       list.appendChild(li);
     });
-    host.appendChild(list);
+
+    // Offered only when there is more, so a control that does nothing is never on screen. The count of rows
+    // actually rendered is what makes this correct after a page that came back short.
+    var existing = $('objectlist').parentNode.querySelector('#browseMore');
+    if (existing) existing.remove();
+    if (total !== undefined && shown < total) {
+      var more = node('div', 'actions');
+      more.id = 'browseMore';
+      var moreBtn = node('button', 'quiet', t('browse.loadMore'));
+      moreBtn.type = 'button';
+      moreBtn.addEventListener('click', function () {
+        moreBtn.disabled = true;
+        // The offset is the number of rows already loaded, not the page number: the two differ as soon as a page
+        // comes back short, and using the page number would then skip rows.
+        browseState.skipped = shown;
+        loadObjects(true);
+      });
+      more.appendChild(moreBtn);
+      host.parentNode.insertBefore(more, host.nextSibling);
+    }
   }
 
-  function loadObjects() {
+  /** Copies text, falling back to a hidden selection where the clipboard API is unavailable. */
+  function copyText(value, button, label, done) {
+    var restore = function () { button.textContent = label; };
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(value);
+    } else {
+      // The clipboard API is unavailable on plain HTTP, which a self-hosted deployment may well be. A control
+      // that silently does nothing is worse than one that copies by the old route.
+      var scratch = document.createElement('textarea');
+      scratch.value = value;
+      document.body.appendChild(scratch);
+      scratch.select();
+      try { document.execCommand('copy'); } catch (e) { /* nothing better to do */ }
+      document.body.removeChild(scratch);
+    }
+    button.textContent = done;
+    setTimeout(restore, 1200);
+  }
+
+  function loadObjects(append) {
     var query = [];
     if (browseState.search) query.push('q=' + encodeURIComponent(browseState.search));
     if (browseState.host) query.push('host=' + encodeURIComponent(browseState.host));
     if (browseState.sort) query.push('sort=' + encodeURIComponent(browseState.sort));
     if (browseState.history) query.push('history=1');
+    // Asks the server to check whether each row's bytes are actually stored, which is what lets an evicted file
+    // be marked unavailable rather than offered as a download. Skipped on a "load more" only in the sense that
+    // the answer is the same request: it is cheap because it is bounded by the page size.
+    query.push('verify=1');
     query.push('limit=' + browseState.limit);
+    if (append && browseState.skipped) query.push('offset=' + browseState.skipped);
 
     return api('/api/objects?' + query.join('&')).then(function (r) {
-      if (r.ok) renderObjects(r.body.objects || [], r.body.total, r.body.limit);
+      if (r.ok) renderObjects(r.body.objects || [], r.body.total, r.body.limit, append === true);
     });
   }
 
@@ -1444,27 +1527,34 @@ export function renderIndexPage(locale: Locale = 'en'): string {
   // Search is debounced: a keystroke-per-request would fire a query for every prefix of what is being typed,
   // and the responses can arrive out of order, so the list would briefly show results for a prefix.
   var searchTimer = null;
+  // Every filter change goes back to the FIRST page. Leaving the offset where it was would page through the
+  // previous query's rows, so narrowing a search would show results from before it was narrowed — and the
+  // "load more" control would be paging a list that no longer exists.
   $('b-search').addEventListener('input', function () {
     var value = $('b-search').value;
     if (searchTimer) clearTimeout(searchTimer);
     searchTimer = setTimeout(function () {
       browseState.search = value.trim();
+      browseState.skipped = 0;
       loadObjects();
     }, 250);
   });
 
   $('b-host').addEventListener('change', function () {
     browseState.host = $('b-host').value;
+    browseState.skipped = 0;
     loadObjects();
   });
 
   $('b-sort').addEventListener('change', function () {
     browseState.sort = $('b-sort').value;
+    browseState.skipped = 0;
     loadObjects();
   });
 
   $('b-history').addEventListener('change', function () {
     browseState.history = $('b-history').checked;
+    browseState.skipped = 0;
     loadObjects();
   });
 
@@ -1879,7 +1969,12 @@ function translationsLiteral(): string {
 			'browse.protect': 'Mark important',
 			'browse.unprotect': 'Unmark',
 			'browse.replaced': 'replaced',
-			'browse.share': 'Share',
+			'browse.share': 'Share',			'browse.loadMore': 'Show more',
+			'browse.copyPath': 'Copy path',
+			'browse.copyId': 'Copy id',
+			'browse.copied': 'Copied',
+			'browse.gone': 'no longer stored',
+
 			'shares.title': 'Shared links',
 			'shares.lede': 'Hand out a link to one stored file. It stops working on its own, and you can cancel it sooner.',
 			'shares.objectId': 'Stored file id',
@@ -2077,7 +2172,12 @@ function translationsLiteral(): string {
 			'browse.protect': '标记为重要',
 			'browse.unprotect': '取消标记',
 			'browse.replaced': '已被取代',
-			'browse.share': '分享',
+			'browse.share': '分享',			'browse.loadMore': '显示更多',
+			'browse.copyPath': '复制路径',
+			'browse.copyId': '复制编号',
+			'browse.copied': '已复制',
+			'browse.gone': '已不再存储',
+
 			'shares.title': '分享链接',
 			'shares.lede': '为某个已存文件发一条链接。它会自行失效，你也可以提前取消。',
 			'shares.objectId': '已存文件 id',
@@ -2156,6 +2256,11 @@ function translationsLiteral(): string {
 			'merges.needPattern': '請至少指定一個已存檔案，或一條能命中檔案的匹配式。',
 			'merges.failed': '操作未成功。',
 			'merges.built': '已產生 {bytes}。結果與其它檔案一樣被儲存，可以瀏覽和分享。',
+			'browse.loadMore': '顯示更多',
+			'browse.copyPath': '複製路徑',
+			'browse.copyId': '複製編號',
+			'browse.copied': '已複製',
+			'browse.gone': '已不再儲存',
 			'skip': '跳到主要內容',
 			'status.key': '簽章金鑰',
 			'status.schema': '資料表',
@@ -2465,7 +2570,12 @@ function translationsLiteral(): string {
 			'browse.protect': '重要として印を付ける',
 			'browse.unprotect': '印を外す',
 			'browse.replaced': '置き換え済み',
-			'browse.share': '共有',
+			'browse.share': '共有',			'browse.loadMore': 'さらに表示',
+			'browse.copyPath': 'パスをコピー',
+			'browse.copyId': 'ID をコピー',
+			'browse.copied': 'コピーしました',
+			'browse.gone': '保存されていません',
+
 			'shares.title': '共有リンク',
 			'shares.lede': '保存済みのファイル 1 つに対するリンクを発行します。期限が来れば自動で無効になり、それより早く取り消すこともできます。',
 			'shares.objectId': '保存ファイルの id',

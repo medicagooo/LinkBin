@@ -652,7 +652,14 @@ function operatorShareView(row: ShareJoinRow): Record<string, unknown> {
  * the authenticated side, and the key is what identifies the row if it ever needs looking up directly. A
  * share view withholds it because the recipient has no business with it.
  */
-function objectView(row: ObjectRow): Record<string, unknown> {
+/**
+ * One stored file, as the interface needs it.
+ *
+ * `verified` is the answer to "are the bytes still in the bucket", and it is optional because it costs a
+ * storage lookup. `undefined` therefore means "not asked", which is a third state and not the same as `false`:
+ * rendering an unchecked file as "gone" would be a lie about a file that is present.
+ */
+function objectView(row: ObjectRow, verified?: boolean): Record<string, unknown> {
 	return {
 		id: row.id,
 		hostId: row.host_id,
@@ -668,6 +675,9 @@ function objectView(row: ObjectRow): Record<string, unknown> {
 		// Lets the interface offer a download or a share without a second request to find out whether the file
 		// is reachable. False for a superseded version, whose bytes may since have been reclaimed.
 		live: row.superseded_by === null && row.deleted_at === null,
+		// Set only when the caller asked for verification: whether the row's bytes are actually in the bucket.
+		// `undefined` means "not checked", which is different from `false` and must not be rendered as "gone".
+		...(verified === undefined ? {} : { bytesPresent: verified }),
 	};
 }
 
@@ -1490,6 +1500,7 @@ if (path === '/api/status' && method === 'GET') {
 					includeSuperseded: params.get('history') === '1',
 					sort: (params.get('sort') as BrowseSort) ?? undefined,
 					limit: params.get('limit') ? Number(params.get('limit')) : undefined,
+					offset: params.get('offset') ? Number(params.get('offset')) : undefined,
 				};
 
 				const query = buildObjectQuery(filter);
@@ -1501,11 +1512,37 @@ if (path === '/api/status' && method === 'GET') {
 					.bind(...query.countParams)
 					.first<{ n: number }>();
 
+				// `?verify=1` asks whether each row's bytes are actually still in the bucket, and the answer is what
+				// lets the interface say "no longer available" instead of offering a download that cannot happen.
+				//
+				// The database row and the stored bytes can disagree: eviction reclaims bytes while deliberately
+				// keeping the row, because the row is what makes "this file existed and was removed to make room"
+				// answerable. Without this check the list would show evicted files as downloadable, and a click
+				// would produce a 404 from the download route — a worse answer than saying so up front.
+				//
+				// Opt-in rather than always, because it costs one storage lookup per row: the ordinary listing does
+				// not need it, and making every browse pay for it would slow the page for a state most rows are not
+				// in. Bounded by the page size, which is already capped.
+				const verify = params.get('verify') === '1';
+				const objects = (rows.results ?? []).map((row) => objectView(row, verify ? false : undefined));
+
+				if (verify) {
+					// Filled in after the fact rather than inside the map, so the lookups can run together instead of
+					// one after another: a page of 50 files would otherwise be 50 sequential round trips.
+					const heads = await Promise.all((rows.results ?? []).map((row) => env.BUCKET.head(row.object_key)));
+					heads.forEach((head, index) => {
+						objects[index].bytesPresent = head !== null;
+					});
+				}
+
 				return json({
 					ok: true,
-					objects: (rows.results ?? []).map(objectView),
+					objects,
 					total: Number(total?.n ?? 0),
 					limit: query.limit,
+					// Echoed so the interface can ask for the next page without tracking it, and so a caller can
+					// tell a clamped request from one that was honoured.
+					offset: query.offset,
 					// Said out loud, because "nothing matched" and "your search was too long to evaluate" look
 					// identical in an empty list and lead to opposite next steps.
 					termTooLong: query.termTooLong,
