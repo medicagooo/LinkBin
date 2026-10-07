@@ -100,9 +100,17 @@ export async function storeStream(
 	// Checked before anything is read or written. See MIN_PART_SIZE: the alternative is discovering this at
 	// completion, after the whole file has been transferred.
 	//
-	// `multipartThreshold: 0` means "one write, never parts", and then the part size is irrelevant — which is
-	// what makes it possible to test the read loop's buffering with small numbers without pretending they
-	// are legal part sizes.
+	// **`multipartThreshold: 0` does NOT mean "one write, never parts", and this comment used to say it did.**
+	// An adversarial audit caught the discrepancy and it is worth stating plainly rather than papering over:
+	// zero disables the part-size check above, because a caller passing small numbers is understood to be
+	// exercising the read loop rather than describing a real upload. It does **not** force a single write — a
+	// file past the part size is still uploaded in parts, and with a part size below storage's minimum those
+	// parts are refused at completion. The only supported way to ask for one write is a threshold at or above
+	// the file's declared size, which is what `pipelined` reads.
+	//
+	// So zero is a **test affordance, not a production setting**, and `DEFAULTS` never uses it. It is left as
+	// it is because making it truly mean "one write" would require buffering a file of unknown size in full to
+	// discover that it does not fit — trading a documented oddity for an unbounded memory commitment.
 	if (threshold > 0 && partSize < MIN_PART_SIZE) {
 		return {
 			ok: false,
@@ -144,8 +152,14 @@ export async function storeStream(
 	 * ends on a part boundary be sent as one final part instead of being padded with a forbidden empty one.
 	 *
 	 * It is skipped when the file is known to be small — by its declared size — or when the caller has asked
-	 * for a single write. In those cases everything is sent the moment it is available, so a small file is one
-	 * `put` of exactly its bytes rather than a leftover batch.
+	 * for a single write, and in those cases **nothing is sent until the source ends**, because a single write
+	 * means exactly one `put` of the whole file.
+	 *
+	 * That last point is a correction, and it was a real regression while it was wrong. The drain used to run
+	 * even when the mode was single-write, so a buffer that reached one part was PUT mid-stream — and a file
+	 * that then failed was left in the bucket as a truncated object that looks complete, which is the precise
+	 * outcome the refusal paths exist to prevent. The decision in `sendBatch` and the draining here have to
+	 * agree, and this is where they agree.
 	 */
 	const pipelined =
 		threshold > 0 && !(options.declaredSize !== undefined && options.declaredSize <= threshold);
@@ -204,13 +218,17 @@ export async function storeStream(
 	 *     guard), a small file went up in parts and storage refused it **at completion**, after the whole file
 	 *     had been transferred, storing nothing.
 	 *
-	 * Batches are now exactly `partSize` except the last, so the size alone decides: a batch of `partSize` is
-	 * part of a larger file, and anything smaller is the whole file. Nothing depends on knowing the future.
+	 * Batches are now exactly `partSize` except the last, so a size below `partSize` means the file ended here
+	 * and anything else is one of several parts. Nothing depends on knowing the future.
 	 */
 	const sendBatch = async (batch: Uint8Array, isLastPlanned: boolean): Promise<void> => {
 		if (!decided) {
+			// One decision, made once. `pipelined` already encodes "this file is a single write", because it is
+			// false exactly when parts will not be used — see above — so the batch size is all that is left to
+			// consult: a batch that reached the part size means the file continues past it.
 			useMultipart = isLastPlanned ? batch.byteLength > threshold : true;
 			decided = true;
+
 			// `multipart` stays null when the mode is single-write, and it stays null if this call throws —
 			// which is why `abortMultipart` checks `useMultipart` and not `multipart`. Checking the handle was a
 			// bug: a throw here left the mode set with no upload to abort, so a later failure skipped the abort
