@@ -10,25 +10,25 @@ mechanism from concatenation.
 
 **Blocked by:** 08, 09.
 
-**Status:** part-delivered — see the "What is built" and "What is missing" sections at the end.
+**Status:** part-delivered — the engine, the rule store, the decisions and the routes are done and tested; only the interface presentation and live verification remain. See the sections at the end.
 
 **Blocked parts:** everything that stores a result, records its sources, or shows it in the interface needs
 the collection pipeline (05/08/09). The engine itself is pure logic and did not need them, so it was built
 first rather than waiting.
 
-- [ ] A merge rule can be created naming its source files, its ordering, its combination, and its output name, with no code involved.
-- [ ] Sources are selected with the same directory-pattern vocabulary used for collection, so "which files" has one description in this product rather than two.
-- [ ] Sources are ordered by an explicit stated rule, so that re-running an unchanged merge produces byte-identical output.
-- [ ] The combined result is stored as a derived object and appears in the interface like any collected file.
-- [ ] The derived object records the sources it was built from and a content hash of each, so that "is this current" is decidable rather than guessed.
-- [ ] The interface shows whether a derived object is current or stale, and which sources it came from.
-- [ ] A preview shows what a merge would produce — at minimum the source count and total size — **before** anything is stored.
-- [ ] A derived object is marked important when created, because the budget policy never evicts an important object and a derived object whose sources were evicted could never be rebuilt.
-- [ ] A merge whose sources are missing or empty fails with an explanation and **leaves any previous derived object in place** rather than replacing it with an empty or partial result.
-- [ ] A merge cannot take itself as a source, directly or through another merge; a cycle is refused when the rule is defined rather than when it runs.
-- [ ] The result is downloadable and shareable through the same path as any other object, with no special case.
-- [ ] Windows line endings in sources do not produce mixed line endings in the output, so the result is usable by tools that care.
-- [ ] Tests cover: ordering determinism, a missing source, an empty source, a cycle refused at definition time, a stale derived object, and a failed re-run preserving the previous result.
+- [x] A merge rule can be created naming its source files, its ordering, its combination, and its output name, with no code involved. `POST /api/derived`; redefining one output name edits in place rather than creating a second rule.
+- [x] Sources are selected with the same directory-pattern vocabulary used for collection. `src/derived.ts` calls the same `globToRegExp` that collection rules use, so the two cannot drift.
+- [x] Sources are ordered by an explicit stated rule. `orderSources` sorts by path then **content** — the content tie-break is what makes two sources sharing a path deterministic, which an adversarial audit proved was not true before (an 18-character bug producing `A,B` from one arrival order and `B,A` from the other). Selection also sorts by host then path, because the engine cannot distinguish two machines holding one path.
+- [x] The combined result is stored as a derived object and is an ordinary row in `objects` under the reserved `@derived` host, so it browses and downloads through the existing path with no special case. Verified by test: it appears in `GET /api/objects`. Not yet *rendered* distinctly in the interface.
+- [x] The derived object records its sources and each one's hash in `object_sources`, and records the rule signature AS BUILT in `derived_objects.rule_signature` — stored rather than recomputed, because the sources may be evicted and a stale result whose sources are gone must stay recognisable as stale.
+- [ ] The interface shows whether a derived object is current or stale, and which sources it came from. **The data exists and nothing reads it.** `mergeSignature` recomputed from the current sources compared against `derived_objects.rule_signature` is the answer; no route returns it and no panel shows it yet.
+- [x] A preview shows what a merge would produce before anything is stored. `POST /api/derived/preview` reports the source count, the total stored size, the estimated output size, the paths, and `perPattern` — a count per source pattern, because a structured merge that removed no duplicates and one that did nothing look identical in the output and the pattern matching zero objects is the usual cause.
+- [x] A derived object is marked important when created. Asserted by test against `object_flags`, not merely intended.
+- [x] A merge whose sources are missing or empty fails with an explanation and leaves any previous derived object in place. Two paths, both tested: bytes unreadable, and bytes present but empty. `runDerived` never returns content alongside `ok: false`, which is what makes "leave the previous result" enforceable at the call site instead of a convention. **A defect of exactly this kind was found in the route code and fixed**: `readMergeContents` reported unreadable sources and the route ignored the report.
+- [x] A merge cannot take itself as a source, directly or through another merge, refused when the rule is defined. Plus a second, independent guard at run time: objects already recorded in `derived_objects` are excluded from selection, which holds even for a rule renamed after storing a result. Both are tested.
+- [x] The result is downloadable and shareable through the same path as any other object. `GET /s/<token>` resolves it by object id like anything else; asserted indirectly by the object appearing in the ordinary browse listing.
+- [x] Windows line endings in sources do not produce mixed line endings in the output — `normalizeLineEndings` in the engine, covered by its own tests.
+- [ ] Tests cover: ordering determinism, a missing source, an empty source, a cycle refused at definition time, a stale derived object, and a failed re-run preserving the previous result. **Five of six are covered** (24 tests in `test/derived.test.ts`, 13 in `test/derived-routes.test.ts`). A **stale** derived object is the exception, and it is the same gap as the staleness criterion above: the signature machinery is tested, but nothing yet observes a stored result going stale.
 
 ---
 
