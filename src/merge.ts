@@ -142,8 +142,25 @@ export function normalizeLineEndings(text: string): string {
  * the entire point is that two runs produce identical bytes.
  */
 export function orderSources(sources: MergeSource[], explicitOrder?: string[]): MergeSource[] {
-	const byPath = (a: MergeSource, b: MergeSource): number => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
-	const sorted = [...sources].sort(byPath);
+	/**
+	 * Path first, then content, and the second key is a real fix rather than a formality.
+	 *
+	 * Two sources can share a path — a rule listing the same file twice, or sources identified by the path they
+	 * were collected from rather than by file name. Sorting by path alone leaves those in arrival order, which
+	 * silently reintroduces the order-dependence this function exists to remove: an adversarial audit showed
+	 * `concat` producing `A\nB\n` from one arrival order and `B\nA\n` from the other, and a conflicting scalar
+	 * resolving to a different source each time.
+	 *
+	 * Content is the tie-break because it is the only property of a source that is stable across runs and
+	 * independent of when it arrived. Two genuinely identical sources remain interchangeable, which is correct:
+	 * they contribute the same bytes, so their order cannot change the output.
+	 */
+	const byPathThenContent = (a: MergeSource, b: MergeSource): number => {
+		if (a.path !== b.path) return a.path < b.path ? -1 : 1;
+		if (a.content !== b.content) return a.content < b.content ? -1 : 1;
+		return 0;
+	};
+	const sorted = [...sources].sort(byPathThenContent);
 
 	if (!explicitOrder || explicitOrder.length === 0) return sorted;
 
@@ -154,7 +171,7 @@ export function orderSources(sources: MergeSource[], explicitOrder?: string[]): 
 		if (ra !== undefined && rb !== undefined) return ra - rb;
 		if (ra !== undefined) return -1;
 		if (rb !== undefined) return 1;
-		return byPath(a, b);
+		return byPathThenContent(a, b);
 	});
 }
 
@@ -215,12 +232,28 @@ export function mergeText(rule: MergeRule, sources: MergeSource[], options: { ex
 
 	let content: string;
 	if (rule.combination === 'yaml-list-union') {
-		const structured = unionDocuments(usable, rule.nameFromSource);
-		if (!structured.ok) {
-			return { ok: false, sourceCount: normalized.length, sourceBytes, notes, problem: structured.problem };
+		try {
+			const structured = unionDocuments(usable, rule.nameFromSource);
+			if (!structured.ok) {
+				return { ok: false, sourceCount: normalized.length, sourceBytes, notes, problem: structured.problem };
+			}
+			notes.push(...structured.notes);
+			content = structured.content;
+		} catch (err) {
+			// Canonicalising a cyclic document throws by design, so the refusal happens here. Without this the
+			// whole function raised `RangeError` — the one place in this module that failed by crashing rather
+			// than by explaining, which leaves the caller unable to keep the previous derived object.
+			//
+			// The sources are named, because "these sources could not be combined" without saying WHICH is only
+			// marginally better than the crash: the operator still has to find out by bisection.
+			return {
+				ok: false,
+				sourceCount: normalized.length,
+				sourceBytes,
+				notes,
+				problem: `${usable.map((s) => s.path).join(', ')} could not be combined (${(err as Error).message}), so the previous result is kept`,
+			};
 		}
-		notes.push(...structured.notes);
-		content = structured.content;
 	} else {
 		content = usable.map((s) => trimTrailingNewlines(s.content)).join('\n') + '\n';
 	}
@@ -286,7 +319,12 @@ export function applyNameFromSource(
 
 			// An entry whose source cannot be determined is left alone. Naming it from nothing would produce a
 			// field that looks deliberate and says nothing true.
-			const source = provenance.get(canonicalForm(entry));
+			//
+			// The key includes the list it is in, and that is a fix from an adversarial audit. Keyed by canonical
+			// form alone, two entries in DIFFERENT lists that happen to look alike shared one provenance slot, so
+			// whichever source was recorded last won — and an entry could be renamed after a source that never
+			// contributed it, producing `b g` where `a g` was correct. An entry's identity includes where it is.
+			const source = provenance.get(`${key}\u0000${canonicalForm(entry)}`);
 			if (!source) {
 				skipped += 1;
 				return record;
@@ -400,7 +438,11 @@ function unionDocuments(
 						// Recorded on the entry that SURVIVES. A duplicate from a later source does not overwrite
 						// this, so the name reflects the source that actually contributed the entry — which is the
 						// one a reader would expect to see.
-						provenance.set(canonical, src.path);
+						//
+						// The key carries the list's name as well as the entry's shape: the same entry appearing in
+						// two different lists is two entries, and keying on shape alone let the second overwrite the
+						// first's origin.
+						provenance.set(`${key}\u0000${canonical}`, src.path);
 					}
 				}
 				perKey.set(key, bucket);
@@ -453,7 +495,22 @@ function unionDocuments(
 		}
 	}
 
-	const content = stringifyYaml(out, { lineWidth: 0 });
+	// Wrapped, because canonicalising a document can overflow the stack rather than fail politely: a recursive
+	// YAML anchor produces a structure with a cycle in it, and an adversarial audit showed `mergeText` THROWING
+	// `RangeError: Maximum call stack size exceeded` — the only path in this module that raised instead of
+	// returning a refusal. A source that cannot be used has to come back as a stated problem, so the caller can
+	// keep the previous derived object rather than losing the message in a crash.
+	let content: string;
+	try {
+		content = stringifyYaml(out, { lineWidth: 0 });
+	} catch (err) {
+		return {
+			ok: false,
+			content: '',
+			notes,
+			problem: `the merged document could not be serialised (${(err as Error).message}), so the previous result is kept`,
+		};
+	}
 	// Parsing the output is the check, not reading it. A merge that produces something the parser cannot
 	// read is broken regardless of how it looks.
 	try {
@@ -492,17 +549,54 @@ function distinctNames(out: Record<string, unknown>, field: string): number {
 	return seen.size;
 }
 
-/** A stable text form for comparison: keys sorted, so formatting differences do not create duplicates. */
+/**
+ * A stable text form for comparison: keys sorted, so formatting differences do not create duplicates.
+ *
+ * **Type-tagged rather than plain `JSON.stringify`, and that is a fix from an adversarial audit.** Plain JSON
+ * is lossy in ways that make two genuinely different entries compare equal: `NaN` and `Infinity` both serialise
+ * to `null`, so an entry with `name: .nan` collided with one with no name at all and the second was dropped
+ * with **no note** — silent data loss, which is the worst way for this module to be wrong. A `Set` and a `Map`
+ * both serialise to `{}`, so any two of them collided.
+ *
+ * Tagging costs nothing and makes the comparison injective for the values a configuration file can contain.
+ */
 function canonicalForm(value: unknown): string {
-	return JSON.stringify(sortDeep(value));
+	return JSON.stringify(sortDeep(value), taggedReplacer);
 }
 
-function sortDeep(value: unknown): unknown {
-	if (Array.isArray(value)) return value.map(sortDeep);
+/** Serialises the values JSON cannot distinguish, so they do not compare equal by accident. */
+function taggedReplacer(this: unknown, _key: string, value: unknown): unknown {
+	// `Number.isFinite` covers NaN, Infinity and -Infinity, all of which JSON turns into `null`.
+	if (typeof value === 'number' && !Number.isFinite(value)) return { $number: String(value) };
+	if (typeof value === 'bigint') return { $bigint: String(value) };
+	// `undefined` is dropped from objects and becomes `null` in arrays; tagging keeps the two apart.
+	if (value === undefined) return { $undefined: true };
+	return value;
+}
+
+/**
+ * Sorts keys so two structurally equal values compare equal.
+ *
+ * Bounded, and the bound is a fix rather than caution. A recursive YAML anchor — `&a [*a]` — decodes to a
+ * structure that contains itself, so an unbounded walk never terminates; an adversarial audit showed the whole
+ * merge THROWING `RangeError: Maximum call stack size exceeded` instead of refusing. That was the only path in
+ * this module that raised rather than returning a stated problem, and a caller cannot keep a previous good
+ * result when it never gets an answer.
+ *
+ * The limit is far above any real configuration and far below the stack, so exceeding it means the document is
+ * cyclic or absurd rather than merely large.
+ */
+const MAX_DEPTH = 200;
+
+function sortDeep(value: unknown, depth = 0): unknown {
+	if (depth > MAX_DEPTH) {
+		throw new Error('the document nests deeper than this can compare, which usually means a recursive reference');
+	}
+	if (Array.isArray(value)) return value.map((item) => sortDeep(item, depth + 1));
 	if (value && typeof value === 'object') {
 		const out: Record<string, unknown> = {};
 		for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-			out[key] = sortDeep((value as Record<string, unknown>)[key]);
+			out[key] = sortDeep((value as Record<string, unknown>)[key], depth + 1);
 		}
 		return out;
 	}
