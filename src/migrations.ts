@@ -16,6 +16,7 @@
 import initSchemaSql from '../migrations/0001_init.sql';
 import usageIndexSql from '../migrations/0002_usage_index.sql';
 import receiptsSql from '../migrations/0003_receipts_importance_and_sources.sql';
+import derivedRulesSql from '../migrations/0004_derived_rules.sql';
 
 export interface Migration {
 	name: string;
@@ -33,6 +34,7 @@ export const SCHEMA_MIGRATIONS: Migration[] = [
 	{ name: '0001_init', sql: initSchemaSql },
 	{ name: '0002_usage_index', sql: usageIndexSql },
 	{ name: '0003_receipts_importance_and_sources', sql: receiptsSql },
+	{ name: '0004_derived_rules', sql: derivedRulesSql },
 ];
 
 /**
@@ -56,6 +58,12 @@ export const REQUIRED_SCHEMA = [
 	'idx_runs_host_started',
 	// Derived objects, and the record of what one was built from.
 	'object_sources',
+	// Merge rules, and which object each one produced. Added with ticket 12, when the merge engine stopped
+	// being pure logic and started storing results.
+	'derived_rules',
+	'derived_objects',
+	'idx_derived_rules_name',
+	'idx_derived_objects_rule',
 	// The importance flag, in its own table because adding a column is the one migration change that
 	// cannot be applied twice.
 	'object_flags',
