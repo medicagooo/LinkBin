@@ -168,6 +168,25 @@ export function renderIndexPage(locale: Locale = 'en'): string {
         <div id="rulelist"></div>
       </section>
 
+      <section class="glass browse" aria-labelledby="browse-h">
+        <h2 id="browse-h" data-i18n="browse.title">Stored files</h2>
+        <p class="lede" data-i18n="browse.lede"></p>
+        <div class="fields">
+          <label class="f"><span data-i18n="browse.search">Search</span><input id="b-search" type="search" spellcheck="false" autocomplete="off"></label>
+          <label class="f narrow"><span data-i18n="browse.machine">Machine</span><select id="b-host"><option value="" data-i18n="browse.anyMachine">Any</option></select></label>
+          <label class="f narrow"><span data-i18n="browse.sort">Sort</span><select id="b-sort">
+            <option value="newest" data-i18n="browse.newest">Newest</option>
+            <option value="oldest" data-i18n="browse.oldest">Oldest</option>
+            <option value="largest" data-i18n="browse.largest">Largest</option>
+            <option value="smallest" data-i18n="browse.smallest">Smallest</option>
+            <option value="path" data-i18n="browse.byPath">By path</option>
+          </select></label>
+          <label class="f narrow toggle"><input id="b-history" type="checkbox"><span data-i18n="browse.history">Include replaced versions</span></label>
+        </div>
+        <div id="browseCount" class="browse-count"></div>
+        <div id="objectlist"></div>
+      </section>
+
       <section class="glass shares" aria-labelledby="shares-h">
         <h2 id="shares-h" data-i18n="shares.title">Shared links</h2>
         <p class="lede" data-i18n="shares.lede"></p>
@@ -827,6 +846,121 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     host.appendChild(list);
   }
 
+  // --- stored files --------------------------------------------------------------------------
+  /**
+   * The current browse request.
+   *
+   * Kept in state rather than read from the inputs on each render, so a response arriving after the operator
+   * has typed something else cannot repaint the list with results for a query that is no longer on screen.
+   */
+  var browseState = { search: '', host: '', sort: 'newest', history: false, limit: 50 };
+
+  function renderObjects(objects, total, limit) {
+    var host = $('objectlist');
+    clear(host);
+
+    var count = $('browseCount');
+    clear(count);
+    if (total !== undefined) {
+      // Says how many there are as well as how many are shown: a truncated list that looks like the whole
+      // answer is worse than one that says it is truncated.
+      count.appendChild(
+        node('span', 'hint', total > objects.length
+          ? t('browse.showing').replace('{n}', objects.length).replace('{total}', total)
+          : t('browse.count').replace('{n}', total))
+      );
+    }
+
+    if (!objects.length) {
+      var empty = node('div', 'empty');
+      // Two different nothings, and they mean opposite things: nothing collected yet, or nothing matching
+      // what was asked for. Showing the wrong one sends the operator looking in the wrong place.
+      var searching = browseState.search || browseState.host;
+      empty.appendChild(node('p', 'empty-line', searching ? t('browse.noMatch') : t('browse.empty')));
+      empty.appendChild(node('p', 'hint', searching ? t('browse.noMatchHint') : t('browse.emptyHint')));
+      host.appendChild(empty);
+      return;
+    }
+
+    var list = node('ul', 'rules-list');
+    objects.forEach(function (o) {
+      var li = node('li', 'rule');
+
+      var target = node('div', 'share-target');
+      target.appendChild(node('code', 'pattern', o.path));
+      target.appendChild(node('span', 'share-size', bytes(o.sizeBytes)));
+      li.appendChild(target);
+
+      li.appendChild(chip(o.hostId, 'quiet'));
+      if (o.important) li.appendChild(chip(t('browse.protected'), 'ok'));
+      if (!o.live) li.appendChild(chip(t('browse.replaced'), 'warn'));
+
+      var tail = node('div', 'rule-tail');
+
+      // Only a live file can be shared: a replaced version may already have had its bytes reclaimed, so
+      // offering a link to it would promise a download that cannot happen.
+      if (o.live) {
+        var share = node('button', 'ghost small', t('browse.share'));
+        share.type = 'button';
+        share.addEventListener('click', function () {
+          $('s-object').value = String(o.id);
+          $('s-object').scrollIntoView({ block: 'center' });
+          $('shares-h').scrollIntoView({ block: 'start' });
+        });
+        tail.appendChild(share);
+
+        var imp = node('button', 'ghost small', o.important ? t('browse.unprotect') : t('browse.protect'));
+        imp.type = 'button';
+        imp.addEventListener('click', function () {
+          api('/api/objects/importance', {
+            method: 'POST',
+            body: JSON.stringify({ id: o.id, important: !o.important })
+          }).then(function () { loadObjects(); });
+        });
+        tail.appendChild(imp);
+      }
+
+      li.appendChild(tail);
+      list.appendChild(li);
+    });
+    host.appendChild(list);
+  }
+
+  function loadObjects() {
+    var query = [];
+    if (browseState.search) query.push('q=' + encodeURIComponent(browseState.search));
+    if (browseState.host) query.push('host=' + encodeURIComponent(browseState.host));
+    if (browseState.sort) query.push('sort=' + encodeURIComponent(browseState.sort));
+    if (browseState.history) query.push('history=1');
+    query.push('limit=' + browseState.limit);
+
+    return api('/api/objects?' + query.join('&')).then(function (r) {
+      if (r.ok) renderObjects(r.body.objects || [], r.body.total, r.body.limit);
+    });
+  }
+
+  /** Fills the machine filter from the machines that exist, so it cannot offer one that does not. */
+  function fillHostFilter(hosts) {
+    var select = $('b-host');
+    var current = select.value;
+    clear(select);
+
+    var any = node('option', null, t('browse.anyMachine'));
+    any.value = '';
+    select.appendChild(any);
+
+    hosts.forEach(function (h) {
+      var option = node('option', null, h.label || h.id);
+      option.value = h.id;
+      select.appendChild(option);
+    });
+
+    // Restored after rebuilding, or a refresh would silently reset the filter to "any" and the list would
+    // appear to ignore what was selected.
+    select.value = hosts.some(function (h) { return h.id === current; }) ? current : '';
+    browseState.host = select.value;
+  }
+
   // --- shared links --------------------------------------------------------------------------
   /** Formats a byte count for a human. Powers of 1024, because that is what storage is sold in. */
   function bytes(n) {
@@ -959,7 +1093,12 @@ export function renderIndexPage(locale: Locale = 'en'): string {
   }
 
   function loadHosts() {
-    return api('/api/hosts').then(function (r) { renderHosts(r.body.hosts || []); });
+    return api('/api/hosts').then(function (r) {
+      var hosts = r.body.hosts || [];
+      renderHosts(hosts);
+      // The browse filter is built from the same response, so it can only offer machines that exist.
+      fillHostFilter(hosts);
+    });
   }
 
   function loadRules() {
@@ -975,9 +1114,37 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     loadHosts();
     loadRules();
     loadShares();
+    loadObjects();
   }
 
   // --- events --------------------------------------------------------------------------------
+  // Search is debounced: a keystroke-per-request would fire a query for every prefix of what is being typed,
+  // and the responses can arrive out of order, so the list would briefly show results for a prefix.
+  var searchTimer = null;
+  $('b-search').addEventListener('input', function () {
+    var value = $('b-search').value;
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(function () {
+      browseState.search = value.trim();
+      loadObjects();
+    }, 250);
+  });
+
+  $('b-host').addEventListener('change', function () {
+    browseState.host = $('b-host').value;
+    loadObjects();
+  });
+
+  $('b-sort').addEventListener('change', function () {
+    browseState.sort = $('b-sort').value;
+    loadObjects();
+  });
+
+  $('b-history').addEventListener('change', function () {
+    browseState.history = $('b-history').checked;
+    loadObjects();
+  });
+
   $('makeShare').addEventListener('click', function () {
     var button = $('makeShare');
     var objectId = Number($('s-object').value);
@@ -1257,6 +1424,29 @@ function translationsLiteral(): string {
 			'auth.password': 'Password',
 			'auth.current': 'Current password',
 			'auth.failed': 'That did not work.',
+			'browse.title': 'Stored files',
+			'browse.lede': 'Everything collected so far. Search by any part of a path.',
+			'browse.search': 'Search',
+			'browse.machine': 'Machine',
+			'browse.anyMachine': 'Any',
+			'browse.sort': 'Sort',
+			'browse.newest': 'Newest',
+			'browse.oldest': 'Oldest',
+			'browse.largest': 'Largest',
+			'browse.smallest': 'Smallest',
+			'browse.byPath': 'By path',
+			'browse.history': 'Include replaced versions',
+			'browse.count': '{n} files',
+			'browse.showing': 'showing {n} of {total}',
+			'browse.empty': 'Nothing collected yet.',
+			'browse.emptyHint': 'Add a machine and a directory to collect, then run a collection.',
+			'browse.noMatch': 'Nothing matches that.',
+			'browse.noMatchHint': 'Try part of a directory name, or clear the filters.',
+			'browse.protected': 'important',
+			'browse.protect': 'Mark important',
+			'browse.unprotect': 'Unmark',
+			'browse.replaced': 'replaced',
+			'browse.share': 'Share',
 			'shares.title': 'Shared links',
 			'shares.lede': 'Hand out a link to one stored file. It stops working on its own, and you can cancel it sooner.',
 			'shares.objectId': 'Stored file id',
@@ -1378,6 +1568,29 @@ function translationsLiteral(): string {
 			'auth.password': '密码',
 			'auth.current': '当前密码',
 			'auth.failed': '没有成功。',
+			'browse.title': '已存文件',
+			'browse.lede': '目前采集到的全部文件。可搜索路径的任意片段。',
+			'browse.search': '搜索',
+			'browse.machine': '主机',
+			'browse.anyMachine': '全部',
+			'browse.sort': '排序',
+			'browse.newest': '最新',
+			'browse.oldest': '最早',
+			'browse.largest': '最大',
+			'browse.smallest': '最小',
+			'browse.byPath': '按路径',
+			'browse.history': '包含已被取代的版本',
+			'browse.count': '{n} 个文件',
+			'browse.showing': '显示 {n} / {total}',
+			'browse.empty': '还没有采集到任何文件。',
+			'browse.emptyHint': '添加一台主机和要采集的目录，然后运行一次采集。',
+			'browse.noMatch': '没有匹配的文件。',
+			'browse.noMatchHint': '试试目录名的一部分，或清空筛选条件。',
+			'browse.protected': '重要',
+			'browse.protect': '标记为重要',
+			'browse.unprotect': '取消标记',
+			'browse.replaced': '已被取代',
+			'browse.share': '分享',
 			'shares.title': '分享链接',
 			'shares.lede': '为某个已存文件发一条链接。它会自行失效，你也可以提前取消。',
 			'shares.objectId': '已存文件 id',
@@ -1499,6 +1712,29 @@ function translationsLiteral(): string {
 			'auth.password': '密碼',
 			'auth.current': '目前密碼',
 			'auth.failed': '沒有成功。',
+			'browse.title': '已存檔案',
+			'browse.lede': '目前採集到的全部檔案。可搜尋路徑的任意片段。',
+			'browse.search': '搜尋',
+			'browse.machine': '主機',
+			'browse.anyMachine': '全部',
+			'browse.sort': '排序',
+			'browse.newest': '最新',
+			'browse.oldest': '最早',
+			'browse.largest': '最大',
+			'browse.smallest': '最小',
+			'browse.byPath': '依路徑',
+			'browse.history': '包含已被取代的版本',
+			'browse.count': '{n} 個檔案',
+			'browse.showing': '顯示 {n} / {total}',
+			'browse.empty': '還沒有採集到任何檔案。',
+			'browse.emptyHint': '新增一台主機和要採集的目錄，然後執行一次採集。',
+			'browse.noMatch': '沒有符合的檔案。',
+			'browse.noMatchHint': '試試目錄名稱的一部分，或清空篩選條件。',
+			'browse.protected': '重要',
+			'browse.protect': '標記為重要',
+			'browse.unprotect': '取消標記',
+			'browse.replaced': '已被取代',
+			'browse.share': '分享',
 			'shares.title': '分享連結',
 			'shares.lede': '為某個已存檔案發一條連結。它會自行失效，你也可以提前取消。',
 			'shares.objectId': '已存檔案 id',
@@ -1620,6 +1856,29 @@ function translationsLiteral(): string {
 			'auth.password': 'パスワード',
 			'auth.current': '現在のパスワード',
 			'auth.failed': 'うまくいきませんでした。',
+			'browse.title': '保存済みファイル',
+			'browse.lede': 'これまでに収集したすべてのファイルです。パスの一部で検索できます。',
+			'browse.search': '検索',
+			'browse.machine': 'マシン',
+			'browse.anyMachine': 'すべて',
+			'browse.sort': '並び順',
+			'browse.newest': '新しい順',
+			'browse.oldest': '古い順',
+			'browse.largest': '大きい順',
+			'browse.smallest': '小さい順',
+			'browse.byPath': 'パス順',
+			'browse.history': '置き換え済みの版も含める',
+			'browse.count': '{n} 件',
+			'browse.showing': '{n} / {total} 件を表示',
+			'browse.empty': 'まだ何も収集していません。',
+			'browse.emptyHint': 'マシンと収集するディレクトリを追加し、収集を実行してください。',
+			'browse.noMatch': '一致するものがありません。',
+			'browse.noMatchHint': 'ディレクトリ名の一部で試すか、絞り込みを解除してください。',
+			'browse.protected': '重要',
+			'browse.protect': '重要として印を付ける',
+			'browse.unprotect': '印を外す',
+			'browse.replaced': '置き換え済み',
+			'browse.share': '共有',
 			'shares.title': '共有リンク',
 			'shares.lede': '保存済みのファイル 1 つに対するリンクを発行します。期限が来れば自動で無効になり、それより早く取り消すこともできます。',
 			'shares.objectId': '保存ファイルの id',
@@ -1877,6 +2136,16 @@ body {
 .gate .actions button { width: 100%; }
 .hint.error { color: var(--err); }
 @media (max-width: 560px) { .gate { margin-top: 4vh; padding: 20px 18px; } }
+
+/* ---------- stored files ---------- */
+/* The count sits above the list rather than below it, because "showing 50 of 214" is only useful before
+   someone has started reading the list as if it were the whole answer. */
+.browse-count { margin: 10px 0 4px; }
+.browse-count .hint { margin: 0; }
+/* A checkbox inherits the full-width treatment that inputs get, which stretches a single tick across the
+   width of the panel. */
+.toggle { display: flex; align-items: center; gap: 8px; }
+.toggle input { width: auto; padding: 0; margin: 0; }
 
 /* ---------- shared links ---------- */
 /* The created link is the one thing here the operator must copy before leaving, so it gets a raised

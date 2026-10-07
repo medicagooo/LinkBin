@@ -1255,6 +1255,27 @@ if (path === '/api/status' && method === 'GET') {
 				});
 			}
 
+			if (path === '/api/objects/importance' && method === 'POST') {
+				const body = (await request.json()) as { id?: number; important?: boolean };
+				const id = Number(body.id);
+				if (!Number.isInteger(id) || id <= 0) throw new HttpError(400, 'id must be the id of a stored file');
+
+				const exists = await env.DB.prepare('SELECT id FROM objects WHERE id = ?').bind(id).first<{ id: number }>();
+				if (!exists) throw new HttpError(404, 'no stored file with that id');
+
+				if (body.important) {
+					// `INSERT OR REPLACE` rather than an update: presence of the row IS the flag, so marking twice
+					// is not an error and needs no read first.
+					await env.DB.prepare('INSERT OR REPLACE INTO object_flags (object_id, important, created_at) VALUES (?, 1, ?)')
+						.bind(id, nowIso())
+						.run();
+				} else {
+					await env.DB.prepare('DELETE FROM object_flags WHERE object_id = ?').bind(id).run();
+				}
+
+				return json({ ok: true, id, important: body.important === true });
+			}
+
 			if (path === '/api/usage' && method === 'GET') {
 				// The per-file limit travels with the totals: both are numbers the operator has to plan around,
 				// and a limit that is only enforced is one they discover by having a file refused.
