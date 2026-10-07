@@ -187,6 +187,16 @@ export function renderIndexPage(locale: Locale = 'en'): string {
         <div id="objectlist"></div>
       </section>
 
+      <section class="glass storage" aria-labelledby="storage-h">
+        <h2 id="storage-h" data-i18n="storage.title">Storage</h2>
+        <p class="lede" data-i18n="storage.lede"></p>
+        <!--
+          The numbers are the point, not decoration. A budget that is only ENFORCED is one the operator discovers
+          by having a file refused, and by then the useful moment for planning around it has passed.
+        -->
+        <div id="usage"></div>
+      </section>
+
       <section class="glass shares" aria-labelledby="shares-h">
         <h2 id="shares-h" data-i18n="shares.title">Shared links</h2>
         <p class="lede" data-i18n="shares.lede"></p>
@@ -1339,6 +1349,73 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     });
   }
 
+  // --- storage ---------------------------------------------------------------------------------
+  /**
+   * How full the store is, and what it will do about it.
+   *
+   * Three states rather than a percentage alone, because a number does not say what happens next:
+   *
+   *   - room left: nothing to do, and the figures are for planning.
+   *   - full, but reclaimable: the next file will evict unprotected older files, and the operator should know
+   *     that BEFORE it happens rather than discovering a file gone.
+   *   - full and saturated: every remaining file is protected, so new files are being refused outright. This is
+   *     the only case the operator can act on, and the only fix is to unmark something, so it says so.
+   */
+  function renderUsage(u) {
+    var host = $('usage');
+    clear(host);
+    if (!u) return;
+
+    var fraction = Math.max(0, Math.min(1, Number(u.usedFraction) || 0));
+    var bar = node('div', 'usage-bar');
+    var fill = node('div', 'usage-fill' + (fraction >= 0.9 ? ' hot' : fraction >= 0.7 ? ' warm' : ''));
+    fill.style.width = (fraction * 100).toFixed(1) + '%';
+    bar.appendChild(fill);
+    host.appendChild(bar);
+
+    // "12.3 GB of 10 GB" — both figures, because the percentage alone does not tell the operator what a
+    // remaining file budget looks like in the units files are measured in.
+    host.appendChild(
+      node(
+        'p',
+        'usage-line',
+        t('storage.used')
+          .replace('{used}', bytes(u.totalBytes))
+          .replace('{total}', bytes(u.budgetBytes))
+          .replace('{percent}', (fraction * 100).toFixed(1)),
+      ),
+    );
+    host.appendChild(node('p', 'hint', t('storage.remaining').replace('{n}', bytes(u.remainingBytes))));
+
+    // Retained bytes are broken out because they are the part people are surprised by: superseded and
+    // soft-deleted files still occupy the bucket and are still charged.
+    if (u.retainedBytes > 0) {
+      host.appendChild(node('p', 'hint', t('storage.retained').replace('{n}', bytes(u.retainedBytes))));
+    }
+    if (u.importantBytes > 0) {
+      host.appendChild(node('p', 'hint', t('storage.protected').replace('{n}', bytes(u.importantBytes))));
+    }
+
+    if (u.saturatedByImportant) {
+      // The one state with an action available, so it is stated as an instruction rather than as a reading.
+      host.appendChild(node('p', 'hint error', t('storage.saturated')));
+    } else if (fraction >= 1) {
+      host.appendChild(node('p', 'hint', t('storage.fullReclaimable')));
+    }
+
+    // The per-file limit is stated for the same reason as the budget: a limit discovered by having a file
+    // refused has already cost the transfer.
+    if (u.maxFileBytes) {
+      host.appendChild(node('p', 'hint', t('storage.perFile').replace('{n}', bytes(u.maxFileBytes))));
+    }
+  }
+
+  function loadUsage() {
+    return api('/api/usage').then(function (r) {
+      if (r.ok) renderUsage(r.body.usage);
+    });
+  }
+
   function loadHosts() {
     return api('/api/hosts').then(function (r) {
       var hosts = r.body.hosts || [];
@@ -1515,6 +1592,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     renderThemeSwitch();
     if (authMode !== 'in') return;
     loadStatus();
+    loadUsage();
     loadHosts();
     loadRules();
     loadShares();
@@ -1973,7 +2051,16 @@ function translationsLiteral(): string {
 			'browse.copyPath': 'Copy path',
 			'browse.copyId': 'Copy id',
 			'browse.copied': 'Copied',
-			'browse.gone': 'no longer stored',
+			'browse.gone': 'no longer stored',			'storage.title': 'Storage',
+			'storage.lede': 'What the store is holding and what it will do when it fills. Protections are honoured before space: a file marked important is never evicted, and if only protected files remain the store refuses new ones rather than deleting one of them.',
+			'storage.used': '{used} of {total} used ({percent}%)',
+			'storage.remaining': '{n} still free.',
+			'storage.retained': '{n} of that is retained: replaced or deleted files whose bytes are still stored, and still counted against the budget.',
+			'storage.protected': '{n} is protected from eviction.',
+			'storage.saturated': 'The store is full and every remaining file is protected, so new files are being refused. Unmark something, or raise the budget.',
+			'storage.fullReclaimable': 'The store is full. The next file will evict the oldest unprotected files to make room.',
+			'storage.perFile': 'Any one file may be up to {n}.',
+
 
 			'shares.title': 'Shared links',
 			'shares.lede': 'Hand out a link to one stored file. It stops working on its own, and you can cancel it sooner.',
@@ -2176,7 +2263,16 @@ function translationsLiteral(): string {
 			'browse.copyPath': '复制路径',
 			'browse.copyId': '复制编号',
 			'browse.copied': '已复制',
-			'browse.gone': '已不再存储',
+			'browse.gone': '已不再存储',			'storage.title': '存储',
+			'storage.lede': '存储的占用情况，以及存满之后会怎么做。保护优先于空间：标记为重要的文件永远不会被淘汰；如果只剩下受保护的文件，系统会拒绝新文件而不是删掉它们中的一个。',
+			'storage.used': '已用 {used} / {total}（{percent}%）',
+			'storage.remaining': '还剩 {n}。',
+			'storage.retained': '其中 {n} 是保留占用：已被替换或已删除、但字节仍在存储中、仍计入预算的文件。',
+			'storage.protected': '有 {n} 受保护，不会被淘汰。',
+			'storage.saturated': '存储已满，且剩余文件全部受保护，因此正在拒绝新文件。请取消某个文件的保护，或提高预算。',
+			'storage.fullReclaimable': '存储已满。下一个文件会淘汰最旧的未受保护文件来腾出空间。',
+			'storage.perFile': '单个文件最大 {n}。',
+
 
 			'shares.title': '分享链接',
 			'shares.lede': '为某个已存文件发一条链接。它会自行失效，你也可以提前取消。',
@@ -2260,7 +2356,16 @@ function translationsLiteral(): string {
 			'browse.copyPath': '複製路徑',
 			'browse.copyId': '複製編號',
 			'browse.copied': '已複製',
-			'browse.gone': '已不再儲存',
+			'browse.gone': '已不再儲存',			'storage.title': '儲存',
+			'storage.lede': '儲存的佔用情況，以及存滿之後會怎麼做。保護優先於空間：標記為重要的檔案永遠不會被淘汰；如果只剩下受保護的檔案，系統會拒絕新檔案而不是刪掉其中一個。',
+			'storage.used': '已用 {used} / {total}（{percent}%）',
+			'storage.remaining': '還剩 {n}。',
+			'storage.retained': '其中 {n} 是保留佔用：已被取代或已刪除、但位元組仍在儲存中、仍計入預算的檔案。',
+			'storage.protected': '有 {n} 受保護，不會被淘汰。',
+			'storage.saturated': '儲存已滿，且剩餘檔案全部受保護，因此正在拒絕新檔案。請取消某個檔案的保護，或提高預算。',
+			'storage.fullReclaimable': '儲存已滿。下一個檔案會淘汰最舊的未受保護檔案來騰出空間。',
+			'storage.perFile': '單一檔案最大 {n}。',
+
 			'skip': '跳到主要內容',
 			'status.key': '簽章金鑰',
 			'status.schema': '資料表',
@@ -2574,7 +2679,16 @@ function translationsLiteral(): string {
 			'browse.copyPath': 'パスをコピー',
 			'browse.copyId': 'ID をコピー',
 			'browse.copied': 'コピーしました',
-			'browse.gone': '保存されていません',
+			'browse.gone': '保存されていません',			'storage.title': 'ストレージ',
+			'storage.lede': '保存領域の使用状況と、いっぱいになったときの動作です。保護は空きより優先されます。重要と印を付けたファイルは決して削除されず、保護されたファイルだけが残った場合は、そのうちの 1 つを消すのではなく新しいファイルを拒否します。',
+			'storage.used': '{total} 中 {used} 使用（{percent}%）',
+			'storage.remaining': '残り {n}。',
+			'storage.retained': 'うち {n} は保持分です。置き換え済みまたは削除済みでも、バイトが保存に残り、予算に計上され続けているファイルです。',
+			'storage.protected': '{n} は保護されており削除されません。',
+			'storage.saturated': '保存領域が満杯で、残るファイルはすべて保護されているため、新しいファイルを拒否しています。保護を解除するか、予算を増やしてください。',
+			'storage.fullReclaimable': '保存領域が満杯です。次のファイルは、最も古い保護されていないファイルを削除して場所を空けます。',
+			'storage.perFile': '1 ファイルあたり最大 {n}。',
+
 
 			'shares.title': '共有リンク',
 			'shares.lede': '保存済みのファイル 1 つに対するリンクを発行します。期限が来れば自動で無効になり、それより早く取り消すこともできます。',
@@ -3114,6 +3228,19 @@ button.danger:hover:not(:disabled) { border-color: var(--err); color: var(--err)
 .merge-pattern:first-of-type { border-top: 0; }
 
 .merge-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+
+/* --- storage --------------------------------------------------------------------------------
+   The fill changes colour with how full the store is, because a number alone does not say whether anything is
+   about to happen: below 70 percent nothing will, above 90 the next file starts deleting things. Two thresholds
+   rather than a gradient, so the state is readable at a glance rather than judged by eye. */
+.usage-bar {
+  height: 8px; border-radius: 999px; overflow: hidden; margin: 12px 0 10px;
+  background: var(--glass-strong); border: 1px solid var(--glass-line);
+}
+.usage-fill { height: 100%; border-radius: 999px; background: var(--ok); transition: width .25s ease; }
+.usage-fill.warm { background: var(--warn); }
+.usage-fill.hot { background: var(--err); }
+.usage-line { margin: 0 0 4px; font-size: 13px; color: var(--fg); }
 
 .reveal { margin-top: 18px; }
 .reveal summary {

@@ -110,4 +110,94 @@ describe('the budget is stated, not only enforced', () => {
 		const res = await call('/api/usage');
 		expect(res.status).toBe(401);
 	});
+
+	it('stops charging for an object whose bytes have been reclaimed', async () => {
+		// The distinction the reclaims table exists for, asserted where the operator reads it. A soft-deleted
+		// object still has its bytes, so it is still charged; a RECLAIMED one does not, so it is not. One bit
+		// cannot answer both, and the answers are opposites.
+		await addObject('/soft', 3000, { deleted: true });
+		await addObject('/reclaimed', 5000);
+		const row = await env.DB.prepare("SELECT id FROM objects WHERE object_key = '/reclaimed'").first<{ id: number }>();
+		await env.DB.prepare('INSERT INTO object_reclaims (object_id, bytes_freed, reclaimed_at) VALUES (?, 5000, ?)')
+			.bind(row!.id, '2026-01-03T00:00:00Z')
+			.run();
+
+		const body = await usage();
+
+		// 3000, not 8000: the reclaimed bytes are genuinely gone, and the soft-deleted ones are not.
+		expect(body.usage.totalBytes).toBe(3000);
+		expect(body.usage.objectCount, 'both rows are still listed, because a record outlives its bytes').toBe(2);
+	});
+
+	it('does not count a reclaimed object towards what is protected either', async () => {
+		// A protected file that was reclaimed would otherwise add its size to `importantBytes` while contributing
+		// nothing to `totalBytes`, so the two figures the interface shows would contradict each other.
+		await addObject('/keep', 4000, { important: true });
+		await addObject('/keep2', 2000, { important: true });
+		const row = await env.DB.prepare("SELECT id FROM objects WHERE object_key = '/keep2'").first<{ id: number }>();
+		await env.DB.prepare('INSERT INTO object_reclaims (object_id, bytes_freed, reclaimed_at) VALUES (?, 2000, ?)')
+			.bind(row!.id, '2026-01-03T00:00:00Z')
+			.run();
+
+		const body = await usage();
+		expect(body.usage.totalBytes).toBe(4000);
+		expect(body.usage.importantBytes).toBe(4000);
+	});
+});
+
+/**
+ * The panel that shows the budget.
+ *
+ * The route's numbers are tested above; what is tested here is that the interface actually asks for them and has
+ * somewhere to put them. That is not a formality — three of ticket 07's criteria were blocked for two rounds on
+ * exactly this, a finished route with no caller, and "the data exists" is not the same as "the operator can see
+ * it".
+ *
+ * The client script cannot be executed here, so these assertions are about structure: the panel exists, it is
+ * labelled, and the renderer and the loader are present in the emitted script. A test that ran the DOM would be
+ * better and is not available offline; this is the honest limit, stated rather than implied.
+ */
+describe('the storage panel', () => {
+	beforeEach(bootstrap);
+
+	async function page(): Promise<string> {
+		const res = await call('/', { headers: { cookie: `linkbin_session=${token}` } });
+		expect(res.status).toBe(200);
+		return await res.text();
+	}
+
+	it('has a panel for the budget, labelled for screen readers', async () => {
+		const html = await page();
+		expect(html).toContain('id="storage-h"');
+		expect(html, 'the heading is translatable').toContain('data-i18n="storage.title"');
+		expect(html, 'and the panel is described by it').toMatch(/aria-labelledby="storage-h"/);
+	});
+
+	it('has somewhere for the numbers to go', async () => {
+		expect(await page()).toContain('id="usage"');
+	});
+
+	it('asks the server for the figures and renders them', async () => {
+		// Both halves are needed: a loader without a renderer fetches and discards, and a renderer without a
+		// loader draws nothing. Asserting only the panel's existence would pass with either missing.
+		const html = await page();
+		expect(html, 'the loader calls the route').toContain("api('/api/usage')");
+		expect(html, 'the renderer exists').toMatch(/function renderUsage\(/);
+
+		// The CALL, not merely the name. An earlier version of this assertion matched /loadUsage\(\)/ anywhere in
+		// the file, which the function's own definition satisfies — so it passed with the call removed, which was
+		// the one thing it existed to catch. Mutation testing found that; reading it had not.
+		const refresh = /function refreshAll\(\)\s*\{[\s\S]*?\n  \}/.exec(html)?.[0] ?? '';
+		expect(refresh, 'refreshAll was found in the emitted script').toContain('refreshAll');
+		expect(refresh, 'and it calls the loader, so the panel is filled when the page loads').toContain('loadUsage();');
+	});
+
+	it('states the per-file limit and the saturated case, because those are the actionable ones', async () => {
+		const html = await page();
+		// Both are keys the renderer needs; the guard that every used key exists in all four locales is what makes
+		// naming them here meaningful rather than decorative.
+		expect(html).toContain("t('storage.perFile')");
+		expect(html).toContain("t('storage.saturated')");
+		expect(html).toContain("u.saturatedByImportant");
+	});
 });
