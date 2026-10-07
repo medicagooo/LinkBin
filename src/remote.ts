@@ -58,6 +58,48 @@ export interface RuleEvaluation {
 	detail?: string;
 }
 
+/**
+ * Turns rule evaluations into the set of files to collect.
+ *
+ * This is where "an exclusion beats an inclusion" actually becomes true. Ordering the rules is
+ * necessary but not sufficient: unless something subtracts, an exclusion is a note rather than a
+ * decision. The precedence is deliberate and total — an exclusion wins regardless of whether it is
+ * global or per-machine, and regardless of order — because the alternative (a per-machine exclusion
+ * losing to a global inclusion) would quietly collect a file the operator explicitly excluded, which is
+ * the single worst outcome this configuration can produce.
+ *
+ * Rules that could not be resolved contribute nothing, and are **not** treated as matches or as
+ * absences: a file only counts as matched when a rule actually reported matching it. That keeps an
+ * unreadable directory from silently emptying the collection.
+ *
+ * Paths are returned as directory plus name, because a bare filename is ambiguous the moment two
+ * directories are configured.
+ */
+export function filesToCollect(evaluations: RuleEvaluation[]): { path: string; pattern: string }[] {
+	const dirOf = (pattern: string): string => {
+		const slash = pattern.lastIndexOf('/');
+		return slash > 0 ? pattern.slice(0, slash) : '/';
+	};
+
+	const excluded = new Set<string>();
+	for (const evaluation of evaluations) {
+		if (!evaluation.isExclude || evaluation.status !== 'ok') continue;
+		for (const name of evaluation.matches ?? []) excluded.add(`${dirOf(evaluation.pattern)}/${name}`);
+	}
+
+	const wanted = new Map<string, string>();
+	for (const evaluation of evaluations) {
+		if (evaluation.isExclude || evaluation.status !== 'ok') continue;
+		for (const name of evaluation.matches ?? []) {
+			const path = `${dirOf(evaluation.pattern)}/${name}`;
+			if (excluded.has(path)) continue;
+			if (!wanted.has(path)) wanted.set(path, evaluation.pattern);
+		}
+	}
+
+	return [...wanted.entries()].map(([path, pattern]) => ({ path, pattern })).sort((a, b) => a.path.localeCompare(b.path));
+}
+
 /** The shape the rule resolution needs; a full database row satisfies it. */
 export interface ResolvableRule {
 	pattern: string;

@@ -274,3 +274,69 @@ describe('resolving a rule against the machine\u2019s filesystem', () => {
 		expect(body.stages.every((s: any) => typeof s.ms === 'number')).toBe(true);
 	});
 });
+
+describe('an exclusion beats an inclusion', () => {
+	beforeEach(async () => {
+		await bootstrap();
+		await addHost('one');
+		await addHost('two');
+	});
+
+	/**
+	 * The decision under test, exercised through the real evaluations the Worker produces.
+	 *
+	 * Ordering the rules is necessary but not sufficient: something has to subtract, or an exclusion is a
+	 * note rather than a decision. Checking the two halves together is what makes this evidence.
+	 */
+	async function collection(hostId: string, files: Record<string, { name: string; isDirectory?: boolean }[]>) {
+		const machine = fakeMachine(files);
+		const body = (await (await as('/api/hosts/test', { method: 'POST', body: JSON.stringify({ id: hostId }) }, machine)).json()) as any;
+		const { filesToCollect } = await import('../src/remote');
+		return filesToCollect(body.evaluations).map((f) => f.path);
+	}
+
+	it('collects a directory while skipping one file inside it', async () => {
+		await addRule({ pattern: '/var/log/*.log' });
+		await addRule({ pattern: '/var/log/noisy.log', isExclude: true });
+
+		const paths = await collection('one', { '/var/log': [{ name: 'noisy.log' }, { name: 'quiet.log' }] });
+		expect(paths).toEqual(['/var/log/quiet.log']);
+	});
+
+	it('lets a per-machine exclusion beat a global inclusion', async () => {
+		// The case worth getting wrong: a global rule collecting everything, narrowed for one machine. If
+		// precedence went the other way, a file the operator explicitly excluded would be collected.
+		await addRule({ pattern: '/etc/nginx/*.conf' });
+		await addRule({ pattern: '/etc/nginx/secret.conf', isExclude: true, hostId: 'one' });
+
+		const forOne = await collection('one', { '/etc/nginx': [{ name: 'secret.conf' }, { name: 'site.conf' }] });
+		const forTwo = await collection('two', { '/etc/nginx': [{ name: 'secret.conf' }, { name: 'site.conf' }] });
+
+		expect(forOne).toEqual(['/etc/nginx/site.conf']);
+		// The other machine carries no such exclusion, so it still collects both.
+		expect(forTwo).toEqual(['/etc/nginx/secret.conf', '/etc/nginx/site.conf']);
+	});
+
+	it('lets a global exclusion beat a per-machine inclusion', async () => {
+		await addRule({ pattern: '/srv/data/*.bak', isExclude: true });
+		await addRule({ pattern: '/srv/data/*.bak', hostId: 'one' });
+
+		expect(await collection('one', { '/srv/data': [{ name: 'old.bak' }] })).toEqual([]);
+	});
+
+	it('does not treat an unresolvable rule as if it had excluded anything', async () => {
+		// A wildcard directory is reported as needing the collection step. It must not be read as
+		// "matched nothing", and must not silently remove what the other rule found either.
+		await addRule({ pattern: '/var/*/*.log', isExclude: true });
+		await addRule({ pattern: '/var/log/*.log' });
+
+		expect(await collection('one', { '/var/log': [{ name: 'keep.log' }] })).toEqual(['/var/log/keep.log']);
+	});
+
+	it('lists a file once even when two rules both match it', async () => {
+		await addRule({ pattern: '/etc/*.conf' });
+		await addRule({ pattern: '/etc/nginx.conf' });
+
+		expect(await collection('one', { '/etc': [{ name: 'nginx.conf' }] })).toEqual(['/etc/nginx.conf']);
+	});
+});
