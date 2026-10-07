@@ -23,7 +23,37 @@
  * than extend it.
  */
 
-const PBKDF2_ITERATIONS = 210_000;
+/**
+ * PBKDF2 iterations for a stored password.
+ *
+ * **100,000 is a HARD RUNTIME LIMIT, not a tuning choice, and it was found by running against the live
+ * deployment rather than by reading anything.** This was 210,000 and the deployed Worker refused it outright:
+ *
+ *     Pbkdf2 failed: iteration counts above 100000 are not supported (requested 210000).
+ *
+ * The consequence was that **setting a password was impossible on the real deployment** — `/api/auth/setup`
+ * answered 500 — while the entire local test suite passed, because the local runtime accepts 210,000. That
+ * divergence is the whole reason this project verifies against a live deployment: a simulator that permits more
+ * than production cannot catch a limit that production enforces.
+ *
+ * Cloudflare's documentation states no such limit — the Web Crypto support table lists PBKDF2 without an
+ * iteration figure, and neither the limits page nor the compatibility-dates page mentions one — so the runtime's
+ * own error message is the only authority available and is quoted above rather than paraphrased.
+ *
+ * The count is stored with each hash (see the `iterations` column), so a value can be raised later without
+ * invalidating existing passwords — but it can never exceed this ceiling while `crypto.subtle` is doing the work.
+ */
+export const PBKDF2_ITERATIONS = 100_000;
+
+/**
+ * The highest iteration count this runtime will perform.
+ *
+ * Named separately from the value actually used, so the ceiling has one definition and can be asserted in a test.
+ * A test cannot ask the local runtime for its limit — it does not have one — so the ceiling is recorded here as
+ * the observed platform fact and checked against the configured count instead.
+ */
+export const PBKDF2_ITERATION_CEILING = 100_000;
+
 const SALT_BYTES = 16;
 const KEY_BYTES = 32;
 const SESSION_SECONDS = 12 * 60 * 60;

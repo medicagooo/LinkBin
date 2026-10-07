@@ -26,7 +26,7 @@
  * it is wrong.
  */
 
-import { hashPassword, timingSafeEqual } from './auth';
+import { PBKDF2_ITERATIONS, hashPassword, timingSafeEqual } from './auth';
 
 /** A couple of hours, which is the requirement's own wording. */
 export const DEFAULT_SHARE_SECONDS = 2 * 60 * 60;
@@ -94,7 +94,7 @@ export async function hashSharePassword(password: string): Promise<{ salt: strin
 	let binary = '';
 	for (const byte of saltBytes) binary += String.fromCharCode(byte);
 	const salt = btoa(binary);
-	const iterations = 210_000;
+	const iterations = PBKDF2_ITERATIONS;
 	return { salt, hash: await hashPassword(password, salt, iterations), iterations };
 }
 
@@ -143,7 +143,7 @@ export async function describeShare(
 		return { usable: false, needsPassword: true, reason: 'password_required', message: 'this link needs a password' };
 	}
 
-	const ok = await verifySharePassword(suppliedPassword, row.password_salt, row.password_hash, Number(row.password_iterations ?? 210_000));
+	const ok = await verifySharePassword(suppliedPassword, row.password_salt, row.password_hash, Number(row.password_iterations ?? PBKDF2_ITERATIONS));
 	if (!ok) {
 		// The same message for wrong and missing, so a guesser learns nothing from the difference.
 		return { usable: false, needsPassword: true, reason: 'password_incorrect', message: 'this link needs a password' };

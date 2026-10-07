@@ -62,6 +62,7 @@ import {
 	type ShareRow,
 } from './share';
 import {
+	PBKDF2_ITERATIONS,
 	attemptLimits,
 	hashPassword,
 	minPasswordLength,
@@ -486,7 +487,7 @@ async function handleAuth(path: string, request: Request, env: Env): Promise<Res
 			await env.DB.prepare(
 				'INSERT INTO auth_secret (id, salt, hash, iterations, changed_at, sessions_revoked_at, created_at) VALUES (1, ?, ?, ?, ?, ?, ?)',
 			)
-				.bind(salt, hash, 210_000, now, now, now)
+				.bind(salt, hash, PBKDF2_ITERATIONS, now, now, now)
 				.run();
 		} catch (err) {
 			const message = (err as Error).message ?? '';
@@ -567,7 +568,7 @@ async function handleAuth(path: string, request: Request, env: Env): Promise<Res
 		const hash = await hashPassword(body.next!, salt);
 		const now = nowIso();
 		await env.DB.prepare('UPDATE auth_secret SET salt = ?, hash = ?, iterations = ?, changed_at = ?, sessions_revoked_at = ? WHERE id = 1')
-			.bind(salt, hash, 210_000, now, now)
+			.bind(salt, hash, PBKDF2_ITERATIONS, now, now)
 			.run();
 
 		return json({ ok: true }, 200, { 'set-cookie': clearedCookieHeader() });
@@ -770,7 +771,8 @@ async function serveShare(env: Env, request: Request, token: string, baseUrl: st
 	const supplied = request.headers.get('x-share-password') ?? new URL(request.url).searchParams.get('password');
 
 	// Guessing is limited on this path too, and the absence of that was an adversarial finding: the route
-	// verifies with a 210,000-iteration PBKDF2 and had no counter, no delay and no lockout, while the share
+	// verifies with a 100,000-iteration PBKDF2 — the runtime ceiling, see `PBKDF2_ITERATIONS` — and had no counter,
+	// no delay and no lockout, while the share
 	// password may be short and a live token is distinguishable from an unknown one. A link is meant to be
 	// handed to somebody, so the password is the only thing between a misdirected link and the file.
 	//
