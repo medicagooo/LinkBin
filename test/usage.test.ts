@@ -201,3 +201,119 @@ describe('the storage panel', () => {
 		expect(html).toContain("u.saturatedByImportant");
 	});
 });
+
+/**
+ * The two times shown for a stored file.
+ *
+ * The route's figures are tested through the collect suite; what is tested here is that the browse panel actually
+ * renders both, because ticket 11's last criterion is about the INTERFACE showing them and an API field nothing
+ * draws satisfies nothing.
+ *
+ * The unit conversion is the part worth a test of its own. The machine reports whole SECONDS and every timestamp
+ * this store writes is ISO MILLISECONDS, and passing one where the other belongs is off by a factor of a thousand
+ * — which renders as a date in 1970 rather than as an error, so nothing would look broken.
+ */
+describe('the two times on a stored file', () => {
+	beforeEach(bootstrap);
+
+	async function page(): Promise<string> {
+		const res = await call('/', { headers: { cookie: `linkbin_session=${token}` } });
+		return await res.text();
+	}
+
+	it('renders when the file was stored and when the machine last changed it', async () => {
+		const html = await page();
+		expect(html, 'the store\'s own time').toContain("t('browse.storedAgo')");
+		expect(html, 'and the machine\'s').toContain("t('browse.seenAgo')");
+	});
+
+	it('converts the machine\'s seconds and takes the store\'s times as ISO, in separate helpers', async () => {
+		// Two helpers rather than one overloaded one, because the units differ: `agoIso` parses a date,
+		// `agoMachineSeconds` subtracts from the clock. A single function taking "a time" would be a coin flip at
+		// every call site.
+		const html = await page();
+		expect(html).toMatch(/function agoIso\(/);
+		expect(html).toMatch(/function agoMachineSeconds\(/);
+		expect(html).toContain('agoMachineSeconds(o.mtime)');
+		expect(html).toContain('agoIso(o.createdAt)');
+	});
+
+	it('says nothing rather than guessing when a time is absent', async () => {
+		// A machine that did not report a modification time must produce no chip, not "1970" and not "just now".
+		// The second is the more dangerous of the two inventions because it looks current.
+		const html = await page();
+		expect(html, 'a missing value returns null').toMatch(/if \(!iso\) return null;/);
+		expect(html, 'and an unusable number does too').toMatch(/!isFinite\(seconds\)\) return null;/);
+		expect(html, 'and each chip is only added when there is something to say').toMatch(/if \(stored\) li\.appendChild/);
+		expect(html).toMatch(/if \(seen\) li\.appendChild/);
+	});
+});
+
+/**
+ * The conversion between the machine's seconds and this store's milliseconds.
+ *
+ * Extracted from the page and RUN, because the structural assertions above could not catch a unit error: a
+ * mutation that treated the machine's seconds as milliseconds passed every one of them. A grep for the
+ * conversion is satisfied by any conversion, right or wrong — the only way to know the number is correct is to
+ * evaluate it.
+ *
+ * This is the defect the spec names in its own words: the machine reports whole seconds, every timestamp this
+ * store writes is ISO milliseconds, and passing one where the other belongs is off by a factor of a thousand,
+ * which renders as a date in 1970 rather than as an error.
+ */
+describe('the machine-seconds conversion, evaluated rather than inspected', () => {
+	beforeEach(bootstrap);
+
+	/** Pulls the two helpers out of the emitted script and evaluates them with a fixed clock. */
+	async function helpers(): Promise<{ agoMachineSeconds: (s: number | null) => string | null; agoIso: (iso: string | null) => string | null }> {
+		const html = await call('/', { headers: { cookie: `linkbin_session=${token}` } }).then((r) => r.text());
+		const grab = (name: string): string => {
+			const start = html.indexOf(`function ${name}(`);
+			if (start < 0) throw new Error(`${name} not found in the emitted script`);
+			// Balanced-brace walk rather than a regex: the bodies contain braces.
+			let depth = 0;
+			for (let i = html.indexOf('{', start); i < html.length; i++) {
+				if (html[i] === '{') depth += 1;
+				else if (html[i] === '}') {
+					depth -= 1;
+					if (depth === 0) return html.slice(start, i + 1);
+				}
+			}
+			throw new Error(`${name} is unterminated`);
+		};
+
+		// A minimal `ago` and `t`, so this evaluates the CONVERSION and not the presentation.
+		const source = `
+			var NOW_MS = 1700000000000;
+			Date.now = function () { return NOW_MS; };
+			function t(k) { return k + ':{v}'; }
+			function ago(seconds) { return String(Math.round(seconds)); }
+			${grab('agoIso')}
+			${grab('agoMachineSeconds')}
+			return { agoMachineSeconds: agoMachineSeconds, agoIso: agoIso };
+		`;
+		return new Function(source)() as { agoMachineSeconds: (s: number | null) => string | null; agoIso: (iso: string | null) => string | null };
+	}
+
+	it('reads the machine\'s seconds as seconds, not as milliseconds', async () => {
+		const { agoMachineSeconds } = await helpers();
+		// 1700000000 seconds is the same instant as 1700000000000 milliseconds. An hour before the clock, so the
+		// answer must be about 3600 — and a milliseconds-reading would produce a date in 1970, which is a number
+		// near 1.7e9. The two are nine orders of magnitude apart, so this cannot pass by accident.
+		expect(agoMachineSeconds(1_700_000_000 - 3600)).toBe('3600');
+	});
+
+	it('reads an ISO timestamp as milliseconds', async () => {
+		const { agoIso } = await helpers();
+		expect(agoIso(new Date(1_700_000_000_000 - 3600_000).toISOString())).toBe('3600');
+	});
+
+	it('returns nothing for a value it cannot use, rather than zero', async () => {
+		// Zero would render as "just now" — the more dangerous of the two inventions, because it looks current.
+		const { agoMachineSeconds, agoIso } = await helpers();
+		expect(agoMachineSeconds(null)).toBeNull();
+		expect(agoMachineSeconds(Number.NaN)).toBeNull();
+		expect(agoIso(null)).toBeNull();
+		expect(agoIso('not a date')).toBeNull();
+	});
+});

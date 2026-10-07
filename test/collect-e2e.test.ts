@@ -145,13 +145,22 @@ describe('a first collection', () => {
 		expect(await (await env.BUCKET.get(row!.object_key))!.text()).toBe('hello world');
 	});
 
-	it('shows the stored file under the machine and path it came from', async () => {
+	it('shows the stored file under the machine and path it came from, with both times', async () => {
 		// The interface reads this, so the property is asserted through the route rather than from the table.
+		//
+		// TWO times, and the distinction is the point of the second one: `createdAt` is when this store took the
+		// file, `mtime` is when the MACHINE last changed it. A file stored a month ago and unchanged since is
+		// current; one stored an hour ago from a machine that has since rewritten it is not. Reporting only the
+		// first would make every file look its age in the store rather than its age at the source.
 		await addRule('/var/log/*.log');
-		await collect(machine({ '/var/log': [{ name: 'app.log', content: 'x' }] }));
+		await collect(machine({ '/var/log': [{ name: 'app.log', content: 'x', mtime: 1_700_000_123 }] }));
 
-		const listed = (await (await call('/api/objects', { headers: { cookie } })).json()) as { objects: { hostId: string; path: string }[] };
+		const listed = (await (await call('/api/objects', { headers: { cookie } })).json()) as {
+			objects: { hostId: string; path: string; mtime: number | null; createdAt: string }[];
+		};
 		expect(listed.objects.map((o) => `${o.hostId}:${o.path}`)).toEqual(['web-01:/var/log/app.log']);
+		expect(listed.objects[0].mtime, 'the machine\'s own time, in whole seconds').toBe(1_700_000_123);
+		expect(Number.isFinite(Date.parse(listed.objects[0].createdAt)), 'and when this store took it').toBe(true);
 	});
 
 	it('stores nothing new on a second run, and reports that nothing changed', async () => {

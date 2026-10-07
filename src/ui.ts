@@ -965,6 +965,18 @@ export function renderIndexPage(locale: Locale = 'en'): string {
       // would claim a present file had been reclaimed.
       if (o.bytesPresent === false) li.appendChild(chip(t('browse.gone'), 'warn'));
 
+      // WHEN it was stored, and WHEN the machine last saw it. Two different facts, and the second is the one that
+      // answers "is this stale": a file stored a month ago and unchanged since is current, while one stored an
+      // hour ago from a machine that has since had the file rewritten is not.
+      //
+      // Both are omitted rather than guessed when absent. A stored time the store did not record, or a
+      // modification time the machine did not report, must say nothing — "1970" and "just now" are both
+      // inventions, and the second is the more dangerous because it looks current.
+      var stored = agoIso(o.createdAt);
+      if (stored) li.appendChild(chip(t('browse.storedAgo').replace('{v}', stored), 'quiet'));
+      var seen = agoMachineSeconds(o.mtime);
+      if (seen) li.appendChild(chip(t('browse.seenAgo').replace('{v}', seen), 'quiet'));
+
       var tail = node('div', 'rule-tail');
 
       // The path is long, machine-specific and easy to mistype, which is exactly the kind of value worth a
@@ -1116,6 +1128,33 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     else if (secs < 172800) text = Math.round(secs / 3600) + 'h';
     else text = Math.round(secs / 86400) + 'd';
     return past ? t('shares.ago').replace('{v}', text) : t('shares.in').replace('{v}', text);
+  }
+
+  /**
+   * How long ago a moment was, from an ISO string. Always in the past, so no direction is needed.
+   *
+   * Returns null rather than a guess when the value is missing or unparseable. A file whose modification time
+   * the machine did not report must say nothing about it, which is different from saying "1970" or "just now" —
+   * both would be inventions, and the second is the more dangerous because it looks current.
+   */
+  function agoIso(iso) {
+    if (!iso) return null;
+    var at = Date.parse(iso);
+    if (!isFinite(at)) return null;
+    return ago((Date.now() - at) / 1000);
+  }
+
+  /**
+   * The machine's own modification time, in seconds, as an age.
+   *
+   * A SEPARATE function from the one above because the units differ and mixing them is exactly the defect this
+   * project's spec names: the machine reports whole SECONDS, while every timestamp the store writes is ISO
+   * milliseconds. Passing one where the other is expected is off by a factor of a thousand, which reads as a
+   * date in 1970 rather than as an error — so the conversion lives here, in one place, with the unit in its name.
+   */
+  function agoMachineSeconds(seconds) {
+    if (seconds === null || seconds === undefined || !isFinite(seconds)) return null;
+    return ago(Date.now() / 1000 - seconds);
   }
 
   /**
@@ -2132,7 +2171,9 @@ function translationsLiteral(): string {
 			'browse.copyPath': 'Copy path',
 			'browse.copyId': 'Copy id',
 			'browse.copied': 'Copied',
-			'browse.gone': 'no longer stored',
+			'browse.gone': 'no longer stored',			'browse.storedAgo': 'stored {v}',
+			'browse.seenAgo': 'machine last changed it {v}',
+
 			'storage.title': 'Storage',
 			'storage.lede': 'What the store is holding and what it will do when it fills. Protections are honoured before space: a file marked important is never evicted, and if only protected files remain the store refuses new ones rather than deleting one of them.',
 			'storage.used': '{used} of {total} used ({percent}%)',
@@ -2355,7 +2396,9 @@ function translationsLiteral(): string {
 			'browse.copyPath': '复制路径',
 			'browse.copyId': '复制编号',
 			'browse.copied': '已复制',
-			'browse.gone': '已不再存储',
+			'browse.gone': '已不再存储',			'browse.storedAgo': '{v}存入',
+			'browse.seenAgo': '机器上最后改动于{v}',
+
 			'storage.title': '存储',
 			'storage.lede': '存储的占用情况，以及存满之后会怎么做。保护优先于空间：标记为重要的文件永远不会被淘汰；如果只剩下受保护的文件，系统会拒绝新文件而不是删掉它们中的一个。',
 			'storage.used': '已用 {used} / {total}（{percent}%）',
@@ -2458,7 +2501,9 @@ function translationsLiteral(): string {
 			'browse.copyPath': '複製路徑',
 			'browse.copyId': '複製編號',
 			'browse.copied': '已複製',
-			'browse.gone': '已不再儲存',
+			'browse.gone': '已不再儲存',			'browse.storedAgo': '{v}存入',
+			'browse.seenAgo': '機器上最後改動於{v}',
+
 			'storage.title': '儲存',
 			'storage.lede': '儲存的佔用情況，以及存滿之後會怎麼做。保護優先於空間：標記為重要的檔案永遠不會被淘汰；如果只剩下受保護的檔案，系統會拒絕新檔案而不是刪掉其中一個。',
 			'storage.used': '已用 {used} / {total}（{percent}%）',
@@ -2792,7 +2837,9 @@ function translationsLiteral(): string {
 			'browse.copyPath': 'パスをコピー',
 			'browse.copyId': 'ID をコピー',
 			'browse.copied': 'コピーしました',
-			'browse.gone': '保存されていません',
+			'browse.gone': '保存されていません',			'browse.storedAgo': '{v}に保存',
+			'browse.seenAgo': 'マシン上の最終変更は{v}',
+
 			'storage.title': 'ストレージ',
 			'storage.lede': '保存領域の使用状況と、いっぱいになったときの動作です。保護は空きより優先されます。重要と印を付けたファイルは決して削除されず、保護されたファイルだけが残った場合は、そのうちの 1 つを消すのではなく新しいファイルを拒否します。',
 			'storage.used': '{total} 中 {used} 使用（{percent}%）',
