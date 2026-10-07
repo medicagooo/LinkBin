@@ -210,6 +210,12 @@ export function renderIndexPage(locale: Locale = 'en'): string {
         <h2 id="runs-h" data-i18n="runs.title">Collection history</h2>
         <p class="lede" data-i18n="runs.lede"></p>
         <div id="runlist"></div>
+        <!--
+          On demand, beside the history it produces: the two are read together, and a control that starts a run
+          belongs where its results appear.
+        -->
+        <div class="actions"><button class="quiet" id="collectNow" data-i18n="runs.collectNow">Collect now</button></div>
+        <div id="collectResult"></div>
       </section>
 
       <section class="glass panel" id="panel" aria-labelledby="result-h">
@@ -1282,6 +1288,35 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     loadObjects();
   });
 
+  $('collectNow').addEventListener('click', function () {
+    var button = $('collectNow');
+    var host = $('collectResult');
+    button.disabled = true;
+    clear(host);
+
+    api('/api/collect', { method: 'POST' }).then(function (r) {
+      button.disabled = false;
+      if (!r.ok) {
+        host.appendChild(node('p', 'hint error', r.body.error || t('runs.collectFailed')));
+        return;
+      }
+      var body = r.body;
+
+      // Every answer is stated, including "there is nothing to do". A button that appears to do nothing is
+      // indistinguishable from one that is broken, and an empty deployment is the most likely reason.
+      if (!body.run) {
+        host.appendChild(node('p', 'hint', body.reason === 'out-of-time' ? t('runs.outOfTime') : t('runs.nothingToDo')));
+        return;
+      }
+
+      // The decision is reported as a decision. Collection itself is not built, and a message implying a
+      // machine had been updated would be a lie the operator would act on.
+      host.appendChild(node('p', 'hint', t('runs.planOnly').replace('{host}', body.machineId)));
+      if (body.resumeFrom) host.appendChild(node('p', 'hint', t('runs.resumeFrom').replace('{from}', body.resumeFrom)));
+      loadRuns();
+    });
+  });
+
   $('makeShare').addEventListener('click', function () {
     var button = $('makeShare');
     var objectId = Number($('s-object').value);
@@ -1561,6 +1596,12 @@ function translationsLiteral(): string {
 			'auth.password': 'Password',
 			'auth.current': 'Current password',
 			'auth.failed': 'That did not work.',
+			'runs.collectNow': 'Collect now',
+			'runs.collectFailed': 'The collection could not be started.',
+			'runs.nothingToDo': 'There is no machine to collect. Add one first.',
+			'runs.outOfTime': 'There is not enough time left in this run to collect anything.',
+			'runs.planOnly': 'Next machine: {host}. Collection itself is not built yet, so nothing has been collected.',
+			'runs.resumeFrom': 'It would resume from: {from}',
 			'runs.title': 'Collection history',
 			'runs.lede': 'What each run did, and anything it could not handle.',
 			'runs.ok': 'ok',
@@ -1725,6 +1766,12 @@ function translationsLiteral(): string {
 			'auth.password': '密码',
 			'auth.current': '当前密码',
 			'auth.failed': '没有成功。',
+			'runs.collectNow': '立即采集',
+			'runs.collectFailed': '无法启动采集。',
+			'runs.nothingToDo': '没有可采集的主机，请先添加一台。',
+			'runs.outOfTime': '本次运行剩余时间不足以采集任何内容。',
+			'runs.planOnly': '下一台主机：{host}。采集本身尚未实现，因此没有采集任何内容。',
+			'runs.resumeFrom': '将从这里续跑：{from}',
 			'runs.title': '采集历史',
 			'runs.lede': '每一次采集做了什么，以及有哪些没能处理。',
 			'runs.ok': '正常',
@@ -1889,6 +1936,12 @@ function translationsLiteral(): string {
 			'auth.password': '密碼',
 			'auth.current': '目前密碼',
 			'auth.failed': '沒有成功。',
+			'runs.collectNow': '立即採集',
+			'runs.collectFailed': '無法啟動採集。',
+			'runs.nothingToDo': '沒有可採集的主機，請先新增一台。',
+			'runs.outOfTime': '本次執行剩餘時間不足以採集任何內容。',
+			'runs.planOnly': '下一台主機：{host}。採集本身尚未實作，因此沒有採集任何內容。',
+			'runs.resumeFrom': '將從這裡續跑：{from}',
 			'runs.title': '採集歷史',
 			'runs.lede': '每一次採集做了什麼，以及有哪些沒能處理。',
 			'runs.ok': '正常',
@@ -2053,6 +2106,12 @@ function translationsLiteral(): string {
 			'auth.password': 'パスワード',
 			'auth.current': '現在のパスワード',
 			'auth.failed': 'うまくいきませんでした。',
+			'runs.collectNow': '今すぐ収集',
+			'runs.collectFailed': '収集を開始できませんでした。',
+			'runs.nothingToDo': '収集するマシンがありません。先に追加してください。',
+			'runs.outOfTime': 'この実行に残された時間では何も収集できません。',
+			'runs.planOnly': '次のマシン：{host}。収集自体はまだ実装されていないため、何も収集していません。',
+			'runs.resumeFrom': '再開位置：{from}',
 			'runs.title': '収集履歴',
 			'runs.lede': '各回の収集が何をしたか、そして扱えなかったもの。',
 			'runs.ok': '正常',

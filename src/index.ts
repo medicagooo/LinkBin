@@ -34,6 +34,7 @@ import { connectRemote } from './ssh-remote';
 import { planAdmission, type BudgetObject } from './budget';
 import { buildObjectQuery, type BrowseFilter, type BrowseSort, type ObjectRow } from './browse';
 import { issuesForHost, runDetail, summarizeRuns, toIssueDetail, type IssueRow, type RunRow } from './receipts';
+import { parseCursor, planRun } from './schedule';
 import {
 	describeShare,
 	newShareToken,
@@ -89,6 +90,17 @@ interface Env {
 const MAX_HOSTS = 50;
 const MAX_FILE_BYTES = 100 * 1024 * 1024; // 100 MB per file
 const STORAGE_BUDGET_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB total in R2, a capacity budget
+
+/**
+ * How long one collection invocation may spend before it must leave.
+ *
+ * **A conservative default, not a measured figure.** The platform's per-invocation ceiling is far higher,
+ * and the run stops well below it because the time after stopping is what writing a resume cursor costs.
+ * The number to use is a consequence of the throughput measurement (ticket 04), which has not run: until it
+ * has, a value that is safely too small is the right one, because a run that stops early resumes whereas one
+ * that is killed mid-write leaves a half-recorded file.
+ */
+const DEFAULT_RUN_BUDGET_MS = 5 * 60 * 1000;
 
 class HttpError extends Error {
 	constructor(
@@ -1081,14 +1093,65 @@ export default {
 			}
 
 			if (path === '/api/collect' && method === 'POST') {
-				if (!(await isScheduler(env, request))) {
-					throw new HttpError(401, 'this endpoint takes the scheduler credential');
+				// Two ways in, and they are deliberately different credentials. The scheduler has no session and
+				// presents a derived token; the operator has a session and asks from the interface. Accepting
+				// either here is not a weakening of the distinction — that distinction is about which credential
+				// works on the MANAGEMENT API, where the scheduler token is still refused.
+				const byScheduler = await isScheduler(env, request);
+				if (!byScheduler && !(await isSignedIn(env, request))) {
+					throw new HttpError(401, 'this endpoint takes the scheduler credential or a signed-in operator');
 				}
+
+				// The decision layer decides which machine runs and from where. What it cannot yet do is the
+				// collection itself, which needs a machine; saying so is better than reporting a run that never
+				// happened.
+				const machines = await env.DB.prepare(
+					`SELECT h.id AS id,
+					        h.enabled AS enabled,
+					        MAX(r.started_at) AS last_started_at,
+					        MAX(CASE WHEN r.state = 'finished' AND r.failed_count = 0 THEN r.finished_at END) AS last_succeeded_at
+					 FROM hosts h
+					 LEFT JOIN collection_runs r ON r.host_id = h.id
+					 GROUP BY h.id`,
+				).all<{ id: string; enabled: number; last_started_at: string | null; last_succeeded_at: string | null }>();
+
+				// A previous run that never finished left a cursor; either it belongs to the machine chosen now,
+				// in which case it is resumed, or it is ignored and said so.
+				const open = await env.DB.prepare(
+					`SELECT host_id, cursor_json FROM collection_runs WHERE state = 'running' ORDER BY started_at DESC LIMIT 1`,
+				).first<{ host_id: string; cursor_json: string | null }>();
+
+				const now = Date.now();
+				const startedAt = now;
+				const plan = planRun({
+					machines: (machines.results ?? []).map((m) => ({
+						id: m.id,
+						enabled: Number(m.enabled) === 1,
+						lastStartedAt: m.last_started_at,
+						lastSucceededAt: m.last_succeeded_at,
+						lastOutcome: null,
+					})),
+					cursor: open ? parseCursor(open.cursor_json) : null,
+					now,
+					startedAt,
+					// The wall-clock budget. The platform ceiling is far above this; the figure itself is a
+					// constant to be set from the throughput measurement, which has not run, so it is the
+					// conservative default the schedule module documents rather than a measured value.
+					budgetMs: DEFAULT_RUN_BUDGET_MS,
+				});
+
 				return json({
 					ok: true,
 					accepted: true,
+					by: byScheduler ? 'scheduler' : 'operator',
+					run: plan.run,
+					machineId: plan.machineId ?? null,
+					resumeFrom: plan.resumeFrom ?? null,
+					reason: plan.reason ?? null,
+					notes: plan.notes,
+					// Stated because it is true: the decision was made, nothing was collected. A caller that
+					// assumed otherwise would believe a machine had been updated.
 					collectionImplemented: false,
-					note: 'the scheduler credential is recognised; running a collection arrives with ticket 08',
 				});
 			}
 

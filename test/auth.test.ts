@@ -317,15 +317,24 @@ describe('the scheduler credential is separate from a session', () => {
 		expect((await res.json() as any).accepted).toBe(true);
 	});
 
-	it('refuses a session where the scheduler credential is expected', async () => {
-		// If a session worked here, the two credentials would not really be separate.
+	it('accepts a signed-in operator for triggering collection, because the interface asks too', async () => {
+		// The boundary between the two credentials is the MANAGEMENT API, not this endpoint. Ticket 08 requires
+		// collection to be startable on demand from the interface, so a session is accepted here — and the test
+		// below pins that the distinction still holds where it is meant to.
 		const cookie = sessionCookie(await signIn())!;
 		const res = await post('/api/collect', {}, { authorization: `Bearer ${cookie}` });
+		expect(res.status).toBe(200);
+		expect((await res.json() as any).by).toBe('operator');
+	});
+
+	it('refuses a caller with neither credential', async () => {
+		const res = await post('/api/collect', {});
 		expect(res.status).toBe(401);
 	});
 
 	it('refuses the scheduler credential where a session is expected', async () => {
-		// And the converse: the machine credential must not grant access to the management API.
+		// The converse that still matters: the machine credential must not grant access to the management API.
+		// Accepting it on the collect endpoint does not weaken this, because they are different endpoints.
 		const token = await schedulerToken();
 		const res = await call('/api/hosts', { headers: { authorization: `Bearer ${token}` } });
 		expect(res.status).toBe(401);
