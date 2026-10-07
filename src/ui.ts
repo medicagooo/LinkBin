@@ -206,6 +206,28 @@ export function renderIndexPage(locale: Locale = 'en'): string {
         <div id="sharelist"></div>
       </section>
 
+      <section class="glass merges" aria-labelledby="merges-h">
+        <h2 id="merges-h" data-i18n="merges.title">Combined files</h2>
+        <p class="lede" data-i18n="merges.lede"></p>
+        <div class="fields">
+          <label class="f narrow"><span data-i18n="merges.outputName">Call the result</span><input id="m-name" spellcheck="false" placeholder="merged.yaml"></label>
+          <label class="f narrow"><span data-i18n="merges.combination">How to combine</span><select id="m-combination">
+            <option value="yaml-list-union" selected data-i18n="merges.union">Merge their lists into one document</option>
+            <option value="concat" data-i18n="merges.concat">Join them end to end</option>
+          </select></label>
+        </div>
+        <div class="fields">
+          <label class="f"><span data-i18n="merges.patterns">Which stored files (one pattern per line)</span><textarea id="m-patterns" rows="3" spellcheck="false" placeholder="/etc/app/*.yaml"></textarea></label>
+        </div>
+        <div class="actions">
+          <button class="ghost" id="previewMerge" data-i18n="merges.preview">Preview</button>
+          <button class="quiet" id="saveMerge" data-i18n="merges.save">Save rule</button>
+        </div>
+        <!-- Preview output sits above the list so the thing just asked for is visible without scrolling. -->
+        <div id="mergePreview"></div>
+        <div id="mergelist"></div>
+      </section>
+
       <section class="glass runs" aria-labelledby="runs-h">
         <h2 id="runs-h" data-i18n="runs.title">Collection history</h2>
         <p class="lede" data-i18n="runs.lede"></p>
@@ -1247,6 +1269,163 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     return api('/api/rules').then(function (r) { renderRules(r.body.rules || []); });
   }
 
+  // --- combined files --------------------------------------------------------------------------
+  /**
+   * The patterns, one per line.
+   *
+   * A textarea rather than a repeatable row of inputs, because the common case is two to five paths pasted from
+   * wherever they were decided, and a control that requires a click per line makes that case the awkward one.
+   * A "host:pattern" prefix narrows a line to one machine, which is how the same path on several machines is
+   * distinguished — the case this feature exists for.
+   *
+   * No backticks anywhere in this file's script body: it is emitted verbatim inside an outer template literal, so
+   * one would end that literal early. The guard that catches this has now fired four times in this project.
+   */
+  function mergePatterns() {
+    return $('m-patterns').value.split('\n').map(function (line) {
+      return line.trim();
+    }).filter(function (line) {
+      return line.length > 0;
+    }).map(function (line) {
+      var colon = line.indexOf(':');
+      // Only a leading "name:" is treated as a machine, and only when the rest still looks like a path: a
+      // Windows-style drive path such as "C:/..." is not a machine selector, and neither is a line with no colon.
+      if (colon > 0 && line.charAt(colon + 1) === '/') {
+        return { hostId: line.slice(0, colon), pattern: line.slice(colon + 1) };
+      }
+      return { pattern: line };
+    });
+  }
+
+  function mergeDefinition() {
+    return {
+      outputName: $('m-name').value.trim(),
+      combination: $('m-combination').value,
+      sources: mergePatterns()
+    };
+  }
+
+  /**
+   * Renders the preview.
+   *
+   * The per-pattern counts are the point of this panel rather than a detail: a structured merge that removed no
+   * duplicates and one that did nothing at all produce the same file, and the pattern that matched zero stored
+   * objects is the usual reason. Saying so here is what turns "it did nothing" into "this line is wrong".
+   */
+  function renderMergePreview(p) {
+    var host = $('mergePreview');
+    clear(host);
+    if (!p) return;
+
+    var box = node('div', p.ok ? 'merge-preview' : 'merge-preview bad');
+    if (!p.ok) {
+      box.appendChild(node('p', 'feedback bad', p.problem || t('merges.failed')));
+    } else {
+      var line = t('merges.willCombine')
+        .replace('{n}', p.sourceCount)
+        .replace('{bytes}', bytes(p.sourceBytes))
+        .replace('{out}', p.bytes === undefined ? '?' : bytes(p.bytes));
+      box.appendChild(node('p', 'hint', line));
+    }
+
+    (p.perPattern || []).forEach(function (entry) {
+      var row = node('div', 'merge-pattern');
+      row.appendChild(node('code', 'pattern', (entry.hostId ? entry.hostId + ':' : '') + entry.pattern));
+      // A pattern matching nothing is called out rather than shown as a zero among counts, because it is the one
+      // that explains a result the operator did not expect.
+      row.appendChild(chip(entry.matched === 0 ? t('merges.matchedNothing') : t('merges.matched').replace('{n}', entry.matched), entry.matched === 0 ? 'warn' : 'quiet'));
+      box.appendChild(row);
+    });
+
+    if (p.sources && p.sources.length) {
+      box.appendChild(node('p', 'hint', p.sources.join(', ')));
+    }
+    if (p.notes && p.notes.length) {
+      p.notes.forEach(function (note) { box.appendChild(node('p', 'hint', note)); });
+    }
+
+    host.appendChild(box);
+  }
+
+  function renderMerges(rules) {
+    var host = $('mergelist');
+    clear(host);
+    if (!rules.length) {
+      var empty = node('div', 'empty');
+      empty.appendChild(node('p', 'empty-line', t('merges.empty')));
+      empty.appendChild(node('p', 'hint', t('merges.emptyHint')));
+      host.appendChild(empty);
+      return;
+    }
+
+    var list = node('ul', 'rules-list');
+    rules.forEach(function (m) {
+      var li = node('li', 'rule');
+
+      var head = node('div', 'merge-head');
+      head.appendChild(node('code', 'pattern', m.outputName));
+      li.appendChild(head);
+
+      // Three states, and the distinction is the useful part: never built means "run it", stale means "run it
+      // again", current means "leave it". Collapsing them would make the panel tell the operator to act when
+      // there is nothing to do, or to relax when there is.
+      if (m.current === null) {
+        li.appendChild(chip(t('merges.notBuilt'), 'quiet'));
+      } else if (m.current === true) {
+        li.appendChild(chip(t('merges.current'), 'ok'));
+      } else {
+        li.appendChild(chip(t('merges.stale'), 'warn'));
+      }
+
+      if (m.builtAt) li.appendChild(chip(until(m.builtAt), 'quiet'));
+      if (m.sourceCount !== undefined) li.appendChild(chip(t('merges.sources').replace('{n}', m.sourceCount), 'quiet'));
+      if (m.sizeBytes) li.appendChild(chip(bytes(m.sizeBytes), 'quiet'));
+
+      if (m.sources && m.sources.length) {
+        // Shown as a hint rather than a list: the question "what is this built from" is asked occasionally, and
+        // the question "is it current" every time.
+        li.appendChild(node('p', 'hint', m.sources.map(function (s) { return s.hostId + ':' + s.path; }).join(', ')));
+      }
+
+      var tail = node('div', 'rule-tail');
+      var run = node('button', 'ghost small', t('merges.run'));
+      run.type = 'button';
+      run.addEventListener('click', function () {
+        run.disabled = true;
+        api('/api/derived/run', { method: 'POST', body: JSON.stringify({ id: m.ruleId }) }).then(function (r) {
+          run.disabled = false;
+          if (!r.ok || !r.body.ok) {
+            note(r.body.error || t('merges.failed'), true);
+          } else {
+            note(t('merges.built').replace('{bytes}', bytes(r.body.bytes)), false);
+          }
+          loadMerges();
+          loadObjects();
+        });
+      });
+      tail.appendChild(run);
+
+      var del = node('button', 'ghost small', t('merges.forget'));
+      del.type = 'button';
+      del.addEventListener('click', function () {
+        api('/api/derived/delete', { method: 'POST', body: JSON.stringify({ id: m.ruleId }) }).then(function () {
+          loadMerges();
+        });
+      });
+      tail.appendChild(del);
+
+      li.appendChild(tail);
+      list.appendChild(li);
+    });
+    host.appendChild(list);
+  }
+
+  function loadMerges() {
+    return api('/api/derived/status').then(function (r) {
+      if (r.ok) renderMerges(r.body.rules || []);
+    });
+  }
+
   function refreshAll() {
     applyStaticText();
     renderLangSwitch();
@@ -1258,6 +1437,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     loadShares();
     loadObjects();
     loadRuns();
+    loadMerges();
   }
 
   // --- events --------------------------------------------------------------------------------
@@ -1347,6 +1527,61 @@ export function renderIndexPage(locale: Locale = 'en'): string {
       $('s-password').value = '';
       renderShareResult(r.body.share, password);
       loadShares();
+    });
+  });
+
+  $('previewMerge').addEventListener('click', function () {
+    var button = $('previewMerge');
+    var definition = mergeDefinition();
+
+    // Checked here rather than only at the server so the common mistake — pressing Preview with nothing filled in
+    // — is answered next to the button instead of after a round trip.
+    if (!definition.sources.length) {
+      clear($('mergePreview'));
+      $('mergePreview').appendChild(node('p', 'hint error', t('merges.needPattern')));
+      return;
+    }
+
+    button.disabled = true;
+    // The UNSAVED definition is previewed, which is what makes this useful before committing to a rule.
+    api('/api/derived/preview', { method: 'POST', body: JSON.stringify(definition) }).then(function (r) {
+      button.disabled = false;
+      if (!r.ok) {
+        clear($('mergePreview'));
+        $('mergePreview').appendChild(node('p', 'hint error', r.body.error || t('merges.failed')));
+        return;
+      }
+      renderMergePreview(r.body.preview);
+    });
+  });
+
+  $('saveMerge').addEventListener('click', function () {
+    var button = $('saveMerge');
+    var definition = mergeDefinition();
+
+    if (!definition.outputName) {
+      clear($('mergePreview'));
+      $('mergePreview').appendChild(node('p', 'hint error', t('merges.needName')));
+      return;
+    }
+    if (!definition.sources.length) {
+      clear($('mergePreview'));
+      $('mergePreview').appendChild(node('p', 'hint error', t('merges.needPattern')));
+      return;
+    }
+
+    button.disabled = true;
+    api('/api/derived', { method: 'POST', body: JSON.stringify(definition) }).then(function (r) {
+      button.disabled = false;
+      if (!r.ok) {
+        clear($('mergePreview'));
+        // A refused rule says why, and the cycle refusal is the one worth reading closely: it names the rules
+        // involved, which is more useful than "invalid".
+        $('mergePreview').appendChild(node('p', 'hint error', r.body.error || t('merges.failed')));
+        return;
+      }
+      clear($('mergePreview'));
+      loadMerges();
     });
   });
 
@@ -1668,10 +1903,38 @@ function translationsLiteral(): string {
 			'shares.expired': 'expired',
 			'shares.empty': 'No links yet.',
 			'shares.emptyHint': 'A link works for one stored file, for as long as you choose.',
+			// This key was missing from English while the other three locales had it, so an operator reading the
+			// interface in English saw the literal text `shares.passwordOnce` where this sentence belongs. Found
+			// by the translation-completeness check, which exists because a missing key renders as itself: no
+			// error, no failing test, and invisible to anyone not reading that language.
+			'shares.passwordOnce': 'Password: {v} — shown only now. It cannot be read back from the server, so give it to the recipient along with the link.',
 			'shares.downloads': '{n} download(s)',
 			'shares.in': 'in {v}',
 			'shares.ago': '{v} ago',
-			'shares.passwordOnce': 'Password: {v} — shown only now. It cannot be read back from the server, so give it to the recipient along with the link.',
+			'merges.title': 'Combined files',
+			'merges.lede': 'Build one file from several stored ones. A merge is a rule, not a one-off: the result is recorded with what it came from, so you can tell whether it is still current.',
+			'merges.outputName': 'Call the result',
+			'merges.combination': 'How to combine',
+			'merges.union': 'Merge their lists into one document',
+			'merges.concat': 'Join them end to end',
+			'merges.patterns': 'Which stored files (one pattern per line)',
+			'merges.preview': 'Preview',
+			'merges.save': 'Save rule',
+			'merges.run': 'Build now',
+			'merges.forget': 'Forget rule',
+			'merges.empty': 'No combined files yet.',
+			'merges.emptyHint': 'A rule names stored files by pattern and how to combine them. Preview it first: the preview says how many files each pattern matched, which is the usual reason a merge looks like it did nothing.',
+			'merges.current': 'current',
+			'merges.stale': 'out of date',
+			'merges.notBuilt': 'not built yet',
+			'merges.sources': '{n} source(s)',
+			'merges.willCombine': 'Would combine {n} file(s), {bytes} in, about {out} out.',
+			'merges.matched': '{n} matched',
+			'merges.matchedNothing': 'matched nothing',
+			'merges.needName': 'Give the result a name first.',
+			'merges.needPattern': 'Name at least one stored file, or a pattern that matches some.',
+			'merges.failed': 'That did not work.',
+			'merges.built': 'Built {bytes}. The result is a stored file like any other, so it can be browsed and shared.',
 			'theme.dark': 'Dark',
 		},
 		'zh-CN': {
@@ -1842,9 +2105,57 @@ function translationsLiteral(): string {
 			'shares.in': '{v}后',
 			'shares.ago': '{v}前',
 			'shares.passwordOnce': '密码：{v} —— 只在此刻显示。服务器无法读回它，请连同链接一起交给接收方。',
+			'merges.title': '合并文件',
+			'merges.lede': '把多个已存文件合成一个。合并是一条规则而非一次性操作：结果会连同它的来源一起记录下来，因此可以判断它是否仍然是最新的。',
+			'merges.outputName': '结果叫什么',
+			'merges.combination': '如何合并',
+			'merges.union': '把各自的列表合并成一份文档',
+			'merges.concat': '首尾相接拼在一起',
+			'merges.patterns': '取哪些已存文件（每行一个匹配式）',
+			'merges.preview': '预览',
+			'merges.save': '保存规则',
+			'merges.run': '立即生成',
+			'merges.forget': '删除规则',
+			'merges.empty': '还没有合并文件。',
+			'merges.emptyHint': '规则用匹配式指明取哪些已存文件、以及如何合并。建议先预览：预览会告诉你每条匹配式命中了几个文件，而这通常就是"看起来什么都没做"的原因。',
+			'merges.current': '最新',
+			'merges.stale': '已过期',
+			'merges.notBuilt': '尚未生成',
+			'merges.sources': '{n} 个来源',
+			'merges.willCombine': '将合并 {n} 个文件，读入 {bytes}，输出约 {out}。',
+			'merges.matched': '命中 {n} 个',
+			'merges.matchedNothing': '没有命中任何文件',
+			'merges.needName': '请先给结果起个名字。',
+			'merges.needPattern': '请至少指定一个已存文件，或一条能命中文件的匹配式。',
+			'merges.failed': '操作未成功。',
+			'merges.built': '已生成 {bytes}。结果与其它文件一样被存储，可以浏览和分享。',
 			'theme.dark': '深色',
 		},
 		'zh-TW': {
+			'merges.title': '合併檔案',
+			'merges.lede': '把多個已存檔案合成一個。合併是一條規則而非一次性操作：結果會連同它的來源一起記錄下來，因此可以判斷它是否仍然是最新的。',
+			'merges.outputName': '結果叫什麼',
+			'merges.combination': '如何合併',
+			'merges.union': '把各自的列表合併成一份文件',
+			'merges.concat': '首尾相接接在一起',
+			'merges.patterns': '取哪些已存檔案（每行一個匹配式）',
+			'merges.preview': '預覽',
+			'merges.save': '儲存規則',
+			'merges.run': '立即產生',
+			'merges.forget': '刪除規則',
+			'merges.empty': '還沒有合併檔案。',
+			'merges.emptyHint': '規則用匹配式指明取哪些已存檔案、以及如何合併。建議先預覽：預覽會告訴你每條匹配式命中了幾個檔案，而這通常就是「看起來什麼都沒做」的原因。',
+			'merges.current': '最新',
+			'merges.stale': '已過期',
+			'merges.notBuilt': '尚未產生',
+			'merges.sources': '{n} 個來源',
+			'merges.willCombine': '將合併 {n} 個檔案，讀入 {bytes}，輸出約 {out}。',
+			'merges.matched': '命中 {n} 個',
+			'merges.matchedNothing': '沒有命中任何檔案',
+			'merges.needName': '請先給結果取個名字。',
+			'merges.needPattern': '請至少指定一個已存檔案，或一條能命中檔案的匹配式。',
+			'merges.failed': '操作未成功。',
+			'merges.built': '已產生 {bytes}。結果與其它檔案一樣被儲存，可以瀏覽和分享。',
 			'skip': '跳到主要內容',
 			'status.key': '簽章金鑰',
 			'status.schema': '資料表',
@@ -2182,6 +2493,30 @@ function translationsLiteral(): string {
 			'shares.in': '{v}後',
 			'shares.ago': '{v}前',
 			'shares.passwordOnce': 'パスワード：{v} —— 表示は今回だけです。サーバーから読み戻すことはできないため、リンクと一緒に相手へ渡してください。',
+			'merges.title': '結合ファイル',
+			'merges.lede': '複数の保存済みファイルから 1 つを作ります。結合はルールであり一度きりの操作ではありません。結果は由来とともに記録されるため、最新かどうかを判断できます。',
+			'merges.outputName': '結果の名前',
+			'merges.combination': '結合のしかた',
+			'merges.union': 'それぞれのリストを 1 つの文書にまとめる',
+			'merges.concat': 'そのまま順に連結する',
+			'merges.patterns': '対象の保存済みファイル（1 行に 1 パターン）',
+			'merges.preview': 'プレビュー',
+			'merges.save': 'ルールを保存',
+			'merges.run': '今すぐ作成',
+			'merges.forget': 'ルールを削除',
+			'merges.empty': '結合ファイルはまだありません。',
+			'merges.emptyHint': 'ルールはパターンで対象を指定し、結合方法を決めます。まずプレビューを：どのパターンが何件一致したかが分かり、「何も起きていないように見える」原因はたいていそこにあります。',
+			'merges.current': '最新',
+			'merges.stale': '期限切れ',
+			'merges.notBuilt': '未作成',
+			'merges.sources': 'ソース {n} 件',
+			'merges.willCombine': '{n} 件を結合します。読み込み {bytes}、出力は約 {out}。',
+			'merges.matched': '{n} 件一致',
+			'merges.matchedNothing': '一致なし',
+			'merges.needName': '先に結果の名前を付けてください。',
+			'merges.needPattern': '保存済みファイルを 1 つ以上、または一致するパターンを指定してください。',
+			'merges.failed': 'うまくいきませんでした。',
+			'merges.built': '{bytes} を作成しました。結果は他のファイルと同じく保存され、閲覧も共有もできます。',
 			'theme.dark': 'ダーク',
 		},
 	};
@@ -2638,6 +2973,37 @@ button.danger:hover:not(:disabled) { border-color: var(--err); color: var(--err)
 }
 .rule:last-child { border-bottom: 0; }
 .rule-tail { margin-left: auto; }
+
+/* --- combined files -------------------------------------------------------------------------
+   The three classes below were used by the merge panel before any rule defined them, which is the
+   failure mode this project has already been bitten by once: an undefined class does not error, it
+   silently renders with no styling, so the panel looks like a layout mistake rather than a missing rule.
+   The .merges class itself deliberately has no rule - it is a .glass section and takes the shared padding.
+
+   No backticks in these comments either: the whole document is one outer template literal, so a backtick
+   anywhere - styles included - ends it early. The guard that checks for this used to look only at the
+   script body, which is how these three got through and broke the build. */
+.merge-preview {
+  margin-top: 12px; padding: 12px 14px; border-radius: var(--r-lg);
+  background: var(--glass-strong); border: 1px solid var(--glass-line);
+}
+/* A refused preview is tinted rather than only worded: the message is the detail, the colour is what makes it
+   noticeable while scrolling past. The warn variable is the one that exists - an earlier version of this rule
+   used a warn-line variable I had invented, which would have silently fallen back to the glass line and made
+   the tint invisible rather than obviously wrong. */
+.merge-preview.bad { border-color: var(--warn); }
+.merge-preview .hint { margin: 0 0 6px; }
+.merge-preview .hint:last-child { margin-bottom: 0; }
+
+/* One row per source pattern. The count is what the operator is reading, so it sits at the end of the row
+   where the eye lands after the pattern it belongs to. */
+.merge-pattern {
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+  padding: 5px 0; border-top: 1px solid var(--glass-edge);
+}
+.merge-pattern:first-of-type { border-top: 0; }
+
+.merge-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 
 .reveal { margin-top: 18px; }
 .reveal summary {
