@@ -8,18 +8,18 @@ only important files remain the system stops accepting new ones and says so.
 Failing closed is the deliberate choice here: silently deleting a file the operator protected is the
 worst outcome this system can produce, worse than refusing new files.
 
-**Blocked by:** 05.
+**Blocked by:** nothing. The measurement, the policy, and now the eviction itself are all built and tested.
 
-**Status:** ready-for-agent
+**Status:** 7 of 11 met and tested offline. Four remain, and they are only two distinct gaps: **three are the same gap** — `/api/usage` returns everything the interface needs to display the budget, the per-file limit and the saturated state, and no panel calls it — and the fourth is a capacity refusal not yet being recorded as an issue, which cannot be done until a collection run exists to attach it to (05).
 
-- [ ] The interface shows bytes held and the share of the budget used.
-- [ ] The figure counts **everything the bucket holds**, including superseded and soft-deleted objects, because that is what is charged — a figure that counted only live objects could exceed the ceiling while looking healthy.
-- [ ] A file that would exceed the budget is refused **before** its bytes are requested, not after.
-- [ ] Each refusal is recorded as an issue naming capacity as the reason, so "why did this stop syncing" has an answer.
-- [ ] When room is needed, the oldest unprotected objects are evicted, and eviction reclaims both the record and the stored bytes.
-- [ ] An object marked important is never evicted, under any condition.
-- [ ] When only important objects remain and the budget is full, collection stops accepting new files and the interface says the store is refusing new files rather than silently doing nothing.
-- [ ] An object can be marked important and unmarked from the interface.
-- [ ] Marking a file important is reflected immediately in what would and would not be evicted.
-- [ ] The budget and the per-file limit are both stated in the interface rather than only enforced invisibly.
-- [ ] Tests cover: exactly at the ceiling, one byte over, eviction order, an important object surviving eviction, and the only-important-remains case refusing rather than deleting.
+- [ ] The interface shows bytes held and the share of the budget used. **`GET /api/usage` returns everything needed — `totalBytes`, `remainingBytes`, `usedFraction`, `budgetBytes`, `maxFileBytes`, `saturatedByImportant` — and no panel calls it.** This is presentation of a finished capability, and it is the one remaining criterion that is purely interface work.
+- [x] The figure counts everything the bucket holds, including superseded and soft-deleted objects — both are still charged, because their bytes are still there. **And it excludes objects whose bytes have been reclaimed**, which is the other half of the same rule and needed its own table: `deleted_at` is set in both cases and the two want opposite answers, so `object_reclaims` records the reclaim. Asserted from the outside by a test that soft-deletes a row and checks it is still charged.
+- [x] A file that would exceed the budget is refused before its bytes are requested. `checkFileBudget` runs first and the ingest path is written to call it before opening the stream; `POST /api/usage/reclaim` refuses a file above the per-file cap before reclaiming anything, since that cannot be solved by making room.
+- [ ] Each refusal is recorded as an issue naming capacity as the reason. **Not done, and it cannot be done yet:** `collection_issues.run_id` is `NOT NULL REFERENCES collection_runs (id)`, so an issue belongs to a run and there is no run until the collection pipeline exists (05). `DELIBERATE_KINDS` in `receipts.ts` already includes `capacity`, so the reason is anticipated; the writer belongs with the ingest path that produces the refusal.
+- [x] The oldest unprotected objects are evicted, and eviction reclaims both the bytes and the record. Bytes first, then the row marked — the order is the whole reason `evict.ts` is separate from `budget.ts`, because D1 has no transactions and an interruption has to leave the safe state rather than the silent one. The row is kept and marked rather than deleted, because it is what makes "this file existed and was removed to make room" answerable. Asserted against real storage: the bytes are gone and the row still exists.
+- [x] An object marked important is never evicted, under any condition. `mayEvict` has no exceptions — not superseded, not deleted, not the oldest, not the only candidate — and `evictForRoom` re-checks the plan's targets against it rather than trusting the plan, so a policy bug cannot delete data. Tested both ways: the policy unit test, and an integration test where the only candidate is protected and the request is refused.
+- [ ] When only important objects remain and the budget is full, collection refuses new files — **the refusal half is done and tested** (`saturatedByImportant` is reported and the route answers 409). **The interface does not say so yet**, for the same reason as the first criterion: nothing calls `/api/usage`.
+- [x] An object can be marked important and unmarked from the interface — the browse panel has had "Mark important" / "Unmark" per file since ticket 11, writing to `/api/objects/importance`.
+- [x] Marking a file important is reflected immediately in what would and would not be evicted, because the flag is read on every `storageObjects` query rather than cached. Asserted by the integration test that marks the oldest file protected and watches the plan refuse instead of taking it.
+- [ ] The budget and the per-file limit are both stated in the interface. **`/api/usage` returns both** (`budgetBytes`, `maxFileBytes`) and `/api/status` reports readiness — but no panel displays them, so this is the same gap as the first criterion.
+- [x] Tests cover all five. Exactly at the ceiling and one byte over are asserted in `evict.test.ts` against the boundary itself; eviction order by watching which ids are taken; an important object surviving; and the only-important case refusing with `saturatedByImportant` set and nothing touched.
