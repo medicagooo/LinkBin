@@ -22,10 +22,25 @@
       "integration": "unmerged",
       "branch": "prototype/ssh-probe",
       "merge_policy": "originally never merged; merged to main on 2026-10-07 (event e019) because Workers Builds deploys from the connected repository. The probe routes ship inside the main Worker and are disposable."
+    },
+    {
+      "task": "1008-review-bug-repair",
+      "state": ".branch-records/1008-review-bug-repair/state.json",
+      "events": ".branch-records/1008-review-bug-repair/events.jsonl",
+      "purpose": "Review the complete current implementation, repair reproducible bugs, validate offline and push verified repairs to origin/main",
+      "status": "active",
+      "integration": "unmerged"
     }
   ],
-  "active": ["vps-file-hub", "ssh-probe"],
-  "pending": ["vps-file-hub-e038: push main to origin to deploy the UI authentication fix (predeclared; awaiting execution)"],
+  "active": [
+    "vps-file-hub",
+    "ssh-probe",
+    "1008-review-bug-repair"
+  ],
+  "pending": [
+    "vps-file-hub-e038: push main to origin to deploy the UI authentication fix (predeclared; awaiting execution)",
+    "1008-review-bug-repair-e002: create isolated repair worktree (predeclared)"
+  ],
   "remote": {
     "origin": "git@github.com:medicagooo/LinkBin.git",
     "url": "https://github.com/medicagooo/LinkBin",
@@ -43,7 +58,10 @@
       "deployment_date": "2026-10-07",
       "domain": "deployment / management surface",
       "request": "vps-file-hub-e023",
-      "evidence": ["vps-file-hub-e024", ".scratch/vps-file-hub/STATE.md"],
+      "evidence": [
+        "vps-file-hub-e024",
+        ".scratch/vps-file-hub/STATE.md"
+      ],
       "before": "LinkBin existed only as source. The account held no linkbin Worker, D1 database or R2 bucket, so nothing was reachable and the SSH channel could not be exercised at all.",
       "after": "Worker \"linkbin\" is live at https://linkbin.cyc-xiaochen.workers.dev with D1 database linkbin-db, R2 bucket linkbin-files and the SSH_MASTER_KEY secret. The schema is applied (hosts, source_rules, objects, multipart_sessions), so hosts plus credentials and collection rules can be managed at runtime through the web UI without a redeploy.",
       "rules": "R2 bucket_name is pinned in wrangler.jsonc; database_name is pinned but database_id is deliberately absent, so the repository carries no account-specific resource ID. SSH_MASTER_KEY is write-once: replacing it makes every stored credential undecryptable.",
@@ -57,7 +75,10 @@
       "deployment_date": "2026-10-07",
       "domain": "security / deployed data",
       "request": "vps-file-hub-e023",
-      "evidence": ["vps-file-hub-e025", ".scratch/vps-file-hub/STATE.md"],
+      "evidence": [
+        "vps-file-hub-e025",
+        ".scratch/vps-file-hub/STATE.md"
+      ],
       "before": "The live deployment stored one enabled host with a real root password for a remote machine, plus a collection rule and three objects in R2. Because the UI and the /probe routes have no authentication, and the probe falls back to the first stored host with a credential, any internet user could have called GET /probe/read?path=<anything> to read arbitrary files from that machine as root and write them into R2. The exposure was current, not theoretical.",
       "after": "No host and no credential is stored in the deployment: hosts and source_rules are empty and the three probe objects are deleted. The unauthenticated probe path no longer has a target.",
       "rules": "The /probe* routes are still unauthenticated. They are only harmless while no host row exists, so adding a host re-creates the exposure until D35 (authentication) is implemented.",
@@ -70,7 +91,11 @@
       "implementation_date": "2026-10-07",
       "domain": "host management UI / authentication",
       "request": "user instruction on 2026-10-07: let the host form choose between two authentication methods, and repair the reported bug that saving a host appeared to do nothing",
-      "evidence": ["src/ui.ts", "scripts/check-ui-template.mjs", ".scratch/vps-file-hub/STATE.md D48 and D49"],
+      "evidence": [
+        "src/ui.ts",
+        "scripts/check-ui-template.mjs",
+        ".scratch/vps-file-hub/STATE.md D48 and D49"
+      ],
       "before": "The form showed password, key passphrase and private key as three independent optional fields, leaving the operator to infer the combination the server wanted. Saving reported only through the result panel further down the page, and not one request on the page had a .catch(), so a dropped connection or a redeploy in flight made a click do literally nothing with no message anywhere. There was no client-side validation either, so an empty address was answered by the server, again only in that distant panel.",
       "after": "Authentication is an explicit choice - username with password, or username with private key and optional passphrase - and only the chosen method is displayed and submitted. Username stays visible in both because SSH requires one. Saving validates locally, disables the button while in flight, and reports success or the server's exact error immediately beneath the button. Every request is bounded at 30 seconds and normalises rejection, timeout and HTTP failure into one shape, so no call can fail invisibly.",
       "rules": "An empty credential field still means keep what is already stored, which is what allows a host to be edited without re-entering its credential. A key-mode save no longer sends an empty password and vice versa, so a host never accumulates an unused second credential.",

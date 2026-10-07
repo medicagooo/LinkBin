@@ -1,0 +1,31 @@
+{
+  "task": "1008-review-bug-repair",
+  "purpose": "Review the complete current implementation, repair reproducible bugs, validate offline and push verified repairs to origin/main",
+  "requirements": [
+    "User confirmed entire codebase review at b851c02",
+    "Repair actionable correctness/security defects while preserving locked architecture",
+    "Push repaired and validated changes to main"
+  ],
+  "constraints": [
+    "Preserve the pre-existing BRANCHES.md pending-clear edit in the original checkout, outside task commits",
+    "No direct cloud/database writes or deployment",
+    "D1 multi-statement atomicity must not be assumed; only SSH_MASTER_KEY is a deployment secret",
+    "Limits: 50 hosts, 100 MiB per file, 10 GiB total"
+  ],
+  "acceptance": [
+    "Independent standards/spec reviews completed",
+    "Reproducible regression tests fail before fixes and pass afterwards",
+    "Full offline tests and guards/build pass, with pre-existing failures identified",
+    "GitHub main SHA verified after push"
+  ],
+  "status": "active",
+  "integration": "unmerged",
+  "evidence": [
+    "Review source: b851c02e49746a53fac1f720e308af418a3b3dca",
+    "GitHub API main verified equal to review source",
+    "HTTPS fetch with temporary gh credential helper succeeded"
+  ],
+  "next": "Create predeclared isolated worktree, reproduce review findings and repair them",
+  "created_at": "2026-10-08T01:45:56.4799298+08:00",
+  "updated_at": "2026-10-08T01:45:56.4799298+08:00"
+}
