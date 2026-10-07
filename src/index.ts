@@ -31,6 +31,7 @@ import { statementsOf } from './sql';
 import { resolveRules, type RemoteHost } from './remote';
 import { connectRemote } from './ssh-remote';
 import { planAdmission, type BudgetObject } from './budget';
+import { issuesForHost, runDetail, summarizeRuns, toIssueDetail, type IssueRow, type RunRow } from './receipts';
 import {
 	describeShare,
 	newShareToken,
@@ -1191,6 +1192,67 @@ if (path === '/api/status' && method === 'GET') {
 					.run();
 				if (!result.meta.changes) throw new HttpError(404, 'no active share with that token');
 				return json({ ok: true, revoked: token });
+			}
+
+			if (path === '/api/runs' && method === 'GET') {
+				// Bounded on purpose. A run list is read to answer "what happened lately", so it is the recent
+				// ones; an unbounded read would grow until it stopped fitting in a response.
+				const hostFilter = new URL(request.url).searchParams.get('host');
+				const runs = await env.DB.prepare(
+					`SELECT * FROM collection_runs ${hostFilter ? 'WHERE host_id = ?' : ''} ORDER BY started_at DESC LIMIT 50`,
+				)
+					.bind(...(hostFilter ? [hostFilter] : []))
+					.all<RunRow>();
+
+				// Issue counts are fetched once and joined in memory rather than as a subquery per run: D1 allows
+				// 1000 queries per invocation, and a per-run count would spend one per run for a number that one
+				// read provides.
+				const ids = (runs.results ?? []).map((r) => r.id);
+				let issues: IssueRow[] = [];
+				if (ids.length) {
+					const placeholders = ids.map(() => '?').join(',');
+					const rows = await env.DB.prepare(`SELECT * FROM collection_issues WHERE run_id IN (${placeholders})`)
+						.bind(...ids)
+						.all<IssueRow>();
+					issues = rows.results ?? [];
+				}
+
+				return json({ ok: true, runs: summarizeRuns(runs.results ?? [], issues) });
+			}
+
+			if (path === '/api/runs/detail' && method === 'GET') {
+				const params = new URL(request.url).searchParams;
+				const id = Number(params.get('id'));
+				if (!Number.isInteger(id) || id <= 0) throw new HttpError(400, 'id must be the id of a run');
+
+				const row = await env.DB.prepare('SELECT * FROM collection_runs WHERE id = ?').bind(id).first<RunRow>();
+				if (!row) throw new HttpError(404, 'no run with that id');
+
+				// Ordered by creation so an interrupted run's issues read in the order they happened.
+				const issues = await env.DB.prepare('SELECT * FROM collection_issues WHERE run_id = ? ORDER BY created_at, id')
+					.bind(id)
+					.all<IssueRow>();
+
+				return json({ ok: true, run: runDetail(row, issues.results ?? []) });
+			}
+
+			if (path === '/api/issues' && method === 'GET') {
+				// How many issues one read returns. A cap rather than a page parameter: this exists to answer
+				// "what is going wrong lately", and an operator reading thousands of rows is not doing that.
+				const hostFilter = new URL(request.url).searchParams.get('host');
+				const rows = hostFilter
+					? await env.DB.prepare('SELECT * FROM collection_issues WHERE host_id = ? ORDER BY created_at DESC, id DESC LIMIT 200')
+							.bind(hostFilter)
+							.all<IssueRow>()
+					: await env.DB
+							.prepare('SELECT * FROM collection_issues ORDER BY created_at DESC, id DESC LIMIT 200')
+							.all<IssueRow>();
+
+				const issues = hostFilter
+					? issuesForHost(rows.results ?? [], hostFilter)
+					: (rows.results ?? []).map(toIssueDetail);
+
+				return json({ ok: true, ...(hostFilter ? { hostId: hostFilter } : {}), issues });
 			}
 
 			if (path === '/api/usage' && method === 'GET') {
