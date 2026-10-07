@@ -5,19 +5,28 @@
   "description": "Collect designated files from multiple VPS hosts into Cloudflare R2 with metadata in D1, and let other devices download them.",
   "type": "module",
   "scripts": {
-    "check": "node scripts/check-ui-template.mjs && wrangler deploy --dry-run --outdir .dry-run",
-    "guard": "node scripts/check-ui-template.mjs",
+    "check": "node scripts/check-ui-template.mjs && node scripts/check-migrations.mjs && wrangler deploy --dry-run --outdir .dry-run",
+    "guard": "node scripts/check-ui-template.mjs && node scripts/check-migrations.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
     "tail": "wrangler tail"
   },
   "dependencies": {
-    "edgeport": "^1.0.6"
+    "edgeport": "^1.0.6",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.3.6",
+    "vitest": "^4.1.11",
     "wrangler": "^4.147.0"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild", "workerd", "sharp"]
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "workerd",
+      "sharp"
+    ]
   }
 }

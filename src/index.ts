@@ -29,12 +29,14 @@ import { connect as sftpConnect } from 'edgeport/sftp';
 import { credentialFingerprint, decryptField, encryptField, generateMasterKey } from './crypto';
 import { getHost, listHosts, nowIso, rulesForHost, slugify, type HostRow, type SourceRuleRow } from './db';
 import { LOCALES, pickLocale, renderIndexPage, type Locale } from './ui';
+import { statementsOf } from './sql';
 // Wrangler's default bundling treats `.sql` as a `Text` module, so these are plain strings at
 // runtime. Importing the migration files keeps the CLI path and the in-Worker path on one schema.
 // A new migration must be added here AND to the list below, or a CLI-less deployment would never
 // apply it.
 import initSchemaSql from '../migrations/0001_init.sql';
 import usageIndexSql from '../migrations/0002_usage_index.sql';
+import receiptsSql from '../migrations/0003_receipts_importance_and_sources.sql';
 
 interface Env {
 	DB: D1Database;
@@ -90,43 +92,57 @@ function requireMasterKey(env: Env): string {	if (!env.SSH_MASTER_KEY) {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Splits a schema file into individual statements.
- *
- * `db.batch()` is the only documented atomic unit in D1, so the schema is applied as batches rather
- * than as statements run one at a time. Every statement is `CREATE ... IF NOT EXISTS`, which is what
- * makes re-applying safe.
- */
-function statementsOf(sql: string): string[] {
-	return sql
-		.split(';')
-		.map((chunk) =>
-			chunk
-				.split('\n')
-				.filter((line) => !line.trim().startsWith('--'))
-				.join('\n')
-				.trim(),
-		)
-		.filter((statement) => statement.length > 0);
-}
-
-/**
  * Every migration a CLI-less deployment has to apply, in order.
  *
  * This list is the in-Worker equivalent of `wrangler d1 migrations apply`. It has to be extended
  * whenever a migration file is added, which is the one maintenance cost of not having a CLI attached
  * to a release. `applySchema` reports what it applied so a missing entry is visible rather than
  * silent.
+ *
+ * **Every statement in every migration must be idempotent, and that is a constraint on the migration
+ * file rather than something this code compensates for.** `CREATE ... IF NOT EXISTS` is naturally
+ * repeatable; `ALTER TABLE ... ADD COLUMN` is not, and the database has no `ADD COLUMN IF NOT
+ * EXISTS`. An earlier draft learned this by failing its own "safe to run again" test. Prefer a new
+ * table over a new column on an existing one.
  */
 const SCHEMA_MIGRATIONS: { name: string; sql: string }[] = [
 	{ name: '0001_init', sql: initSchemaSql },
 	{ name: '0002_usage_index', sql: usageIndexSql },
+	{ name: '0003_receipts_importance_and_sources', sql: receiptsSql },
 ];
 
+/**
+ * The column a migration statement would add, or null when the statement adds no column.
+ *
+ * Kept as a guard rather than as machinery: a migration that adds a column cannot be applied twice,
+ * so this is used to detect one at startup-feature time instead of letting it fail on a second run.
+ * Prefer a new table over a new column.
+ */
+function columnAddedBy(sql: string): string | null {
+	const match = /^\s*ALTER\s+TABLE\s+["'`]?(\w+)["'`]?\s+ADD\s+COLUMN\s+["'`]?(\w+)["'`]?/i.exec(sql);
+	return match ? `${match[1]}.${match[2]}` : null;
+}
+
 async function applySchema(env: Env): Promise<Response> {
-	const planned = SCHEMA_MIGRATIONS.flatMap((migration) =>
-		statementsOf(migration.sql).map((sql) => ({ migration: migration.name, sql })),
-	);
-	const statements = planned.map((p) => env.DB.prepare(p.sql));
+	const planned: { migration: string; sql: string }[] = [];
+	for (const migration of SCHEMA_MIGRATIONS) {
+		for (const sql of statementsOf(migration.sql)) {
+			planned.push({ migration: migration.name, sql });
+		}
+	}
+
+	// A column-adding statement cannot be made repeatable, so a migration containing one is a
+	// mistake rather than something to work around. Failing here names the migration instead of
+	// surfacing later as a duplicate-column error on the second press of a button.
+	const offender = planned.find((step) => columnAddedBy(step.sql) !== null);
+	if (offender) {
+		throw new HttpError(
+			500,
+			`migration ${offender.migration} adds a column, which cannot be applied twice; use a new table instead`,
+		);
+	}
+
+	const statements = planned.map((step) => env.DB.prepare(step.sql));
 
 	// Batch size is bounded on purpose: a batch is atomic, so a smaller batch means a failure names a
 	// narrower range. It is not atomic ACROSS batches, which is exactly why every statement is
@@ -158,7 +174,20 @@ async function applySchema(env: Env): Promise<Response> {
  * migration never ran, and that is precisely the state this returns `ready: false` for.
  */
 async function schemaStatus(env: Env): Promise<{ ready: boolean; missing: string[] }> {
-	const required = ['hosts', 'source_rules', 'objects', 'multipart_sessions', 'idx_objects_usage'];
+	const required = [
+		// tables
+		'hosts',
+		'source_rules',
+		'objects',
+		'multipart_sessions',
+		'collection_runs',
+		'collection_issues',
+		'object_sources',
+		// indexes the product depends on for correctness or for a bounded read
+		'idx_objects_usage',
+		'idx_objects_eviction',
+		'idx_runs_host_started',
+	];
 	const { results } = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','index')").all<{ name: string }>();
 	const present = new Set((results ?? []).map((r) => r.name));
 	return { ready: required.every((t) => present.has(t)), missing: required.filter((t) => !present.has(t)) };
