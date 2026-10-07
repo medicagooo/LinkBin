@@ -126,3 +126,33 @@ CREATE TABLE IF NOT EXISTS auth_attempts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_auth_attempts_at ON auth_attempts (at DESC);
+
+-- Sharing: a link to one stored file, for a limited time, optionally behind a password.
+--
+-- `token` is the link's secret. It is stored in the clear because it is not a password being verified —
+-- it IS the credential, and it has to be looked up. That is acceptable only because of what it does not
+-- grant: a leaked database yields tokens for files, not access to the interface or to any stored machine
+-- credential. It is the reason a share token must never be usable as a session, and why the two are
+-- verified by completely separate code paths.
+--
+-- The share PASSWORD is different, and is stored only as a salted slow hash: a database leak must not
+-- hand over every live share at once, which it would if the password were recoverable.
+--
+-- `revoked_at` is separate from `expires_at` on purpose, so a cancelled link can be refused distinctly
+-- from an expired one. "This link expired" and "this link was cancelled" lead an operator to different
+-- conclusions, and collapsing them would make one of those conclusions unavailable.
+CREATE TABLE IF NOT EXISTS shares (
+    token           TEXT PRIMARY KEY,
+    object_id       INTEGER NOT NULL REFERENCES objects (id) ON DELETE CASCADE,
+    password_salt   TEXT,
+    password_hash   TEXT,
+    password_iterations INTEGER,
+    expires_at      TEXT NOT NULL,
+    revoked_at      TEXT,
+    created_at      TEXT NOT NULL,
+    last_used_at    TEXT,
+    use_count       INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_shares_object ON shares (object_id);
+CREATE INDEX IF NOT EXISTS idx_shares_expiry ON shares (expires_at);
