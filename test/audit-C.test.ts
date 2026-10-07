@@ -503,9 +503,11 @@ describe('hypothesis 6: reads with no bound on how many rows come back', () => {
 		expect(stored, 'shares actually in the table').toBe(seeded);
 
 		const body = (await (await asOperator('/api/shares')).json()) as any;
-		// The read returned every stored row: there is no LIMIT, so the response grows with the table.
-		expect(body.shares.length, `the share list returned ${body.shares.length} of ${stored} stored rows`).toBe(stored);
-		expect(body.shares.length, 'the share list must bound its result set').toBeLessThan(stored);
+		// FIXED. This assertion used to read `toBe(stored)` — the finding was that the response returned every
+		// row because there was no LIMIT. It is now a regression test for the bound, so it asserts the opposite
+		// of what it originally proved.
+		expect(body.shares.length, `the share list returned ${body.shares.length} of ${stored} stored rows`).toBeLessThan(stored);
+		expect(body.shares.length, 'the bound is the one the code documents').toBe(200);
 	});
 
 	it('bounds the rule list, which grows by one row per accepted rule', async () => {
@@ -514,7 +516,9 @@ describe('hypothesis 6: reads with no bound on how many rows come back', () => {
 			const res = await postJson('/api/rules', { pattern: `/var/log/rule-${i}/*.log` });
 			expect(res.status, `creating rule ${i}`).toBe(200);
 		}
-		const seeded = 250;
+		// Seeded PAST the documented bound, because a table smaller than the limit cannot show that a limit
+		// exists: an earlier version seeded 250 against a limit of 500 and passed for the wrong reason.
+		const seeded = 600;
 		for (let i = 5; i < seeded; i++) {
 			await env.DB.prepare('INSERT INTO source_rules (host_id, pattern, is_exclude, enabled, created_at) VALUES (NULL, ?, 0, 1, ?)')
 				.bind(`/var/log/seeded-${i}/*.log`, '2026-01-01T00:00:00.000Z')
@@ -523,10 +527,13 @@ describe('hypothesis 6: reads with no bound on how many rows come back', () => {
 
 		const stored = await countOf('source_rules');
 		expect(stored, 'rules actually in the table').toBe(seeded);
+		expect(stored, 'the fixture must exceed the bound or the assertion below proves nothing').toBeGreaterThan(500);
 
 		const body = (await (await asOperator('/api/rules')).json()) as any;
-		expect(body.rules.length, `the rule list returned ${body.rules.length} of ${stored} stored rows`).toBe(stored);
-		expect(body.rules.length, 'the rule list must bound its result set').toBeLessThan(stored);
+		// FIXED, and now a regression test for the bound rather than proof of its absence: the original
+		// assertion was `toBe(stored)`.
+		expect(body.rules.length, `the rule list returned ${body.rules.length} of ${stored} stored rows`).toBeLessThan(stored);
+		expect(body.rules.length, 'the bound is the one the code documents').toBe(500);
 	});
 
 	it('bounds one run’s issue list the way /api/issues bounds its own', async () => {

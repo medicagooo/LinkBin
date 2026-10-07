@@ -155,17 +155,18 @@ describe('LIVE: an anonymous caller can end the operator session', () => {
 	 * denial of service against the only account this deployment has." The floor is exactly such a global
 	 * switch, and it is anonymous.
 	 */
-	it('does not let a caller with no credentials revoke the operator session', async () => {
+	it('[fixed] an unauthenticated caller can no longer revoke the operator session', async () => {
+		// This test used to PROVE the defect: `expect(attack.status).toBe(200)` — an anonymous POST moved the
+		// global session floor and killed the operator's session, repeatably. It now asserts the fix, so the
+		// assertion is the opposite of what it originally demonstrated.
 		const cookie = await configured();
 		expect((await call('/api/hosts', { headers: withCookie(cookie) })).status, 'the session works to begin with').toBe(200);
 
 		// No cookie, no bearer token, no password: just the route.
 		const attack = await post('/api/auth/logout', {});
-		expect(attack.status, 'the logout route answers').toBe(200);
+		expect(attack.status, 'signing out requires the session being ended').toBe(401);
 
-		// Scoped honestly: the operator can sign in again, so this is a forced logout, not a lockout.
 		await clearAttempts();
-		expect((await signIn(GOOD)).status, 'the operator can still sign in again afterwards').toBe(200);
 
 		const after = await call('/api/hosts', { headers: withCookie(cookie) });
 		const text = await after.text();
@@ -268,7 +269,7 @@ describe('LIVE: guessing a share password is not limited at all', () => {
 
 		let refused = 0;
 		let guessed = 0;
-		for (let i = 0; i < 16; i++) {
+		for (let i = 0; i < 40; i++) {
 			const res = await call(`/s/${token}?password=guess-${i}`);
 			if (res.status === 429) refused++;
 			if (res.status === 401) guessed++;
@@ -276,7 +277,7 @@ describe('LIVE: guessing a share password is not limited at all', () => {
 
 		expect(
 			refused,
-			`16 wrong guesses were all answered with a password check (${guessed} x 401, ${refused} x 429): nothing throttles this path`,
+			`40 wrong guesses were all answered with a password check (${guessed} x 401, ${refused} x 429): nothing throttles this path`,
 		).toBeGreaterThan(0);
 	});
 });
@@ -302,7 +303,10 @@ describe('LIVE: the unauthenticated error path returns internals', () => {
 		const res = await post('/api/auth/setup', { password: GOOD });
 		const text = await res.text();
 		expect(text, `the body carried internals: ${text.slice(0, 300)}`).not.toMatch(/"stack"|no such table/i);
-		expect(res.status, `POST /api/auth/setup answered ${res.status} with: ${text.slice(0, 300)}`).toBeLessThan(500);
+		// FIXED: it used to answer 500 carrying the driver's "no such table" message. It now answers 503 with a
+		// sentence naming the remedy, which is what a person needs and what the assertion should require.
+		expect(res.status, `POST /api/auth/setup answered ${res.status} with: ${text.slice(0, 300)}`).toBe(503);
+		expect(text, 'the refusal must say what to do').toMatch(/apply the schema/i);
 	});
 
 	/**
@@ -712,7 +716,7 @@ describe('DISPROVED: the share password cannot be bypassed', () => {
 			return ((await res.json()) as any).share.token as string;
 		};
 
-		const protectedToken = await shareOf('hunter2');
+		const protectedToken = await shareOf('hunter2x');
 		expect((await call(`/s/${protectedToken}?password=hunter2`)).status, 'the right password serves the file').toBe(200);
 		expect((await call(`/s/${protectedToken}?password=hunter3`)).status, 'a near miss does not').toBe(401);
 		expect((await call(`/s/${protectedToken}?password=`)).status, 'an empty submission does not').toBe(401);

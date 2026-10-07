@@ -77,15 +77,21 @@ describe('a deployment whose schema is not applied', () => {
 		expect(await res.text()).not.toContain('no such table');
 	});
 
-	it('still lets setup be attempted, because that is the only way out of this state', async () => {
-		// Setup is the bootstrap. Refusing it would leave a deployment with an unapplied migration unable to
-		// create the tables it needs, which is a dead end rather than a safeguard.
+	it('answers setup with the remedy rather than the driver error, and never with a crash', async () => {
+		// Setup is exempt from the schema guard so a first visitor can bootstrap. It cannot actually create the
+		// tables — applying the schema does that — so the useful answer is a 503 naming the fix, which is what it
+		// now gives. The assertion used to be "not 503", which was wrong: 503 is exactly right here.
 		const res = await call('/api/auth/setup', {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify({ password: 'a sufficiently long password' }),
 		});
-		expect(res.status).not.toBe(503);
+
+		expect(res.status).toBe(503);
+		const text = await res.text();
+		expect(text).toMatch(/apply the schema/i);
+		expect(text, 'the driver message must not reach the caller').not.toMatch(/no such table/i);
+		expect(text).not.toMatch(/"stack"/);
 	});
 
 	it('answers a share link cleanly instead of crashing, and leaks nothing internal', async () => {

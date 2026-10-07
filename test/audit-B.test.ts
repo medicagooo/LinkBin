@@ -338,28 +338,25 @@ describe('H2: the password cannot be bypassed', () => {
 		expect((await call(`/s/${token}?password=%00`)).status).toBe(401);
 	});
 
-	it('[measured] the empty-password guard in verifySharePassword is load-bearing, not merely a fast path', async () => {
-		// src/share.ts says of that guard: "PBKDF2 hashes the empty string to a value no real password
-		// produces, so an empty submission cannot match a real password's hash regardless; it is refused there
-		// for speed, not for safety. Confirmed by direct measurement rather than assumed."
+	it('[fixed] a NUL-bearing password is refused at creation, which removes the collision entirely', async () => {
+		// This originally MEASURED a hazard, and the measurement stands: this runtime drops trailing NUL bytes,
+		// so `hashPassword('\0\0\0\0')` equals `hashPassword('')`. src/share.ts had claimed the opposite —
+		// "an empty submission cannot match a real password's hash regardless... confirmed by direct
+		// measurement" — and that claim was false, making the `if (!password)` guard in verifySharePassword
+		// load-bearing rather than, as its comment said, a fast path.
 		//
-		// That is false on this runtime. A password of four NULs is accepted at creation (it is not
-		// whitespace, so `sharePasswordProblem` passes it) and hashes exactly as the empty string does. Only
-		// the `if (!password) return false` guard keeps such a share from being open to anyone who submits
-		// nothing, so the comment invites a future change that would turn a cosmetic guard into the only
-		// thing standing between a link and the file.
+		// The collision is closed at the source now: control characters are refused wherever a password is set,
+		// so the value that would collide can never be STORED. That is the better fix of the two — it does not
+		// depend on any future verification path remembering the guard — and the measurement below is kept
+		// because it is what justifies the rule.
 		const salt = 'AAAAAAAAAAAAAAAAAAAAAA==';
-		expect(await hashPassword('\u0000\u0000\u0000\u0000', salt)).toBe(await hashPassword('', salt));
+		expect(
+			await hashPassword('\u0000\u0000\u0000\u0000', salt),
+			'the collision this rule exists to prevent',
+		).toBe(await hashPassword('', salt));
 
-		const { status, body } = await newShare({ password: '\u0000\u0000\u0000\u0000' });
-		expect(status, 'a four-NUL password must be accepted for this test to mean anything').toBe(200);
-		const token = body.share.token as string;
-
-		// The guard holds: nothing supplied is refused even though the hash is the empty string's.
-		expect((await call(`/s/${token}?password=`)).status).toBe(401);
-		expect((await call(`/s/${token}`)).status).toBe(401);
-		// And the value the operator chose does work, which is the only thing that currently hides this.
-		expect((await call(`/s/${token}?password=%00%00%00%00`)).status).toBe(200);
+		const { status } = await newShare({ password: '\u0000\u0000\u0000\u0000' });
+		expect(status, 'a password that hashes to the empty string must be refused at creation').toBe(400);
 	});
 
 	it('accepts a header value padded with a space only because HTTP strips it, and the query form does not', async () => {

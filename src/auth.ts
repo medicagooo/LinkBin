@@ -28,9 +28,39 @@ const SALT_BYTES = 16;
 const KEY_BYTES = 32;
 const SESSION_SECONDS = 12 * 60 * 60;
 
-/** Failed attempts allowed from anyone within the window before sign-in is refused outright. */
-const MAX_ATTEMPTS = 8;
+/**
+ * Failed attempts allowed from one caller within the window before sign-in is refused outright.
+ *
+ * Deliberately generous, and that is a correction rather than a preference. An earlier value of eight was
+ * reported by an adversarial audit as a way to lock the operator out, and the report was right: when the
+ * platform supplies no caller address, every such caller shares one bucket, so eight failures from anyone
+ * refused the operator's correct password. The same is true for an operator and an attacker behind one
+ * address, which is what a shared office or a mobile network looks like.
+ *
+ * Thirty is enough that reaching it means deliberate repetition rather than a mistyped passphrase, and the
+ * ceiling below is what actually bounds sustained guessing.
+ */
+const MAX_ATTEMPTS = 30;
 const ATTEMPT_WINDOW_SECONDS = 15 * 60;
+
+/**
+ * Failed attempts allowed from EVERYONE within the window.
+ *
+ * Much higher than the per-caller limit, and it exists because the per-caller one is not sufficient on its
+ * own. Two cases get through it, both found by an adversarial audit:
+ *
+ *   - When the platform has not supplied a caller address, there is no per-caller key to use. The first
+ *     attempt at this pooled every such caller into one bucket, which meant an attacker's failures locked the
+ *     operator out — a denial of service against the single account, which is the exact failure the per-caller
+ *     limit was introduced to prevent.
+ *   - An attacker can rotate `x-forwarded-for` freely, and although that header is no longer trusted for the
+ *     key, a determined caller can vary the address the platform reports by other means.
+ *
+ * This ceiling is the backstop: it cannot be escaped by changing identity, only by succeeding. It is set far
+ * above the per-caller limit so that normal use never reaches it — an operator mistyping their password a few
+ * times, from a few devices, is nowhere near a hundred failures in a quarter of an hour.
+ */
+const MAX_GLOBAL_ATTEMPTS = 200;
 
 const MIN_PASSWORD_LENGTH = 12;
 
@@ -214,8 +244,8 @@ export function minPasswordLength(): number {
 	return MIN_PASSWORD_LENGTH;
 }
 
-export function attemptLimits(): { max: number; windowSeconds: number } {
-	return { max: MAX_ATTEMPTS, windowSeconds: ATTEMPT_WINDOW_SECONDS };
+export function attemptLimits(): { max: number; windowSeconds: number; maxGlobal: number } {
+	return { max: MAX_ATTEMPTS, windowSeconds: ATTEMPT_WINDOW_SECONDS, maxGlobal: MAX_GLOBAL_ATTEMPTS };
 }
 
 /**

@@ -280,8 +280,24 @@ interface AuthRow {
 	sessions_revoked_at: string;
 }
 
+/**
+ * The operator's password row, or null when there is not one yet.
+ *
+ * Returns null when the TABLE is absent as well, and that is the point. `handleAuth` reads this before it
+ * looks at which auth route was asked for, so on a deployment whose schema is unapplied the driver's message
+ * — `no such table: auth_secret` — reached the response body before any route could decline politely. An
+ * adversarial audit caught it on `/api/auth/setup`, the one route deliberately reachable with no tables.
+ *
+ * Returning null here makes the absence indistinguishable from "no password set yet", which is correct for
+ * every route that only READS this row: they answer "no password is set" rather than leaking a driver error.
+ * The setup route, which writes, detects the missing table itself and says what to do about it.
+ */
 async function authRow(env: Env): Promise<AuthRow | null> {
-	return await env.DB.prepare('SELECT salt, hash, iterations, changed_at, sessions_revoked_at FROM auth_secret WHERE id = 1').first<AuthRow>();
+	try {
+		return await env.DB.prepare('SELECT salt, hash, iterations, changed_at, sessions_revoked_at FROM auth_secret WHERE id = 1').first<AuthRow>();
+	} catch {
+		return null;
+	}
 }
 
 /** Reads a timestamp as epoch milliseconds; 0 when absent, so a missing floor blocks nothing. */
@@ -350,6 +366,34 @@ async function recentFailures(env: Env, remote: string): Promise<number> {
 }
 
 /**
+ * Failed attempts from EVERYONE within the window.
+ *
+ * The backstop behind the per-caller limit, and it cannot be escaped by changing identity. See
+ * MAX_GLOBAL_ATTEMPTS: the per-caller limit alone lets an attacker through when the platform supplies no
+ * caller address, or when they can vary it.
+ */
+async function recentFailuresAnywhere(env: Env): Promise<number> {
+	const { windowSeconds } = attemptLimits();
+	const since = new Date((Math.floor(Date.now() / 1000) - windowSeconds) * 1000).toISOString();
+	const row = await env.DB.prepare('SELECT COUNT(*) AS n FROM auth_attempts WHERE succeeded = 0 AND at >= ?')
+		.bind(since)
+		.first<{ n: number }>();
+	return Number(row?.n ?? 0);
+}
+
+/** Whether either limit has been reached, and which one, so the refusal can say something useful. */
+async function refusalFor(env: Env, remote: string): Promise<string | null> {
+	const { max, maxGlobal } = attemptLimits();
+	if ((await recentFailuresAnywhere(env)) >= maxGlobal) {
+		return 'too many failed attempts from anyone in the last few minutes; wait and try again';
+	}
+	if ((await recentFailures(env, remote)) >= max) {
+		return 'too many failed attempts; wait a few minutes and try again';
+	}
+	return null;
+}
+
+/**
  * The caller's address, as far as this deployment can tell.
  *
  * **Only the Cloudflare-set header is trusted.** An adversarial audit showed the previous version falling back
@@ -357,9 +401,9 @@ async function recentFailures(env: Env, remote: string): Promise<number> {
  * so the rate-limit bucket key was chosen by the caller, and rotating one character in a header reset the
  * count. A rate limit an attacker can reset is not a rate limit.
  *
- * When Cloudflare has not set the header, the caller is unknown **and that is recorded as such** rather than
- * being folded into the same bucket as everybody else. Collapsing all unknown callers together was itself a
- * denial of service: an attacker's failures made the operator's correct password answer `429`.
+ * When Cloudflare has not set the header the caller is unknown, and that is recorded as such. The global
+ * ceiling above is what protects that case, rather than pooling every unknown caller into the per-caller
+ * bucket — which itself locked the operator out.
  */
 function callerAddress(request: Request): string {
 	return request.headers.get('cf-connecting-ip') ?? 'unknown-caller';
@@ -439,18 +483,24 @@ async function handleAuth(path: string, request: Request, env: Env): Promise<Res
 		if (!row) throw new HttpError(409, 'no password is set yet');
 
 		const remote = callerAddress(request);
-		const { max } = attemptLimits();
-		if ((await recentFailures(env, remote)) >= max) {
-			throw new HttpError(429, 'too many failed attempts; wait a few minutes and try again');
-		}
+		const refusal = await refusalFor(env, remote);
+		if (refusal) throw new HttpError(429, refusal);
 
 		const body = (await request.json()) as { password?: string };
 		const candidate = String(body.password ?? '');
 		const hash = await hashPassword(candidate, row.salt, Number(row.iterations));
 		const ok = timingSafeEqual(hash, row.hash);
-		await recordAttempt(env, ok, remote);
 
-		if (!ok) throw new HttpError(401, 'that password is not correct');
+		// Checked again after the work, because a caller who has just crossed the ceiling should still be
+		// recorded — and because the pre-check cannot know how many others have failed meanwhile.
+		if (!ok) {
+			await recordAttempt(env, false, remote);
+			const late = await refusalFor(env, remote);
+			if (late) throw new HttpError(429, late);
+			throw new HttpError(401, 'that password is not correct');
+		}
+
+		await recordAttempt(env, true, remote);
 
 		const token = await signSession(signingKey(env), Date.now(), newNonce());
 		return json({ ok: true, expiresInSeconds: sessionMaxAgeSeconds() }, 200, {
@@ -683,8 +733,26 @@ async function serveShare(env: Env, request: Request, token: string, baseUrl: st
 	// browser download cannot set a header.
 	const supplied = request.headers.get('x-share-password') ?? new URL(request.url).searchParams.get('password');
 
+	// Guessing is limited on this path too, and the absence of that was an adversarial finding: the route
+	// verifies with a 210,000-iteration PBKDF2 and had no counter, no delay and no lockout, while the share
+	// password may be short and a live token is distinguishable from an unknown one. A link is meant to be
+	// handed to somebody, so the password is the only thing between a misdirected link and the file.
+	//
+	// Counted per caller, so one recipient mistyping does not refuse another — and the ceiling is shared, so
+	// rotating addresses does not buy unlimited guesses.
+	const remote = callerAddress(request);
+	const refusal = await refusalFor(env, remote);
+	if (refusal) throw new HttpError(429, refusal);
+
 	const decision = await describeShare(row, supplied);
 	if (!decision.usable) {
+		// A wrong password is a failed attempt; a missing one is not, because nothing was guessed.
+		if (decision.reason === 'password_incorrect') {
+			await recordAttempt(env, false, remote);
+			const late = await refusalFor(env, remote);
+			if (late) throw new HttpError(429, late);
+		}
+
 		// `needsPassword` is not a failure — the recipient is being asked for one thing, not told no — so it
 		// is answered with the metadata they need to decide, and no content.
 		const status = decision.needsPassword ? 401 : 410;
