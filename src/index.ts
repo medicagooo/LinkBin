@@ -210,24 +210,63 @@ async function applySchema(env: Env): Promise<Response> {
  * Indexes are checked alongside tables: a table can exist from an older deployment while a later
  * migration never ran, and that is precisely the state this returns `ready: false` for.
  */
+/**
+ * What the Worker's own queries depend on, per feature.
+ *
+ * One list in one place, rather than a bare array inside the check: this is what `/api/status` reports and
+ * what the schema guard refuses on, so a feature that adds a table has exactly one place to declare it.
+ *
+ * It was previously a single list that two later features did not extend, with the result that
+ * `/api/status` reported a healthy schema while `/api/shares` could not run at all. A readiness check that
+ * says ready when it is not is worse than no check, because it is believed.
+ *
+ * Indexes are listed alongside tables because some carry correctness rather than speed — the uniqueness
+ * spine over `objects` is what makes collection idempotent — and because a table can exist from an older
+ * deployment while a later migration never ran.
+ */
+const REQUIRED_SCHEMA = [
+	// Core: machines, their rules, stored files, and in-progress uploads.
+	'hosts',
+	'source_rules',
+	'objects',
+	'multipart_sessions',
+	'idx_objects_usage',
+	// Receipts: one row per run, and one per file that was not handled.
+	'collection_runs',
+	'collection_issues',
+	'idx_runs_host_started',
+	// Derived objects, and the record of what one was built from.
+	'object_sources',
+	// The importance flag, in its own table because adding a column is the one migration change that
+	// cannot be applied twice.
+	'object_flags',
+	'idx_objects_eviction',
+	// Authentication.
+	'auth_secret',
+	'auth_attempts',
+	// Sharing.
+	'shares',
+] as const;
+
 async function schemaStatus(env: Env): Promise<{ ready: boolean; missing: string[] }> {
-	const required = [
-		// tables
-		'hosts',
-		'source_rules',
-		'objects',
-		'multipart_sessions',
-		'collection_runs',
-		'collection_issues',
-		'object_sources',
-		// indexes the product depends on for correctness or for a bounded read
-		'idx_objects_usage',
-		'idx_objects_eviction',
-		'idx_runs_host_started',
-	];
-	const { results } = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','index')").all<{ name: string }>();
+	const { results } = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','index')").all<{
+		name: string;
+	}>();
 	const present = new Set((results ?? []).map((r) => r.name));
-	return { ready: required.every((t) => present.has(t)), missing: required.filter((t) => !present.has(t)) };
+	const missing = REQUIRED_SCHEMA.filter((name) => !present.has(name));
+	return { ready: missing.length === 0, missing };
+}
+
+/**
+ * Whether the database has everything the Worker needs, cached for the life of the request.
+ *
+ * The guard exists because a missing migration used to surface as a 500 whose body carried a stack trace
+ * and the failing SQL — internal detail handed to an anonymous caller, and a message that told the
+ * operator nothing about what to do. A deployment with an unapplied migration is a configuration state,
+ * not a crash, and it is reported as one.
+ */
+async function schemaReady(env: Env): Promise<{ ready: boolean; missing: string[] }> {
+	return await schemaStatus(env);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -465,15 +504,23 @@ interface ShareJoinRow extends ShareRow {
 async function shareByToken(db: D1Database, token: string): Promise<ShareJoinRow | null> {
 	// Joined to the object so the recipient's page can state the size before anything is sent, as the
 	// ticket requires, without a second query.
-	return await db
-		.prepare(
-			`SELECT s.*, o.object_key, o.path, o.size_bytes, o.content_hash, o.host_id
-			 FROM shares s
-			 JOIN objects o ON o.id = s.object_id
-			 WHERE s.token = ?`,
-		)
-		.bind(token)
-		.first<ShareJoinRow>();
+	try {
+		return await db
+			.prepare(
+				`SELECT s.*, o.object_key, o.path, o.size_bytes, o.content_hash, o.host_id
+				 FROM shares s
+				 JOIN objects o ON o.id = s.object_id
+				 WHERE s.token = ?`,
+			)
+			.bind(token)
+			.first<ShareJoinRow>();
+	} catch {
+		// Includes "no such table" on a deployment whose migration has not been applied. Returning null turns
+		// that into the same clean refusal a wrong token gets, instead of a 500 carrying a stack trace and the
+		// failing SQL to whoever holds the link. The `/api/status` check is what tells the operator the real
+		// cause; a recipient cannot act on it and should not be shown it.
+		return null;
+	}
 }
 
 /** What the recipient is told before any bytes move. Never includes the object key or the machine. */
@@ -1023,6 +1070,29 @@ export default {
 			// Auth routes come first, and the guard below comes before anything that touches a stored
 			// credential. The interface itself stays public so there is somewhere to sign in.
 			if (path.startsWith('/api/auth/')) return await handleAuth(path, request, env);
+
+			// Before any route that would touch a table, check the tables exist. Without this a missing
+			// migration surfaces as a 500 whose body carries a stack trace and the failing SQL — internal
+			// detail handed to an anonymous caller, saying nothing useful about what to do. An unapplied
+			// migration is a configuration state, not a crash, and it is answered as one.
+			//
+			// `/api/status` and the schema bootstrap are exempt: the first is how the state is discovered, and
+			// the second is how it is fixed.
+			if (path.startsWith('/api/') && path !== '/api/status' && path !== '/api/admin/apply-schema') {
+				const state = await schemaReady(env);
+				if (!state.ready) {
+					return json(
+						{
+							ok: false,
+							error:
+								'the database is missing tables this deployment needs, so nothing can be read or written yet. Apply the schema first.',
+							missing: state.missing,
+							hint: 'POST /api/admin/apply-schema',
+						},
+						503,
+					);
+				}
+			}
 
 			// The scheduler's entry point. It accepts the derived scheduler credential and NOT a session,
 			// so the two are genuinely distinct: revoking one does not disable the other. Collection
