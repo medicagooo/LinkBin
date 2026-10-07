@@ -272,6 +272,23 @@ export function renderIndexPage(locale: Locale = 'en'): string {
 
   var T = ${translationsLiteral()};
 
+  /* --- helpers that MUST come first ----------------------------------------------------------
+
+     The dollar helper was defined further down the file, in the helpers section, and that was a real
+     defect rather than a matter of tidiness: it is assigned with var, so it is hoisted as undefined
+     and the FIRST statement to call it throws "$ is not a function". Two places called it first —
+     the gate's own code and the submit listener — so the page died before it could show anything,
+     which is how it presented: an interface that rendered but with no password prompt and no
+     working controls.
+
+     It was invisible for as long as a separate syntax error stopped the script from running at all.
+     Fixing that error is what exposed this one, and the lesson is worth keeping: a script that never
+     runs hides every fault behind its first.
+
+     A var helper has to be declared before its first USE, in execution order and not merely in the
+     file. Function declarations hoist fully and could sit anywhere; this one is a var, so it cannot. */
+  var $ = function (id) { return document.getElementById(id); };
+
   // --- the gate ------------------------------------------------------------------------------
   /**
    * Decides what the visitor sees before anything else runs.
@@ -429,7 +446,9 @@ export function renderIndexPage(locale: Locale = 'en'): string {
   }
 
   // --- helpers -----------------------------------------------------------------------------
-  var $ = function (id) { return document.getElementById(id); };
+  // The dollar helper is declared at the TOP of this script, not here, and the comment there says why: it is a
+  // var, so a use before its declaration runs against undefined. Everything below it in this section is a
+  // function declaration, which hoists fully and may therefore sit anywhere.
 
   function el(tag, cls, text) {
     var node = document.createElement(tag);

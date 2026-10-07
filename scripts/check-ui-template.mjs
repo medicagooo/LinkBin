@@ -450,6 +450,184 @@ if (newlineInString.length) {
 		}
 		process.exit(1);
 	}
+
+	// --- Check 5b: the emitted script must actually RUN ------------------------------------------
+	//
+	// A separate defect from the one above, and it was hidden BEHIND it for as long as that one lasted: a script
+	// that never runs hides every fault behind its first. With the syntax error fixed, the page still showed no
+	// password prompt, because `$` was declared with `var` near the bottom of the file while the gate's own
+	// top-level code called it at the top. `var` hoists as `undefined`, so the FIRST such call threw
+	// `$ is not a function` and the whole script stopped — after parsing perfectly.
+	//
+	// Parsing cannot see this, so the check executes the script instead. The globals are deliberately thin: the
+	// aim is to reach the first genuine fault, not to emulate a browser. Anything the page legitimately needs that
+	// is missing here shows up as a ReferenceError attributed to a global, which is a false positive and is
+	// reported as such rather than as a failure — while a missing helper the page defines ITSELF has no global to
+	// blame and is exactly the class of defect being hunted.
+	{
+		const missingGlobals = new Set();
+		const makeEl = () => {
+			const el = {
+				style: {},
+				dataset: {},
+				children: [],
+				attributes: {},
+				textContent: '',
+				innerHTML: '',
+				value: '',
+				checked: false,
+				hidden: false,
+				className: '',
+				classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+				setAttribute() {},
+				getAttribute: () => null,
+				removeAttribute() {},
+				appendChild: (c) => c,
+				append() {},
+				removeChild() {},
+				remove() {},
+				insertBefore: (c) => c,
+				replaceChildren() {},
+				addEventListener() {},
+				removeEventListener() {},
+				querySelector: () => null,
+				querySelectorAll: () => [],
+				closest: () => null,
+				focus() {},
+				blur() {},
+				click() {},
+				getBoundingClientRect: () => ({ width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0 }),
+			};
+			return el;
+		};
+
+		const documentStub = {
+			documentElement: makeEl(),
+			body: makeEl(),
+			head: makeEl(),
+			title: '',
+			cookie: '',
+			readyState: 'complete',
+			visibilityState: 'visible',
+			activeElement: null,
+			createElement: makeEl,
+			createTextNode: (t) => ({ textContent: t }),
+			getElementById: () => makeEl(),
+			querySelector: () => null,
+			querySelectorAll: () => [],
+			addEventListener() {},
+			removeEventListener() {},
+		};
+
+		// `Proxy` with a `has` trap returning true for everything makes a bare global read of `foo` yield a stub
+		// rather than a ReferenceError, so the run is not stopped by an environment gap. The stub is CALLABLE AND
+		// INDEXABLE — a plain function would fail at `String(stub).toLowerCase()` and stop the run for a reason
+		// that has nothing to do with the page. Names that are not real globals are recorded, which is how a
+		// genuinely missing helper is told apart from a browser API this stub merely does not model.
+		const realGlobals = new Set(Object.getOwnPropertyNames(globalThis));
+		const stubTarget = function () {};
+		const stub = new Proxy(stubTarget, {
+			get: (_t, prop) => {
+				if (prop === Symbol.toPrimitive || prop === 'toString' || prop === 'valueOf') return () => '';
+				if (prop === Symbol.iterator) return function* () {};
+				if (prop === 'then') return undefined; // not a thenable, or every await would hang on it
+				if (prop === 'length') return 0;
+				if (prop === 'name') return 'stub';
+				return stub;
+			},
+			apply: () => stub,
+			construct: () => stub,
+			has: () => true,
+		});
+		const sandbox = {
+			document: documentStub,
+			window: { addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }), location: { href: '' }, localStorage: { getItem: () => null, setItem() {} } },
+			navigator: { language: 'en', languages: ['en'], clipboard: { writeText: async () => {} } },
+			location: { href: '', search: '', hash: '' },
+			localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+			matchMedia: () => ({ matches: false, addEventListener() {} }),
+			fetch: () => new Promise(() => {}),
+			setTimeout: () => 0,
+			clearTimeout() {},
+			setInterval: () => 0,
+			clearInterval() {},
+			requestAnimationFrame: () => 0,
+			console: { log() {}, warn() {}, error() {} },
+		};
+
+		let runtimeError = null;
+		try {
+			const ctx = vm.createContext(
+				new Proxy(sandbox, {
+					has: () => true,
+					get(target, key) {
+						if (key === Symbol.unscopables) return undefined;
+						if (typeof key === 'string' && !(key in target) && !realGlobals.has(key)) missingGlobals.add(key);
+						return key in target ? target[key] : stub;
+					},
+				}),
+			);
+			new vm.Script(emitted, { filename: 'emitted-ui-script.js' }).runInContext(ctx, { timeout: 10000 });
+		} catch (err) {
+			runtimeError = err;
+		}
+
+		if (runtimeError) {
+			// A ReferenceError naming something that is not a known global is the page's own missing binding.
+			const missing = /(\w+) is not defined/.exec(runtimeError.message);
+			// `X is not a function` where X is something the page ITSELF assigns is the defect this check exists
+			// for: the binding exists, so its value is undefined — "used before it was assigned". Blaming the stub
+			// for that is how a check reports success on a broken page, which has already happened once in this
+			// file, where the escape transform turned the defect into valid code.
+			//
+			// Matched with plain string work rather than a constructed RegExp: the name can be `$`, which is a
+			// regex anchor, and interpolating it into a pattern silently changed what was being looked for. The
+			// mutation this check exists to catch passed for exactly that reason.
+			const notAFunction = /([A-Za-z_$][\w$]*) is not a function/.exec(runtimeError.message);
+			const named = notAFunction?.[1];
+			const assignKeywords = ['var ', 'let ', 'const '];
+			const ownBinding =
+				named !== undefined &&
+				assignKeywords.some((kw) => emitted.includes(`${kw}${named} `) || emitted.includes(`${kw}${named}=`) || emitted.includes(`${kw}${named}\t`));
+			// `instanceof` CANNOT be used here, and that is not a style preference: the error is constructed inside the
+			// `vm` context, which has its OWN `TypeError` and `ReferenceError` constructors, so `err instanceof
+			// TypeError` is false in this realm no matter what the error is. The check therefore declined to fire
+			// while its own diagnostic printed `ownBinding=true` — it was right about the fault and wrong about the
+			// test. Identity across realms is compared by NAME.
+			const kind = runtimeError?.constructor?.name ?? '';
+			const ownFault =
+				(kind === 'ReferenceError' && missing !== null && !realGlobals.has(missing[1])) ||
+				(kind === 'TypeError' && (ownBinding || (missing !== null && !realGlobals.has(missing[1]))));
+
+			// The detection is reported when it declines to fire. A check that silently decides "not my fault" is
+			// indistinguishable from one that works, and this one declined for a reason worth seeing.
+			if (!ownFault) {
+				console.log(
+					`UI template guard: not treated as a page fault — kind=${kind} name=${JSON.stringify(named)} ownBinding=${ownBinding}`,
+				);
+			}
+
+			if (ownFault) {				console.error('\nUI template guard: the emitted script throws at load, so nothing on the page works\n');
+				console.error('  It parses, which is why this is separate from the check above: a parse check cannot see');
+				console.error('  a binding that is used before it is assigned.\n');
+				console.error(`  ${runtimeError.message}\n`);
+				const lineNo = Number(/emitted-ui-script\.js:(\d+)/.exec(runtimeError.stack ?? '')?.[1] ?? 0);
+				if (lineNo) {
+					const emittedLines = emitted.split('\n');
+					for (let k = Math.max(0, lineNo - 4); k < Math.min(emittedLines.length, lineNo + 3); k++) {
+						console.error(`  ${k + 1}: ${emittedLines[k].slice(0, 150)}`);
+					}
+				}
+				process.exit(1);
+			}
+			// Anything else is this stub's limit rather than the page's fault, and is said so rather than swallowed.
+			console.log(`UI template guard: script execution stopped at a non-binding error, treated as a stub limit: ${runtimeError.message.slice(0, 120)}`);
+		}
+
+		if (missingGlobals.size) {
+			console.log(`UI template guard: note — the stub did not model ${missingGlobals.size} global(s) the page reads: ${[...missingGlobals].slice(0, 8).join(', ')}`);
+		}
+	}
 }
 
 if (offenders.length) {
