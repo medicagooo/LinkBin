@@ -1116,15 +1116,21 @@ export default {
 				// The decision layer decides which machine runs and from where. What it cannot yet do is the
 				// collection itself, which needs a machine; saying so is better than reporting a run that never
 				// happened.
+				// `last_completed_at`, not `last_succeeded_at`, and the distinction is not pedantic. A run that
+				// finishes with files it could not handle HAS completed: the machine was reached and scanned.
+				// Counting only runs with zero failures would report a machine whose runs each had one
+				// problematic file as "never collected" — false, and it would send someone to investigate a
+				// connection that is working. Failures are reported through the run's own counts, which is where
+				// a reader looks for them.
 				const machines = await env.DB.prepare(
 					`SELECT h.id AS id,
 					        h.enabled AS enabled,
 					        MAX(r.started_at) AS last_started_at,
-					        MAX(CASE WHEN r.state = 'finished' AND r.failed_count = 0 THEN r.finished_at END) AS last_succeeded_at
+					        MAX(CASE WHEN r.state = 'finished' THEN r.finished_at END) AS last_completed_at
 					 FROM hosts h
 					 LEFT JOIN collection_runs r ON r.host_id = h.id
 					 GROUP BY h.id`,
-				).all<{ id: string; enabled: number; last_started_at: string | null; last_succeeded_at: string | null }>();
+				).all<{ id: string; enabled: number; last_started_at: string | null; last_completed_at: string | null }>();
 
 				// A previous run that never finished left a cursor; either it belongs to the machine chosen now,
 				// in which case it is resumed, or it is ignored and said so.
@@ -1139,7 +1145,7 @@ export default {
 						id: m.id,
 						enabled: Number(m.enabled) === 1,
 						lastStartedAt: m.last_started_at,
-						lastSucceededAt: m.last_succeeded_at,
+						lastSucceededAt: m.last_completed_at,
 						lastOutcome: null,
 					})),
 					cursor: open ? parseCursor(open.cursor_json) : null,

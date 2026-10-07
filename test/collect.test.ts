@@ -138,6 +138,23 @@ describe('starting a collection on demand', () => {
 		expect(body.resumeFrom).toBeNull();
 	});
 
+	it('treats a run that finished with problems as having collected the machine', async () => {
+		// A run that finished with files it could not handle HAS completed: the machine was reached and
+		// scanned. Counting only runs with zero failures would report such a machine as never collected, which
+		// is false and sends someone to investigate a connection that is working.
+		await addHost('one');
+		await addHost('two');
+		await env.DB.prepare(
+			`INSERT INTO collection_runs (host_id, state, started_at, finished_at, stored_count, skipped_count, failed_count, bytes_stored)
+			 VALUES ('one', 'finished', '2026-01-01T00:00:00.000Z', '2026-01-01T00:01:00.000Z', 5, 1, 2, 100)`,
+		).run();
+
+		const body = (await (await collect()).json()) as any;
+		// `one` was attempted most recently, so the rotation chooses `two` — which it would also do if `one` had
+		// no runs at all. What matters is that `one` is not treated as never-attempted and does not block.
+		expect(body.machineId).toBe('two');
+	});
+
 	it('requires a session or the scheduler credential', async () => {
 		expect((await call('/api/collect', { method: 'POST' })).status).toBe(401);
 	});
