@@ -24,12 +24,12 @@
  * rather than as a unit that must succeed or fail as a whole.
  */
 
-import { connect as sshConnect } from 'edgeport/ssh';
-import { connect as sftpConnect } from 'edgeport/sftp';
 import { credentialFingerprint, decryptField, encryptField, generateMasterKey } from './crypto';
 import { getHost, listHosts, nowIso, rulesForHost, slugify, type HostRow, type SourceRuleRow } from './db';
 import { LOCALES, pickLocale, renderIndexPage, type Locale } from './ui';
 import { statementsOf } from './sql';
+import { resolveRules, type RemoteHost } from './remote';
+import { connectRemote } from './ssh-remote';
 import {
 	attemptLimits,
 	hashPassword,
@@ -60,6 +60,15 @@ interface Env {
 	 * encrypted in D1.
 	 */
 	SSH_MASTER_KEY: string;
+	/**
+	 * Test-only. A stand-in for the remote machine, so rule resolution and collection can be exercised
+	 * without a machine — which is necessary because local development cannot reach one.
+	 *
+	 * **Production never sets this**, and nothing in production code constructs a fake. If this is ever
+	 * given a production implementation, that is a departure from the decision recorded in STATE.md
+	 * rather than an implementation detail.
+	 */
+	TEST_REMOTE?: RemoteHost;
 }
 
 /**
@@ -670,23 +679,42 @@ async function connectOptionsFor(env: Env, row: HostRow) {
 	};
 }
 
-/** Minimal glob for one path segment: `*`, `?` and literals. */
-function globToRegExp(pattern: string): RegExp {
-	let out = '^';
-	for (const ch of pattern) {
-		if (ch === '*') out += '[^/]*';
-		else if (ch === '?') out += '[^/]';
-		else out += ch.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+/**
+ * A machine's self-identification, degrading gracefully when the remote cannot run commands.
+ *
+ * The commands are a fixed set chosen here. Nothing is assembled from user input, which is what keeps
+ * this from becoming the arbitrary-command surface that an earlier diagnostic route turned into.
+ */
+async function identifyRemote(remote: RemoteHost, row: HostRow) {
+	if (!remote.exec) {
+		return { uname: 'not available for this remote', whoami: row.username, hostname: row.address, disk: null };
 	}
-	return new RegExp(`${out}$`);
+	const attempt = async (command: string, fallback: string): Promise<string> => {
+		try {
+			return (await remote.exec!(command)).trim() || fallback;
+		} catch {
+			return fallback;
+		}
+	};
+	return {
+		uname: await attempt('uname -a', 'unknown'),
+		whoami: await attempt('whoami', row.username),
+		hostname: await attempt('hostname', row.address),
+		disk: null,
+	};
 }
 
 /**
- * Connects to a host, identifies it, and checks each applicable rule against a real directory
- * listing where the rule permits it.
+ * Connects to a machine, identifies it, and reports how each applicable rule resolves against its real
+ * filesystem.
  *
- * Read-only throughout: `uname`, `whoami`, `hostname`, `df`, and SFTP `list`/`stat`. Nothing on the
- * target is written, renamed, or deleted.
+ * Read-only throughout: it runs `uname`, `whoami`, `hostname`, and lists directories. Nothing on the
+ * machine is written, renamed or deleted.
+ *
+ * The connection goes through the {@link RemoteHost} port rather than being opened here, so rule
+ * resolution can be exercised without a machine. Rules themselves are resolved by {@link resolveRules},
+ * which owns the three-way outcome (matched, nothing matched, could not be resolved) — the distinction
+ * an operator actually needs.
  */
 async function testHost(env: Env, id: string): Promise<Response> {
 	const row = await getHost(env.DB, id);
@@ -702,74 +730,36 @@ async function testHost(env: Env, id: string): Promise<Response> {
 		}
 	};
 
-	// Decryption happens before the timer starts: the measured stage should be the connection, not
-	// the fast local key work, and this keeps the plaintext alive for the shortest span possible.
+	const rules = await rulesForHost(env.DB, id);
+
+	// A substituted remote, when one is provided, so rule resolution is testable without a machine.
+	// Production has no such binding and therefore always takes the SSH path below.
+	if (env.TEST_REMOTE) {
+		const facts = await timed('identify', () => identifyRemote(env.TEST_REMOTE!, row));
+		const evaluations = await timed('resolve rules', () => resolveRules(env.TEST_REMOTE!, rules));
+		return json({
+			ok: true,
+			host: await publicHost(row),
+			facts,
+			rules: rules.map(publicRule),
+			evaluations,
+			stages,
+			substituted: true,
+		});
+	}
+
+	// Decryption happens before the timer starts: the measured stage should be the connection, not the
+	// fast local key work, and this keeps the plaintext alive for the shortest span possible.
 	const options = await connectOptionsFor(env, row);
-	const ssh = await timed('ssh connect + auth', () => sshConnect(options));
+	const { remote, close } = await timed('ssh connect + auth', () => connectRemote(options));
 
 	try {
-		const facts = await timed('identify', async () => ({
-			uname: await ssh.run('uname -a'),
-			whoami: await ssh.run('whoami'),
-			hostname: await ssh.run('hostname'),
-			disk: await ssh.df('/').catch(() => null),
-		}));
-
-		const rules = await rulesForHost(env.DB, id);
-		const evaluations: {
-			pattern: string;
-			scope: string;
-			isExclude: boolean;
-			status: string;
-			matchCount?: number;
-			matches?: string[];
-			detail?: string;
-		}[] = [];
-
-		const sftp = await timed('sftp subsystem', () => sftpConnect({ session: ssh }));
-		try {
-			for (const rule of rules) {
-				const base = {
-					pattern: rule.pattern,
-					scope: rule.host_id === null ? 'global' : 'host',
-					isExclude: rule.is_exclude === 1,
-				};
-				const slash = rule.pattern.lastIndexOf('/');
-				const dir = slash > 0 ? rule.pattern.slice(0, slash) : '/';
-				const name = slash >= 0 ? rule.pattern.slice(slash + 1) : rule.pattern;
-
-				// A wildcard in the directory part cannot be resolved by listing one directory. It is
-				// reported honestly as needing the collection step rather than silently skipped.
-				if (/[*?[]/.test(dir)) {
-					evaluations.push({ ...base, status: 'needs_collection_step', detail: 'the directory part contains a wildcard' });
-					continue;
-				}
-
-				try {
-					const entries = await sftp.list(dir);
-					const regex = globToRegExp(name);
-					const matches = entries
-						.filter((e) => !e.attrs.isDirectory && regex.test(e.filename))
-						.map((e) => e.filename)
-						.sort();
-					evaluations.push({
-						...base,
-						status: 'ok',
-						matchCount: matches.length,
-						matches: matches.slice(0, 50),
-						detail: `${matches.length} file(s) in ${dir}`,
-					});
-				} catch (err) {
-					evaluations.push({ ...base, status: 'error', detail: (err as Error).message });
-				}
-			}
-		} finally {
-			await sftp.close();
-		}
+		const facts = await timed('identify', () => identifyRemote(remote, row));
+		const evaluations = await timed('resolve rules', () => resolveRules(remote, rules));
 
 		return json({ ok: true, host: await publicHost(row), facts, rules: rules.map(publicRule), evaluations, stages });
 	} finally {
-		await ssh.close();
+		await close();
 	}
 }
 

@@ -1,5 +1,6 @@
 import { env } from 'cloudflare:test';
 import worker from '../src/index';
+import { TEST_BASE_URL, TEST_MASTER_KEY } from './fixtures';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 /**
@@ -11,10 +12,13 @@ import { beforeEach, describe, expect, it } from 'vitest';
  * deployment. A test that pinned the hash format would pass while the interface stood open.
  */
 
-const BASE = 'https://linkbin.test';
+const BASE = TEST_BASE_URL;
 
 function call(path: string, init?: RequestInit & { headers?: Record<string, string> }): Promise<Response> {
-	return worker.fetch(new Request(`${BASE}${path}`, init), env as never, {} as never);
+	// The master key is supplied explicitly, so signing is deterministic rather than dependent on
+	// whatever happens to be in the developer's `.dev.vars`.
+	const target = { ...(env as object), SSH_MASTER_KEY: TEST_MASTER_KEY };
+	return worker.fetch(new Request(`${BASE}${path}`, init), target as never, {} as never);
 }
 
 function post(path: string, body: unknown, headers: Record<string, string> = {}): Promise<Response> {
@@ -36,14 +40,13 @@ function sessionCookie(res: Response): string | null {
 const GOOD = 'correct horse battery staple';
 
 /**
- * The signing key the Worker is using.
+ * The signing key, from the shared fixtures.
  *
- * The test environment has no `SSH_MASTER_KEY` secret, and the Worker falls back to a documented
- * stand-in when one is absent so that `wrangler dev` works without a secret. A token minted here has
- * to be signed with the same key the Worker verifies with, so this mirrors that fallback. The tests
- * that use it also prove it, because the scheduler credential is derived from it.
+ * It must be the value the Worker under test actually uses: a session token and the scheduler credential
+ * are both signed with it, so minting a token with a different key produces a 401 that looks like a bug
+ * in the code rather than in the test. That mistake was made once, and this is the fix.
  */
-const MASTER_KEY = 'linkbin-test-key-not-for-deployment';
+const MASTER_KEY = TEST_MASTER_KEY;
 
 async function setPassword(password = GOOD): Promise<Response> {
 	return post('/api/auth/setup', { password });
@@ -304,7 +307,7 @@ describe('the scheduler credential is separate from a session', () => {
 
 	async function schedulerToken(): Promise<string> {
 		const { scheduleToken } = await import('../src/auth');
-		return await scheduleToken(env.SSH_MASTER_KEY ?? 'linkbin-test-key-not-for-deployment');
+		return await scheduleToken(MASTER_KEY);
 	}
 
 	it('accepts the scheduler credential for triggering collection', async () => {

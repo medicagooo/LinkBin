@@ -58,12 +58,18 @@ export async function getHost(db: D1Database, id: string): Promise<HostRow | nul
  * Rules that apply to one host: its own rules plus every global rule (`host_id IS NULL`).
  *
  * The two sets are unioned rather than ranked. A per-host rule never has to override a global one
- * because exclusions are matched first at collection time, so "collect /var/log/*.log" globally and
- * "exclude /var/log/noisy.log" for one host behave the way a reader expects.
+ * because exclusions are evaluated first, so "collect /var/log/*.log" globally and "exclude
+ * /var/log/noisy.log" for one host behave the way a reader expects.
+ *
+ * **`is_exclude DESC`, not ascending.** The flag is 1 for an exclusion, so ordering ascending put
+ * inclusions first — the precise opposite of what this comment used to claim, and the one ordering that
+ * makes an exclusion useless. A test caught it. The secondary sort by `pattern` is there so the order is
+ * deterministic rather than incidental: rules created in the same millisecond otherwise come back in
+ * whatever order the database chooses.
  */
 export async function rulesForHost(db: D1Database, hostId: string): Promise<SourceRuleRow[]> {
 	const { results } = await db
-		.prepare('SELECT * FROM source_rules WHERE enabled = 1 AND (host_id IS NULL OR host_id = ?) ORDER BY is_exclude, pattern')
+		.prepare('SELECT * FROM source_rules WHERE enabled = 1 AND (host_id IS NULL OR host_id = ?) ORDER BY is_exclude DESC, pattern')
 		.bind(hostId)
 		.all<SourceRuleRow>();
 	return results ?? [];
