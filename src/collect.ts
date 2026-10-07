@@ -64,6 +64,19 @@ export interface CollectionPorts {
 	/** The rules to resolve against the machine. */
 	rules: { pattern: string; is_exclude: number; host_id: string | null }[];
 	/**
+	 * Whether this file could be stored at all, asked BEFORE its bytes are requested.
+	 *
+	 * This is the gate that stops a file being transferred and then thrown away. A file above the per-file limit
+	 * can never be stored, so reading it is pure waste — and on a machine that pays for egress or a Worker with a
+	 * transfer budget, waste with a cost. It is also where capacity is judged, so a full store refuses before the
+	 * read rather than after it.
+	 *
+	 * When the machine does not report a size, the caller is told `unknown` rather than `yes`: the size cannot be
+	 * checked in advance, so the store's own running total is the only guard and the file has to be attempted. The
+	 * absence of a size must not be read as "small enough".
+	 */
+	canStore(input: { path: string; size: number | null }): Promise<{ ok: true } | { ok: false; reason: string; skipped: boolean; size: number | null }>;
+	/**
 	 * Stores one file's bytes, returning what happened.
 	 *
 	 * Returns the content hash on success so the caller does not have to hash the file a second time, and so the
@@ -163,6 +176,23 @@ export async function collectFrom(
 		// one; unknown means "ask the stream", which is what the store does when no size is given.
 		const reportedSize = typeof stat.size === 'number' && Number.isFinite(stat.size) && stat.size >= 0 ? stat.size : null;
 		const mtime = typeof stat.mtime === 'number' && Number.isFinite(stat.mtime) ? Math.floor(stat.mtime) : null;
+
+		// ASKED BEFORE THE BYTES ARE REQUESTED. A file above the per-file limit can never be stored, so reading it
+		// is pure waste — and this is also where capacity is judged, so a full store refuses before the transfer
+		// rather than after it.
+		const allowed = await ports.canStore({ path: file.path, size: reportedSize });
+		if (!allowed.ok) {
+			await ports.recordIssue({ path: file.path, kind: allowed.skipped ? 'too_large' : 'capacity', reason: allowed.reason, size: allowed.size ?? reportedSize });
+			if (allowed.skipped) totals.skipped += 1;
+			else totals.failed += 1;
+			outcomes.push(
+				allowed.skipped
+					? { path: file.path, kind: 'skipped', reason: allowed.reason, size: allowed.size ?? reportedSize }
+					: { path: file.path, kind: 'failed', reason: allowed.reason },
+			);
+			if (ports.recordProgress) await ports.recordProgress(totals);
+			continue;
+		}
 
 		let stream: ReadableStream<Uint8Array>;
 		try {

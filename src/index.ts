@@ -1486,6 +1486,7 @@ export default {
 					const rules = await rulesForHost(env.DB, hostRow.id);
 					const result = await collectFrom(remote, {
 						rules,
+						canStore: api.canStore,
 						store: api.store,
 						recordIssue: api.recordIssue,
 						recordProgress: api.recordProgress,

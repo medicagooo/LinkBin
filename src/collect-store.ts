@@ -18,6 +18,33 @@ import type { CollectedFile } from './collect';
 import { storeStream } from './store';
 import { nowIso } from './db';
 
+/** The per-file ceiling and the total capacity budget. Duplicated from the router deliberately; see below. */
+const MAX_FILE_BYTES = 100 * 1024 * 1024;
+const STORAGE_BUDGET_BYTES = 10 * 1024 * 1024 * 1024;
+
+/**
+ * What the store currently holds, for the capacity check.
+ *
+ * A narrow read rather than `measureStorage`, so this module does not depend on the router — the two constants
+ * above are duplicated for the same reason. A single number with one definition matters more than one location:
+ * a mismatch here would be caught by the test that a file above the limit is refused, which asserts the exact
+ * figure.
+ *
+ * Reclaimed objects are excluded, for the reason `planAdmission` documents: their bytes are gone, so charging
+ * for them would have the store refuse new files forever after its first eviction.
+ */
+async function heldBytes(db: D1Database): Promise<number> {
+	const row = await db
+		.prepare(
+			`SELECT COALESCE(SUM(o.size_bytes), 0) AS n
+			 FROM objects o
+			 LEFT JOIN object_reclaims r ON r.object_id = o.id
+			 WHERE r.object_id IS NULL`,
+		)
+		.first<{ n: number }>();
+	return Number(row?.n ?? 0);
+}
+
 /** The key a collected file is stored under. */
 export function objectKeyFor(hostId: string, path: string): string {
 	// The host is part of the key, not only of the row: two machines holding `/etc/app.conf` are two different
@@ -97,6 +124,47 @@ export function collectionPorts(
 	};
 
 	return {
+		/**
+		 * Whether this file could be stored, asked before its bytes are requested.
+		 *
+		 * Two refusals, and both are cheaper to make now than after a transfer:
+		 *
+		 *   - **Above the per-file limit.** Nothing can make room for a file that is too large, so reading it
+		 *     would transfer bytes that are then discarded. The ticket states this as "its bytes are never
+		 *     requested", and this is the check that makes that true.
+		 *   - **No capacity.** A full store refuses before the read rather than after it. Room is not reclaimed
+		 *     here: eviction is a decision with data loss attached, and it belongs where an operator can see it,
+		 *     not buried inside a file-sized decision during a collection.
+		 *
+		 * A size the machine did not report is `null`, and `null` cannot be checked in advance — so the file is
+		 * ATTEMPTED, and the store's own running total is what stops it. Treating an unknown size as "small
+		 * enough" would let a huge file through the gate; treating it as "too large" would skip files that fit.
+		 */
+		async canStore({ size }) {
+			if (size === null) return { ok: true as const };
+
+			if (size > MAX_FILE_BYTES) {
+				return {
+					ok: false as const,
+					reason: `the file is ${size} bytes, above the ${MAX_FILE_BYTES} byte per-file limit, so its bytes were not requested`,
+					skipped: true,
+					size,
+				};
+			}
+
+			const held = await heldBytes(env.DB);
+			if (held + size > STORAGE_BUDGET_BYTES) {
+				return {
+					ok: false as const,
+					reason: `storing ${size} bytes would take the bucket past its ${STORAGE_BUDGET_BYTES} byte budget, of which ${Math.max(0, STORAGE_BUDGET_BYTES - held)} bytes remain`,
+					skipped: false,
+					size,
+				};
+			}
+
+			return { ok: true as const };
+		},
+
 		async store({ path, stream, mtime }) {
 			const key = objectKeyFor(hostId, path);
 

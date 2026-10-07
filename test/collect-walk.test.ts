@@ -62,6 +62,11 @@ function ports(over: Partial<CollectionPorts> = {}): CollectionPorts & { issues:
 	const progress: RunTotals[] = [];
 	return {
 		rules: [{ pattern: '/data/*.log', is_exclude: 0, host_id: null }],
+		// Allowed by default, so the tests that are not about the gate do not have to think about it. The ones
+		// that ARE about it override this.
+		async canStore() {
+			return { ok: true as const };
+		},
 		async store({ path, stream }) {
 			const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
 			return { ok: true as const, bytes: bytes.byteLength, hash: `hash-of-${path}`, unchanged: false };
@@ -273,6 +278,99 @@ describe('walking the files a machine offers', () => {
 
 		expect(result.totals.stored).toBe(1);
 		expect(result.outcomes.map((o) => o.path)).toEqual(['/data/ok.log']);
+	});
+
+	it('asks before it reads, and never requests the bytes of a file it cannot store', async () => {
+		// THE CRITERION THIS EXISTS FOR. A file above the per-file limit can never be stored, so transferring it is
+		// pure waste — and on a machine that pays for egress, waste with a cost. The assertion is not that the file
+		// was skipped (that would pass even if it had been downloaded first) but that `read` was NEVER CALLED.
+		let reads = 0;
+		const base = machine({ '/data': [{ name: 'huge.bin', content: 'x', size: 5_000_000_000 }] });
+		const watched: RemoteHost = {
+			...base,
+			async read(path: string) {
+				reads += 1;
+				return base.read(path);
+			},
+		};
+		const p = ports({
+			async canStore({ size }) {
+				return size !== null && size > 1_000_000
+					? { ok: false as const, reason: 'above the per-file limit', skipped: true, size }
+					: { ok: true as const };
+			},
+			rules: [{ pattern: '/data/*', is_exclude: 0, host_id: null }],
+		});
+
+		const result = await collectFrom(watched, p);
+
+		expect(reads, 'the bytes were never requested').toBe(0);
+		expect(result.totals.skipped).toBe(1);
+		expect(p.issues[0].kind).toBe('too_large');
+		expect(p.issues[0].size, 'and the size is recorded, so the operator can decide about the limit').toBe(5_000_000_000);
+	});
+
+	it('does not request bytes for a file the store has no room for either', async () => {
+		// Capacity is the other reason to refuse before reading. The distinction from a size skip is kept: capacity
+		// is a failure the operator must act on, a size skip is a decision about the limit.
+		let reads = 0;
+		const base = machine({ '/data': [{ name: 'big.log', content: 'x', size: 5000 }] });
+		const watched: RemoteHost = {
+			...base,
+			async read(path: string) {
+				reads += 1;
+				return base.read(path);
+			},
+		};
+		const p = ports({
+			async canStore({ size }) {
+				return { ok: false as const, reason: 'the store is full', skipped: false, size };
+			},
+		});
+
+		const result = await collectFrom(watched, p);
+
+		expect(reads, 'not read, because there was nowhere to put it').toBe(0);
+		expect(result.totals.failed).toBe(1);
+		expect(result.totals.skipped, 'capacity is not a size skip').toBe(0);
+		expect(p.issues[0].kind).toBe('capacity');
+	});
+
+	it('attempts a file whose size the machine did not report, because it cannot be judged in advance', async () => {
+		// The gate must not turn "unknown" into "too large": that would skip files that fit, and a machine that
+		// reports no sizes would collect nothing at all.
+		let reads = 0;
+		const base = machine({ '/data': [{ name: 'a.log', content: 'abc' }] });
+		const sizeless: RemoteHost = {
+			...base,
+			async stat() {
+				return { isDirectory: false };
+			},
+			async read(path: string) {
+				reads += 1;
+				return base.read(path);
+			},
+		};
+
+		const result = await collectFrom(sizeless, ports());
+
+		expect(reads, 'attempted rather than refused').toBe(1);
+		expect(result.totals.stored).toBe(1);
+	});
+
+	it('still records progress when it refuses before reading', async () => {
+		// A refused file is still a file the run got through, so the counts must move or an interrupted run's
+		// totals would under-report how far it had got.
+		const p = ports({
+			async canStore({ size }) {
+				return size !== null && size > 10 ? { ok: false as const, reason: 'too large', skipped: true, size } : { ok: true as const };
+			},
+		});
+		const result = await collectFrom(machine({ '/data': [{ name: 'big.log', content: 'x', size: 99 }] }), p);
+
+		expect(result.totals.skipped).toBe(1);
+		expect(p.progress, 'progress was reported for the refusal too').toHaveLength(1);
+		expect(p.progress[0].skipped).toBe(1);
 	});
 
 	it('bounds how many files one run walks', async () => {
