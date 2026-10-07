@@ -241,6 +241,12 @@ export function renderIndexPage(locale: Locale = 'en'): string {
       <section class="glass runs" aria-labelledby="runs-h">
         <h2 id="runs-h" data-i18n="runs.title">Collection history</h2>
         <p class="lede" data-i18n="runs.lede"></p>
+        <!--
+          Freshness sits above the history because it answers the question the history only implies: is the
+          schedule keeping up? The history says what each run did; this says how far behind the worst machine is,
+          which is the figure an operator acts on.
+        -->
+        <div id="freshness"></div>
         <div id="runlist"></div>
         <!--
           On demand, beside the history it produces: the two are read together, and a control that starts a run
@@ -1341,6 +1347,79 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     });
   }
 
+  // --- freshness -------------------------------------------------------------------------------
+  /**
+   * How far behind each machine is, and the worst case.
+   *
+   * The WORST figure is what is shown prominently, because it is the one that needs acting on: an average hides
+   * the machine that is never collected, and that machine is the whole reason an operator looks at this.
+   *
+   * A machine that has never been collected successfully says so in words rather than showing a duration. Zero
+   * would read as "just now", which is the opposite of the truth.
+   */
+  function renderFreshness(f) {
+    var host = $('freshness');
+    clear(host);
+    if (!f) return;
+
+    var box = node('div', 'freshness');
+    if (f.neverCount > 0) {
+      box.appendChild(
+        node('p', 'hint error', t('fresh.never').replace('{n}', f.neverCount)),
+      );
+    } else if (f.worstSeconds === null) {
+      box.appendChild(node('p', 'hint', t('fresh.noMachines')));
+    } else {
+      // Compared against the stated target rather than shown alone: "3000 seconds" is fine or alarming
+      // depending on what was intended, and the target is the only thing that says which.
+      var late = f.worstSeconds > f.targetSeconds;
+      box.appendChild(
+        node(
+          'p',
+          late ? 'hint error' : 'hint',
+          t('fresh.worst')
+            .replace('{behind}', ago(f.worstSeconds))
+            .replace('{target}', ago(f.targetSeconds)),
+        ),
+      );
+      if (late) box.appendChild(node('p', 'hint', t('fresh.behind')));
+    }
+
+    if (f.machines.length) {
+      var list = node('ul', 'rules-list');
+      f.machines.forEach(function (m) {
+        var li = node('li', 'rule');
+        li.appendChild(node('code', 'pattern', m.id));
+        if (m.never) {
+          li.appendChild(chip(t('fresh.neverOne'), 'warn'));
+        } else {
+          li.appendChild(chip(ago(m.secondsSinceSuccess), 'quiet'));
+        }
+        if (m.lastOutcome) {
+          li.appendChild(chip(m.lastOutcome.state, m.lastOutcome.state === 'finished' ? 'quiet' : 'warn'));
+        }
+        list.appendChild(li);
+      });
+      box.appendChild(list);
+    }
+
+    host.appendChild(box);
+  }
+
+  /** A duration in seconds, as words rather than a number. Powers of 60, because that is how it is read. */
+  function ago(seconds) {
+    if (seconds === null || seconds === undefined) return t('fresh.neverOne');
+    if (seconds < 90) return t('fresh.seconds').replace('{n}', Math.round(seconds));
+    if (seconds < 5400) return t('fresh.minutes').replace('{n}', Math.round(seconds / 60));
+    return t('fresh.hours').replace('{n}', (seconds / 3600).toFixed(1));
+  }
+
+  function loadFreshness() {
+    return api('/api/freshness').then(function (r) {
+      if (r.ok) renderFreshness(r.body);
+    });
+  }
+
   // --- data ----------------------------------------------------------------------------------
   function loadStatus() {
     return api('/api/status').then(function (r) {
@@ -1598,6 +1677,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     loadShares();
     loadObjects();
     loadRuns();
+    loadFreshness();
     loadMerges();
   }
 
@@ -2047,11 +2127,13 @@ function translationsLiteral(): string {
 			'browse.protect': 'Mark important',
 			'browse.unprotect': 'Unmark',
 			'browse.replaced': 'replaced',
-			'browse.share': 'Share',			'browse.loadMore': 'Show more',
+			'browse.share': 'Share',
+			'browse.loadMore': 'Show more',
 			'browse.copyPath': 'Copy path',
 			'browse.copyId': 'Copy id',
 			'browse.copied': 'Copied',
-			'browse.gone': 'no longer stored',			'storage.title': 'Storage',
+			'browse.gone': 'no longer stored',
+			'storage.title': 'Storage',
 			'storage.lede': 'What the store is holding and what it will do when it fills. Protections are honoured before space: a file marked important is never evicted, and if only protected files remain the store refuses new ones rather than deleting one of them.',
 			'storage.used': '{used} of {total} used ({percent}%)',
 			'storage.remaining': '{n} still free.',
@@ -2060,6 +2142,15 @@ function translationsLiteral(): string {
 			'storage.saturated': 'The store is full and every remaining file is protected, so new files are being refused. Unmark something, or raise the budget.',
 			'storage.fullReclaimable': 'The store is full. The next file will evict the oldest unprotected files to make room.',
 			'storage.perFile': 'Any one file may be up to {n}.',
+			'fresh.worst': 'The machine collected longest ago was {behind} ago, against a target of {target}.',
+			'fresh.behind': 'That is behind the target. A machine is either unreachable or slow enough to be crowding out the others; the history below says which.',
+			'fresh.never': '{n} machine(s) have never been collected successfully. Nothing is being kept up to date for them.',
+			'fresh.neverOne': 'never collected',
+			'fresh.noMachines': 'No machines yet, so there is nothing to keep fresh.',
+			'fresh.seconds': '{n}s ago',
+			'fresh.minutes': '{n}m ago',
+			'fresh.hours': '{n}h ago',
+
 
 
 			'shares.title': 'Shared links',
@@ -2259,11 +2350,13 @@ function translationsLiteral(): string {
 			'browse.protect': '标记为重要',
 			'browse.unprotect': '取消标记',
 			'browse.replaced': '已被取代',
-			'browse.share': '分享',			'browse.loadMore': '显示更多',
+			'browse.share': '分享',
+			'browse.loadMore': '显示更多',
 			'browse.copyPath': '复制路径',
 			'browse.copyId': '复制编号',
 			'browse.copied': '已复制',
-			'browse.gone': '已不再存储',			'storage.title': '存储',
+			'browse.gone': '已不再存储',
+			'storage.title': '存储',
 			'storage.lede': '存储的占用情况，以及存满之后会怎么做。保护优先于空间：标记为重要的文件永远不会被淘汰；如果只剩下受保护的文件，系统会拒绝新文件而不是删掉它们中的一个。',
 			'storage.used': '已用 {used} / {total}（{percent}%）',
 			'storage.remaining': '还剩 {n}。',
@@ -2272,6 +2365,15 @@ function translationsLiteral(): string {
 			'storage.saturated': '存储已满，且剩余文件全部受保护，因此正在拒绝新文件。请取消某个文件的保护，或提高预算。',
 			'storage.fullReclaimable': '存储已满。下一个文件会淘汰最旧的未受保护文件来腾出空间。',
 			'storage.perFile': '单个文件最大 {n}。',
+			'fresh.worst': '最久未采集的机器是 {behind} 前，目标是 {target} 以内。',
+			'fresh.behind': '已经落后于目标。要么某台机器连不上，要么它慢到挤占了其它机器；下面的历史记录会说明是哪一种。',
+			'fresh.never': '有 {n} 台机器从未成功采集过。它们的文件都没有在更新。',
+			'fresh.neverOne': '从未采集',
+			'fresh.noMachines': '还没有机器，因此没有需要保持新鲜度的对象。',
+			'fresh.seconds': '{n} 秒前',
+			'fresh.minutes': '{n} 分钟前',
+			'fresh.hours': '{n} 小时前',
+
 
 
 			'shares.title': '分享链接',
@@ -2356,7 +2458,8 @@ function translationsLiteral(): string {
 			'browse.copyPath': '複製路徑',
 			'browse.copyId': '複製編號',
 			'browse.copied': '已複製',
-			'browse.gone': '已不再儲存',			'storage.title': '儲存',
+			'browse.gone': '已不再儲存',
+			'storage.title': '儲存',
 			'storage.lede': '儲存的佔用情況，以及存滿之後會怎麼做。保護優先於空間：標記為重要的檔案永遠不會被淘汰；如果只剩下受保護的檔案，系統會拒絕新檔案而不是刪掉其中一個。',
 			'storage.used': '已用 {used} / {total}（{percent}%）',
 			'storage.remaining': '還剩 {n}。',
@@ -2365,6 +2468,15 @@ function translationsLiteral(): string {
 			'storage.saturated': '儲存已滿，且剩餘檔案全部受保護，因此正在拒絕新檔案。請取消某個檔案的保護，或提高預算。',
 			'storage.fullReclaimable': '儲存已滿。下一個檔案會淘汰最舊的未受保護檔案來騰出空間。',
 			'storage.perFile': '單一檔案最大 {n}。',
+			'fresh.worst': '最久未採集的機器是 {behind} 前，目標是 {target} 以內。',
+			'fresh.behind': '已經落後於目標。要麼某台機器連不上，要麼它慢到擠佔了其它機器；下面的歷史記錄會說明是哪一種。',
+			'fresh.never': '有 {n} 台機器從未成功採集過。它們的檔案都沒有在更新。',
+			'fresh.neverOne': '從未採集',
+			'fresh.noMachines': '還沒有機器，因此沒有需要保持新鮮度的對象。',
+			'fresh.seconds': '{n} 秒前',
+			'fresh.minutes': '{n} 分鐘前',
+			'fresh.hours': '{n} 小時前',
+
 
 			'skip': '跳到主要內容',
 			'status.key': '簽章金鑰',
@@ -2675,11 +2787,13 @@ function translationsLiteral(): string {
 			'browse.protect': '重要として印を付ける',
 			'browse.unprotect': '印を外す',
 			'browse.replaced': '置き換え済み',
-			'browse.share': '共有',			'browse.loadMore': 'さらに表示',
+			'browse.share': '共有',
+			'browse.loadMore': 'さらに表示',
 			'browse.copyPath': 'パスをコピー',
 			'browse.copyId': 'ID をコピー',
 			'browse.copied': 'コピーしました',
-			'browse.gone': '保存されていません',			'storage.title': 'ストレージ',
+			'browse.gone': '保存されていません',
+			'storage.title': 'ストレージ',
 			'storage.lede': '保存領域の使用状況と、いっぱいになったときの動作です。保護は空きより優先されます。重要と印を付けたファイルは決して削除されず、保護されたファイルだけが残った場合は、そのうちの 1 つを消すのではなく新しいファイルを拒否します。',
 			'storage.used': '{total} 中 {used} 使用（{percent}%）',
 			'storage.remaining': '残り {n}。',
@@ -2688,6 +2802,15 @@ function translationsLiteral(): string {
 			'storage.saturated': '保存領域が満杯で、残るファイルはすべて保護されているため、新しいファイルを拒否しています。保護を解除するか、予算を増やしてください。',
 			'storage.fullReclaimable': '保存領域が満杯です。次のファイルは、最も古い保護されていないファイルを削除して場所を空けます。',
 			'storage.perFile': '1 ファイルあたり最大 {n}。',
+			'fresh.worst': '最も長く収集されていないマシンは {behind} 前です。目標は {target} 以内。',
+			'fresh.behind': '目標より遅れています。マシンに到達できないか、遅すぎて他を圧迫しているかのどちらかです。どちらなのかは下の履歴が示します。',
+			'fresh.never': '{n} 台のマシンが一度も正常に収集されていません。それらのファイルは更新されていません。',
+			'fresh.neverOne': '未収集',
+			'fresh.noMachines': 'マシンがまだないため、鮮度を保つ対象がありません。',
+			'fresh.seconds': '{n} 秒前',
+			'fresh.minutes': '{n} 分前',
+			'fresh.hours': '{n} 時間前',
+
 
 
 			'shares.title': '共有リンク',

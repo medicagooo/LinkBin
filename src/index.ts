@@ -38,7 +38,7 @@ import { closeRun, collectionPorts, cursorFor, openRun } from './collect-store';
 import { abandonStaleSessions } from './multipart';
 import { buildObjectQuery, type BrowseFilter, type BrowseSort, type ObjectRow } from './browse';
 import { issuesForHost, runDetail, summarizeRuns, toIssueDetail, type IssueRow, type RunRow } from './receipts';
-import { parseCursor, planRun } from './schedule';
+import { parseCursor, planRun, freshness } from './schedule';
 import {
 	mergeSignature,
 	parseStoredRule,
@@ -118,6 +118,15 @@ const STORAGE_BUDGET_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB total in R2, a ca
  * that is killed mid-write leaves a half-recorded file.
  */
 const DEFAULT_RUN_BUDGET_MS = 5 * 60 * 1000;
+
+/**
+ * The freshness the schedule is meant to achieve, so "is it keeping up" has something to compare against.
+ *
+ * The spec's target is "a few tens of minutes" for a store of this size, and forty is the middle of that. It is
+ * stated as a figure rather than left as prose because `freshness` reports the WORST staleness across machines,
+ * and a worst case is only meaningful next to a target — "worst is 3000 seconds" answers nothing on its own.
+ */
+const FRESHNESS_TARGET_MS = 40 * 60 * 1000;
 
 class HttpError extends Error {
 	constructor(
@@ -1763,6 +1772,69 @@ if (path === '/api/status' && method === 'GET') {
 				return json({ ok: true, usage: { ...(await measureStorage(env.DB)), maxFileBytes: MAX_FILE_BYTES } });
 			}
 
+			// How stale each machine is, and the worst case across all of them.
+			//
+			// `freshness` was written early, tested with four cases, and had no caller — the same shape as the gates
+			// found in the last two rounds, and the fifth instance of it in this project. What it answers are the two
+			// things an operator cannot otherwise know: WHEN each machine was last collected successfully, and
+			// whether the schedule is achieving the freshness it is supposed to. The second is the one worth having,
+			// because a target of "a few tens of minutes" is an assumption until something measures it.
+			//
+			// The worst case is reported rather than an average, and a machine that has never succeeded reports
+			// `null` rather than zero. `freshness` makes both choices and documents why; this route supplies inputs.
+			if (path === '/api/freshness' && method === 'GET') {
+				const { results } = await env.DB.prepare(
+					`SELECT h.id AS id,
+					        MAX(CASE WHEN r.state = 'finished' THEN r.finished_at END) AS last_succeeded_at
+					 FROM hosts h
+					 LEFT JOIN collection_runs r ON r.host_id = h.id
+					 WHERE h.id != '@derived'
+					 GROUP BY h.id
+					 ORDER BY h.id`,
+				).all<{ id: string; last_succeeded_at: string | null }>();
+
+				// The most recent run per machine, for the outcome. Read separately and joined in memory rather than
+				// as a correlated subquery per machine: D1 allows 1000 queries per invocation, and this spends one
+				// for a number a single read provides — the same reasoning as the issue counts on `/api/runs`.
+				const { results: latest } = await env.DB.prepare(
+					`SELECT r.host_id AS host_id, r.state, r.stored_count, r.skipped_count, r.failed_count, r.started_at
+					 FROM collection_runs r
+					 WHERE r.started_at = (SELECT MAX(started_at) FROM collection_runs WHERE host_id = r.host_id)
+					 ORDER BY r.host_id`,
+				).all<{ host_id: string; state: string; stored_count: number; skipped_count: number; failed_count: number; started_at: string }>();
+
+				const latestByHost = new Map((latest ?? []).map((row) => [row.host_id, row]));
+				const report = freshness(
+					(results ?? []).map((row) => {
+						const run = latestByHost.get(row.id);
+						return {
+							id: row.id,
+							enabled: true,
+							lastStartedAt: run?.started_at ?? null,
+							lastSucceededAt: row.last_succeeded_at,
+							lastOutcome: run
+								? {
+										state: run.state,
+										stored: Number(run.stored_count),
+										skipped: Number(run.skipped_count),
+										failed: Number(run.failed_count),
+									}
+								: null,
+						};
+					}),
+					Date.now(),
+				);
+
+				return json({
+					// Spread so the entries are a plain array over the wire, with the summary figures beside them.
+					machines: [...report],
+					worstSeconds: report.worstSeconds,
+					neverCount: report.neverCount,
+					// Named so the interface can say "against a target of N minutes" rather than comparing against a
+					// number nothing states.
+					targetSeconds: FRESHNESS_TARGET_MS / 1000,
+				});
+			}
 			// Makes room for a file of a given size, by evicting the oldest unprotected stored files.
 			//
 			// A route rather than only an internal step, for two reasons. The collection pipeline is not built, so
