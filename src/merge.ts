@@ -32,6 +32,8 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 export interface MergeSource {
 	/** Where the content came from, as shown to the operator. */
 	path: string;
+	/** Stable machine identity distinguishes equal remote paths; omitted by older pure-engine callers. */
+	hostId?: string;
 	content: string;
 	/** Content hash, when known. Recorded so "is this derived object current" is decidable. */
 	hash?: string;
@@ -92,6 +94,8 @@ export interface NameFromSource {
 export interface MergeRule {
 	outputName: string;
 	combination: Combination;
+	/** Preferred stored paths; remaining sources follow in deterministic order. */
+	order?: string[];
 	/** Hash of the source set and this rule, for deciding whether a stored result is current. */
 	signature?: string;
 	/** Rewrite a field using its source's name, so entries from different sources stay distinguishable. */
@@ -157,6 +161,7 @@ export function orderSources(sources: MergeSource[], explicitOrder?: string[]): 
 	 */
 	const byPathThenContent = (a: MergeSource, b: MergeSource): number => {
 		if (a.path !== b.path) return a.path < b.path ? -1 : 1;
+		if (a.hostId !== b.hostId) return (a.hostId ?? '') < (b.hostId ?? '') ? -1 : 1;
 		if (a.content !== b.content) return a.content < b.content ? -1 : 1;
 		return 0;
 	};
@@ -168,7 +173,7 @@ export function orderSources(sources: MergeSource[], explicitOrder?: string[]): 
 	return sorted.sort((a, b) => {
 		const ra = rank.get(a.path);
 		const rb = rank.get(b.path);
-		if (ra !== undefined && rb !== undefined) return ra - rb;
+		if (ra !== undefined && rb !== undefined) return ra - rb || byPathThenContent(a, b);
 		if (ra !== undefined) return -1;
 		if (rb !== undefined) return 1;
 		return byPathThenContent(a, b);
@@ -189,7 +194,11 @@ function trimTrailingNewlines(text: string): string {
  */
 export function mergeText(rule: MergeRule, sources: MergeSource[], options: { expectedPaths?: string[] } = {}): MergeResult {
 	const notes: string[] = [];
-	const ordered = orderSources(sources);
+	const ordered = orderSources(sources, rule.order);
+	if (rule.nameFromSource !== undefined) {
+		const problem = nameFromSourceProblem(rule.nameFromSource);
+		if (problem) return { ok: false, sourceCount: ordered.length, sourceBytes: 0, notes, problem };
+	}
 
 	const missing = (options.expectedPaths ?? []).filter((path) => !ordered.some((s) => s.path === path));
 	if (missing.length > 0) {
@@ -216,15 +225,13 @@ export function mergeText(rule: MergeRule, sources: MergeSource[], options: { ex
 	const sourceBytes = normalized.reduce((total, s) => total + byteLength(s.content), 0);
 
 	const empty = normalized.filter((s) => s.content.trim().length === 0);
-	if (empty.length > 0) notes.push(`${empty.length} source(s) were empty: ${empty.map((s) => s.path).join(', ')}`);
-
-	if (empty.length === normalized.length) {
+	if (empty.length > 0) {
 		return {
 			ok: false,
 			sourceCount: normalized.length,
 			sourceBytes,
 			notes,
-			problem: 'every source was empty, so the previous result is kept rather than replaced with nothing',
+			problem: `these sources were empty: ${empty.map(s => s.path).join(', ')}; the previous result is kept rather than replaced with a partial merge`,
 		};
 	}
 
@@ -281,15 +288,16 @@ function byteLength(text: string): number {
  * every source anyway.
  */
 export function sourceName(path: string): string {
-	const base = path.split('/').pop() ?? path;
+	const base = path.split(/[\\/]/).pop() ?? path;
 	return base.replace(/\.(ya?ml|json|txt|conf|cfg)$/i, '');
 }
 
 /**
  * Rewrites a field on each entry using the source it came from.
  *
- * Applied after the union, because it needs to know which source each surviving entry came from — and that
- * is only known once duplicates have been removed.
+ * `nameDocument` calls this on each parsed source before union, preserving source-local identity and
+ * references even when definitions in different files are structurally identical. The optional labels
+ * disambiguate equal filenames on different machines; older direct callers keep basename naming.
  *
  * An entry whose source is unknown is left alone rather than given a name built from nothing: a field that
  * says `undefined 负载均衡` is worse than one that says `负载均衡`, because it looks deliberate.
@@ -298,6 +306,7 @@ export function applyNameFromSource(
 	out: Record<string, unknown>,
 	provenance: Map<string, string>,
 	rule: NameFromSource,
+	sourceNames?: ReadonlyMap<string, string>,
 ): { rewritten: number; skipped: number } {
 	const separator = rule.separator ?? ' ';
 	const scope = new Set(rule.keys);
@@ -315,7 +324,7 @@ export function applyNameFromSource(
 
 		out[key] = value.map((entry) => {
 			if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return entry;
-			const record = { ...(entry as Record<string, unknown>) };
+			const record = Object.assign(Object.create(null), entry) as Record<string, unknown>;
 
 			// An entry whose source cannot be determined is left alone. Naming it from nothing would produce a
 			// field that looks deliberate and says nothing true.
@@ -337,7 +346,7 @@ export function applyNameFromSource(
 			// rewrite, so leaving it untouched would defeat the point of naming it.
 			const own = record[rule.field] === undefined ? null : String(record[rule.field]);
 			const parts: string[] = [];
-			const sourcePart = sourceName(source);
+			const sourcePart = sourceNames?.get(source) ?? sourceName(source);
 			const typePart = rule.includeField ? renderPart(record[rule.includeField], rule.replace) : null;
 
 			const qualifiers = typePart === null ? [sourcePart] : rule.order === 'before' ? [typePart, sourcePart] : [sourcePart, typePart];
@@ -363,6 +372,117 @@ function renderPart(value: unknown, replace?: Record<string, string>): string | 
 	return text;
 }
 
+/** Definition-time validation is shared by HTTP-backed rules and older direct engine callers. */
+export function nameFromSourceProblem(value: unknown): string | null {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) return 'nameFromSource must be a naming object';
+	const rule = value as Record<string, unknown>;
+	const field = (value: unknown) => typeof value === 'string' && value.trim().length > 0;
+	if (!field(rule.field)) return 'the naming field must be a non-empty string';
+	if (!Array.isArray(rule.keys) || rule.keys.length === 0 || !rule.keys.every(field)) return 'naming keys must be a non-empty list of field names';
+	if (rule.includeField !== undefined && !field(rule.includeField)) return 'the naming includeField must be a non-empty string';
+	if (rule.separator !== undefined && typeof rule.separator !== 'string') return 'the naming separator must be a string';
+	if (rule.order !== undefined && rule.order !== 'before' && rule.order !== 'after') return 'the naming order must be before or after';
+	if (rule.replace !== undefined && (!rule.replace || typeof rule.replace !== 'object' || Array.isArray(rule.replace) || !Object.values(rule.replace).every(value => typeof value === 'string'))) return 'the naming replace map must contain string values';
+	return null;
+}
+
+/** Keep legacy names for unique basenames; qualify ambiguous basenames by machine/path. */
+function namingLabel(source: MergeSource, sources: MergeSource[]): string {
+	const base = sourceName(source.path);
+	const identity = (entry: MergeSource) => JSON.stringify([entry.hostId ?? '', entry.path]);
+	const peers = sources.filter(entry => sourceName(entry.path) === base);
+	if (new Set(peers.map(identity)).size < 2) return base;
+	if (source.hostId && new Set(peers.filter(entry => entry.hostId === source.hostId).map(identity)).size === 1) return `${base} [${source.hostId}]`;
+	return `${base} [${source.hostId ? `${source.hostId}:` : ''}${source.path}]`;
+}
+
+/**
+ * Rename within each parsed source BEFORE union so identical definitions from different machines
+ * retain their identity. Only the existing proxy configuration name operator has known references:
+ * group members and the action token of routing rules. Other strings/settings are never substituted.
+ */
+function nameDocument(document: Record<string, unknown>, source: MergeSource, sources: MergeSource[], rule: NameFromSource): { document: Record<string, unknown>; rewritten: number } {
+	const out = Object.assign(Object.create(null), document) as Record<string, unknown>;
+	const provenance = new Map<string, string>();
+	for (const key of rule.keys) for (const entry of Array.isArray(out[key]) ? out[key] as unknown[] : []) provenance.set(`${key}\u0000${canonicalForm(entry)}`, source.path);
+	const { rewritten } = applyNameFromSource(out, provenance, rule, new Map([[source.path, namingLabel(source, sources)]]));
+	if (rule.field !== 'name' || !rule.keys.some(key => key === 'proxy-groups' || key === 'proxies')) return { document: out, rewritten };
+	const renames = new Map<string, string>();
+	for (const key of rule.keys.filter(key => key === 'proxy-groups' || key === 'proxies')) {
+		const before = Array.isArray(document[key]) ? document[key] as Record<string, unknown>[] : [];
+		const after = out[key] as Record<string, unknown>[];
+		for (let index = 0; index < before.length; index++) {
+			const oldName = before[index]?.name;
+			const newName = after[index]?.name;
+			if (typeof oldName !== 'string' || typeof newName !== 'string') continue;
+			if (renames.has(oldName) && renames.get(oldName) !== newName) throw new Error(`${source.path} has ambiguous duplicate name ${oldName}`);
+			renames.set(oldName, newName);
+		}
+	}
+	const target = (value: unknown) => typeof value === 'string' ? renames.get(value) ?? value : value;
+	if (Array.isArray(out['proxy-groups'])) out['proxy-groups'] = (out['proxy-groups'] as Record<string, unknown>[]).map(group => group && typeof group === 'object' && Array.isArray(group.proxies) ? { ...group, proxies: group.proxies.map(target) } : group);
+	if (Array.isArray(out.proxies)) out.proxies = out.proxies.map(proxy => proxy && typeof proxy === 'object' && typeof proxy['dialer-proxy'] === 'string' ? { ...proxy, 'dialer-proxy': target(proxy['dialer-proxy']) } : proxy);
+	// no-resolve is a modifier; SUB-RULE targets a sub-rule name rather than an outbound policy.
+	const rewriteRule = (rule: unknown) => {
+		if (typeof rule !== 'string') return rule;
+		const position = ruleTarget(rule);
+		if (!position) return rule;
+		position.parts[position.index] = position.parts[position.index].replace(/\S(?:.*\S)?/, value => String(target(value)));
+		return position.parts.join(',');
+	};
+	if (Array.isArray(out.rules)) out.rules = out.rules.map(rewriteRule);
+	if (out['sub-rules'] && typeof out['sub-rules'] === 'object' && !Array.isArray(out['sub-rules'])) {
+		out['sub-rules'] = Object.fromEntries(Object.entries(out['sub-rules']).map(([key, rules]) => [key, Array.isArray(rules) ? rules.map(rewriteRule) : rules]));
+	}
+	return { document: out, rewritten };
+}
+
+function ruleTarget(rule: string): { parts: string[]; index: number } | null {
+	const parts = rule.split(',');
+	if (parts[0].trim() === 'SUB-RULE') return null;
+	let index = parts.length - 1;
+	while (index > 0 && ['no-resolve', 'src'].includes(parts[index].trim())) index--;
+	return index > 0 ? { parts, index } : null;
+}
+
+/** Source precedence decides conflicts, but a source's terminal MATCH cannot shadow later specifics. */
+function mergeRoutingRules(rules: unknown[], notes: string[]): unknown[] {
+	const terminal = rules.filter(rule => typeof rule === 'string' && rule.split(',')[0].trim() === 'MATCH');
+	if (terminal.length === 0) return rules;
+	if (terminal.length > 1) notes.push(`conflicting MATCH fallback policies resolved by source order: kept ${terminal[0]}, ignored ${terminal.slice(1).join('; ')}`);
+	return [...rules.filter(rule => !(typeof rule === 'string' && rule.split(',')[0].trim() === 'MATCH')), terminal[0]];
+}
+
+/** Refuse unresolved/ambiguous references rather than publishing syntactically valid broken YAML. */
+function proxyReferenceProblem(document: Record<string, unknown>): string | null {
+	const names = new Set(['DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'PASS-RULE', 'GLOBAL', 'COMPATIBLE']);
+	for (const key of ['proxies', 'proxy-groups']) for (const entry of Array.isArray(document[key]) ? document[key] as Record<string, unknown>[] : []) {
+		if (!entry || typeof entry.name !== 'string') continue;
+		if (names.has(entry.name)) return `duplicate or reserved proxy name ${entry.name}`;
+		names.add(entry.name);
+	}
+	for (const group of Array.isArray(document['proxy-groups']) ? document['proxy-groups'] as Record<string, unknown>[] : []) {
+		for (const reference of Array.isArray(group?.proxies) ? group.proxies : []) if (typeof reference === 'string' && !names.has(reference)) return `proxy group ${group.name} references missing name ${reference}`;
+	}
+	for (const proxy of Array.isArray(document.proxies) ? document.proxies as Record<string, unknown>[] : []) {
+		if (typeof proxy?.['dialer-proxy'] === 'string' && !names.has(proxy['dialer-proxy'])) return `proxy ${proxy.name} references missing dialer ${proxy['dialer-proxy']}`;
+	}
+	const subRules = document['sub-rules'] && typeof document['sub-rules'] === 'object' ? Object.values(document['sub-rules']).filter(Array.isArray).flat() : [];
+	for (const rule of [...(Array.isArray(document.rules) ? document.rules : []), ...subRules]) {
+		if (typeof rule !== 'string') continue;
+		const tokens = rule.split(',');
+		if (tokens[0].trim() === 'SUB-RULE') {
+			const target = tokens.at(-1)?.trim();
+			if (!target || !document['sub-rules'] || !Object.hasOwn(document['sub-rules'], target)) return `routing rule references missing sub-rule ${target}`;
+			continue;
+		}
+		const position = ruleTarget(rule);
+		const target = position?.parts[position.index]?.trim();
+		if (target && !names.has(target)) return `routing rule references missing name ${target}`;
+	}
+	return null;
+}
+
 /**
  * Unions list-valued top-level keys across documents, removing duplicates.
  *
@@ -370,9 +490,9 @@ function renderPart(value: unknown, replace?: Record<string, string>): string | 
  * indentation are the same entry, and comparing their text would keep both. Canonical JSON is used as
  * the comparison form because it sorts keys, which makes it stable across sources authored differently.
  *
- * Ordering is deterministic and independent of source order: entries are sorted by their canonical form.
- * That means a new entry appended to one source lands in a predictable place rather than wherever that
- * source happened to be read.
+ * Ordinary list entries sort by canonical form. Routing rules preserve configured source/local priority,
+ * with one terminal MATCH chosen by source precedence and placed after all specific rules. Conflicts
+ * are reported. Disjoint sub-rule mappings are preserved; incompatible same-name definitions refuse.
  *
  * A key that is **absent** from some sources is contributed by the ones that have it. Losing it because
  * the first source happened not to mention it was a real defect, found by running this against the
@@ -389,17 +509,12 @@ function unionDocuments(
 	naming?: NameFromSource,
 ): { ok: boolean; content: string; notes: string[]; problem?: string } {
 	const notes: string[] = [];
-	// Sources are visited in the order given, which `mergeText` has already made deterministic, so "the
-	// first source that mentions this key" is itself deterministic.
+	// mergeText has already applied the configured order and stable fallback ordering.
 	const perKey = new Map<string, Map<string, unknown>>();
-	/**
-	 * Which source each surviving entry came from, keyed by its canonical form.
-	 *
-	 * Kept because naming an entry after its source is only possible if the link between them survives the
-	 * union — and after duplicates are removed, the link is no longer derivable from the entry itself.
-	 */
-	const provenance = new Map<string, string>();
+	let rewritten = 0;
+	let rawEntries = 0;
 	const scalars = new Map<string, { value: unknown; from: string }>();
+	const subRules = new Map<string, unknown>();
 	const conflicts: string[] = [];
 
 	for (const src of sources) {
@@ -415,10 +530,7 @@ function unionDocuments(
 			};
 		}
 
-		if (parsed === null || parsed === undefined) {
-			notes.push(`${src.path} parsed as an empty document`);
-			continue;
-		}
+		if (parsed === null || parsed === undefined) return { ok: false, content: '', notes, problem: `${src.path} parsed as an empty document; the previous result is kept` };
 		if (typeof parsed !== 'object' || Array.isArray(parsed)) {
 			return {
 				ok: false,
@@ -428,21 +540,30 @@ function unionDocuments(
 			};
 		}
 
+		const sourceEntries = Object.values(parsed).reduce<number>((total, value) => total + (Array.isArray(value) ? value.length : 0), 0);
+		rawEntries += sourceEntries;
+		notes.push(`${src.hostId ? `${src.hostId}:` : ''}${src.path}: ${sourceEntries} list entries`);
+		if (naming) {
+			const named = nameDocument(parsed as Record<string, unknown>, src, sources, naming);
+			parsed = named.document;
+			rewritten += named.rewritten;
+		}
 		for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+			if (key === 'sub-rules') {
+				if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${src.path} has invalid sub-rules`);
+				for (const [name, rules] of Object.entries(value)) {
+					if (!Array.isArray(rules)) throw new Error(`${src.path} sub-rule ${name} must be a rule list`);
+					if (subRules.has(name) && canonicalForm(subRules.get(name)) !== canonicalForm(rules)) throw new Error(`conflicting sub-rule definitions for ${name}; the previous result is kept`);
+					subRules.set(name, rules);
+				}
+				continue;
+			}
 			if (Array.isArray(value)) {
 				const bucket = perKey.get(key) ?? new Map<string, unknown>();
 				for (const entry of value) {
 					const canonical = canonicalForm(entry);
 					if (!bucket.has(canonical)) {
 						bucket.set(canonical, entry);
-						// Recorded on the entry that SURVIVES. A duplicate from a later source does not overwrite
-						// this, so the name reflects the source that actually contributed the entry — which is the
-						// one a reader would expect to see.
-						//
-						// The key carries the list's name as well as the entry's shape: the same entry appearing in
-						// two different lists is two entries, and keying on shape alone let the second overwrite the
-						// first's origin.
-						provenance.set(`${key}\u0000${canonical}`, src.path);
 					}
 				}
 				perKey.set(key, bucket);
@@ -464,35 +585,25 @@ function unionDocuments(
 		notes.push(`conflicting non-list keys resolved by source order: ${conflicts.join('; ')}`);
 	}
 
-	const out: Record<string, unknown> = {};
+	const out: Record<string, unknown> = Object.create(null);
 	// Sorted so the output does not depend on which source happened to mention a key first.
 	for (const [key, entry] of [...scalars.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
 		out[key] = entry.value;
 	}
 	for (const [key, bucket] of [...perKey.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
-		const entries = [...bucket.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([, value]) => value);
-		out[key] = entries;
+		// Routing rules are priority ordered: canonical sorting can move MATCH ahead of a specific rule.
+		// Source ordering already makes insertion order deterministic. Other lists keep canonical ordering.
+		const entries = (key === 'rules' ? [...bucket.entries()] : [...bucket.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))).map(([, value]) => value);
+		out[key] = key === 'rules' ? mergeRoutingRules(entries, notes) : entries;
 	}
+	if (subRules.size) out['sub-rules'] = Object.fromEntries([...subRules.entries()].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
 
-	// After the union, because naming needs to know which source each surviving entry came from.
-	if (naming) {
-		const before = countNames(out, naming.field);
-		const { rewritten } = applyNameFromSource(out, provenance, naming);
-		const after = distinctNames(out, naming.field);
-
-		if (rewritten > 0) {
-			notes.push(`renamed ${rewritten} entries in ${naming.field} after their source (${after} distinct names)`);
-		}
-		if (rewritten > after) {
-			// Said out loud, because colliding names are the thing this operator exists to remove, and a partial
-			// fix looks exactly like a complete one.
-			notes.push(`${rewritten - after} entries still share a name, so the naming rule does not distinguish them fully`);
-		}
-		if (before !== rewritten) {
-			// Entries that carry the field but were not renamed — which means their source is unknown. Silence
-			// here would hide half a job.
-			notes.push(`${before - rewritten} entries carry ${naming.field} but were not renamed`);
-		}
+	const uniqueEntries = [...perKey.values()].reduce((total, entries) => total + entries.size, 0);
+	notes.push(`${rawEntries - uniqueEntries} duplicate list entries removed; ${uniqueEntries} retained`);
+	if (naming && rewritten > 0) notes.push(`renamed ${rewritten} entries in ${naming.field} after their source`);
+	if (naming?.field === 'name' && naming.keys.some(key => key === 'proxy-groups' || key === 'proxies')) {
+		const problem = proxyReferenceProblem(out);
+		if (problem) return { ok: false, content: '', notes, problem: `${problem}; the previous result is kept` };
 	}
 
 	// Wrapped, because canonicalising a document can overflow the stack rather than fail politely: a recursive
@@ -522,33 +633,6 @@ function unionDocuments(
 	return { ok: true, content, notes };
 }
 
-/** How many list entries carry a value in a given field at all. */
-function countNames(out: Record<string, unknown>, field: string): number {
-	let count = 0;
-	for (const value of Object.values(out)) {
-		if (!Array.isArray(value)) continue;
-		for (const entry of value) {
-			if (entry && typeof entry === 'object' && (entry as Record<string, unknown>)[field] !== undefined) count++;
-		}
-	}
-	return count;
-}
-
-/** How many distinct values a field has across all list entries. */
-function distinctNames(out: Record<string, unknown>, field: string): number {
-	const seen = new Set<string>();
-	for (const value of Object.values(out)) {
-		if (!Array.isArray(value)) continue;
-		for (const entry of value) {
-			if (entry && typeof entry === 'object') {
-				const name = (entry as Record<string, unknown>)[field];
-				if (name !== undefined) seen.add(String(name));
-			}
-		}
-	}
-	return seen.size;
-}
-
 /**
  * A stable text form for comparison: keys sorted, so formatting differences do not create duplicates.
  *
@@ -561,17 +645,7 @@ function distinctNames(out: Record<string, unknown>, field: string): number {
  * Tagging costs nothing and makes the comparison injective for the values a configuration file can contain.
  */
 function canonicalForm(value: unknown): string {
-	return JSON.stringify(sortDeep(value), taggedReplacer);
-}
-
-/** Serialises the values JSON cannot distinguish, so they do not compare equal by accident. */
-function taggedReplacer(this: unknown, _key: string, value: unknown): unknown {
-	// `Number.isFinite` covers NaN, Infinity and -Infinity, all of which JSON turns into `null`.
-	if (typeof value === 'number' && !Number.isFinite(value)) return { $number: String(value) };
-	if (typeof value === 'bigint') return { $bigint: String(value) };
-	// `undefined` is dropped from objects and becomes `null` in arrays; tagging keeps the two apart.
-	if (value === undefined) return { $undefined: true };
-	return value;
+	return JSON.stringify(sortDeep(value));
 }
 
 /**
@@ -592,15 +666,18 @@ function sortDeep(value: unknown, depth = 0): unknown {
 	if (depth > MAX_DEPTH) {
 		throw new Error('the document nests deeper than this can compare, which usually means a recursive reference');
 	}
-	if (Array.isArray(value)) return value.map((item) => sortDeep(item, depth + 1));
+	// Tag EVERY value, not only special numbers: user mappings cannot impersonate a generated tag.
+	// Key/value pairs also preserve __proto__ as ordinary data without invoking a prototype setter.
+	if (value === null) return ['null'];
+	if (Array.isArray(value)) return ['array', value.map((item) => sortDeep(item, depth + 1))];
+	if (value instanceof Date) return ['date', value.toISOString()];
+	const compare = (a: unknown, b: unknown) => { const aa = JSON.stringify(a); const bb = JSON.stringify(b); return aa < bb ? -1 : aa > bb ? 1 : 0; };
+	if (value instanceof Set) return ['set', [...value].map(item => sortDeep(item, depth + 1)).sort(compare)];
+	if (value instanceof Map) return ['map', [...value].map(([key, entry]) => [sortDeep(key, depth + 1), sortDeep(entry, depth + 1)]).sort(compare)];
 	if (value && typeof value === 'object') {
-		const out: Record<string, unknown> = {};
-		for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-			out[key] = sortDeep((value as Record<string, unknown>)[key], depth + 1);
-		}
-		return out;
+		return ['object', Object.keys(value).sort().map(key => [key, sortDeep((value as Record<string, unknown>)[key], depth + 1)])];
 	}
-	return value;
+	return [typeof value, typeof value === 'number' && Object.is(value, -0) ? '-0' : String(value)];
 }
 
 /**

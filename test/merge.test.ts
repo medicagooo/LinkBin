@@ -119,11 +119,11 @@ describe('combining text', () => {
 		expect(result.problem).toMatch(/empty/i);
 	});
 
-	it('succeeds when only some sources are empty, and says so', () => {
+	it('refuses a partial result when one selected source is empty', () => {
 		const result = mergeText(rule(), [source('/a', 'kept'), source('/b', '')]);
-		expect(result.ok).toBe(true);
-		expect(result.content).toBe('kept\n');
-		expect(result.notes.join(' ')).toMatch(/empty/i);
+		expect(result.ok).toBe(false);
+		expect(result.content).toBeUndefined();
+		expect(result.problem).toMatch(/empty/i);
 	});
 
 	it('refuses to guess when a named source is missing', () => {

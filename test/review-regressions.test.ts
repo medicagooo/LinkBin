@@ -43,6 +43,18 @@ beforeEach(async () => {
 	cookie = /(linkbin_session=[^;]+)/.exec(login.headers.get('set-cookie') ?? '')![1];
 });
 describe('review regressions through real storage and HTTP', () => {
+	it('a corrupt saved rule does not stop other automatic derived refreshes', async () => {
+		await post('/api/derived', { outputName: 'valid.txt', combination: 'concat', sources: [{ hostId: 'h1', pattern: '/data/*.txt' }] });
+		await env.DB.prepare("INSERT INTO derived_rules (id,output_name,rule_json,signature,created_at,updated_at) VALUES ('aaa-corrupt','corrupt.txt','null','old','2020-01-01','2020-01-01')").run();
+		await env.DB.prepare("INSERT INTO source_rules (pattern,is_exclude,enabled,created_at) VALUES ('/data/*.txt',0,1,'2020-01-01')").run();
+		const result = await post('/api/collect', {}, { TEST_REMOTE: machine(1) });
+		expect(result.status).toBe(200);
+		const output = await env.DB.prepare("SELECT object_key FROM objects WHERE host_id='@derived' AND path='/valid.txt' AND deleted_at IS NULL").first<{object_key: string}>();
+		expect(output).not.toBeNull();
+		expect(await (await env.BUCKET.get(output!.object_key))!.text()).toBe('x\n');
+		const issue = await env.DB.prepare("SELECT reason FROM collection_issues WHERE kind='merge_failed'").first<{reason: string}>();
+		expect(issue?.reason).toContain('aaa-corrupt');
+	});
 	it('recovers an interrupted publication and restores the protected predecessor', async () => {
         const ports = collectionPorts(env, 'h1', await openRun(env.DB, 'h1', null));
         await ports.store({ path: '/data/a.txt', stream: stream('good'), mtime: null });

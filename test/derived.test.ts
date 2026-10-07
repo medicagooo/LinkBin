@@ -173,14 +173,14 @@ describe('what a run produces', () => {
 	});
 
 	it('refuses an unparseable source and carries no content, so a previous result survives', () => {
-		const outcome = runDerived(union, [object(1, 'h1', '/etc/a.yaml')], contentsOf([[1, 'proxies: [oops\n']]));
+		const outcome = runDerived(union, [object(1, 'h1', '/etc/app/a.yaml')], contentsOf([[1, 'proxies: [oops\n']]));
 		expect(outcome.ok).toBe(false);
 		expect(outcome.content).toBeUndefined();
 		expect(outcome.problem).toBeTruthy();
 	});
 
 	it('unions the list-valued sections of several documents into one document', () => {
-		const objects = [object(1, 'h1', '/etc/a.yaml'), object(2, 'h1', '/etc/b.yaml')];
+		const objects = [object(1, 'h1', '/etc/app/a.yaml'), object(2, 'h1', '/etc/app/b.yaml')];
 		const outcome = runDerived(union, objects, contentsOf([
 			[1, 'proxies:\n  - name: p\n    port: 1\n'],
 			[2, 'proxies:\n  - name: p\n    port: 1\n  - name: q\n    port: 2\n'],

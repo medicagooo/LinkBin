@@ -102,6 +102,51 @@ describe('a merge rule through the interface', () => {
 		expect((await post('/api/derived', { outputName: 'x.yaml', combination: 'run-code', sources: [{ pattern: '/etc/*' }] }, cookie)).status).toBe(400);
 	});
 
+	it.each([null, { keys: ['proxy-groups'] }, { field: '', keys: ['proxy-groups'] }, { field: 'name', keys: [5] }])('rejects malformed naming at the HTTP boundary: %j', async nameFromSource => {
+		const res = await post('/api/derived', { outputName: 'bad.yaml', combination: 'yaml-list-union', sources: [{ pattern: '/etc/*.yaml' }], nameFromSource }, cookie);
+		expect(res.status).toBe(400);
+		const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM derived_rules WHERE output_name = 'bad.yaml'").first<{ n: number }>();
+		expect(count?.n).toBe(0);
+	});
+
+	it('does not silently discard malformed source specifications', async () => {
+		const res = await post('/api/derived', { outputName: 'bad.yaml', combination: 'concat', sources: [{ pattern: '/etc/*.yaml' }, null] }, cookie);
+		expect(res.status).toBe(400);
+	});
+
+	it('stores source-aware group references through the real D1/R2 path', async () => {
+		const content = 'proxies: [{name: node}]\nproxy-groups: [{name: auto, type: select, proxies: [node]}]\nrules: ["MATCH,auto"]\n';
+		await addHostWithFiles('h1', [{ path: '/etc/a.yaml', content }]);
+		const created = await post('/api/derived', { outputName: 'names.yaml', combination: 'yaml-list-union', sources: [{ pattern: '/etc/a.yaml' }], nameFromSource: { field: 'name', keys: ['proxy-groups'] } }, cookie);
+		expect(created.status).toBe(200);
+		const { id } = await created.json() as { id: string };
+		const run = await post('/api/derived/run', { id }, cookie);
+		expect(run.status).toBe(200);
+		const { objectId } = await run.json() as { objectId: number };
+		const row = await env.DB.prepare('SELECT object_key FROM objects WHERE id = ?').bind(objectId).first<{object_key: string}>();
+		const output = await (await env.BUCKET.get(row!.object_key))!.text();
+		expect(output).toContain('name: a auto');
+		expect(output).toContain('MATCH,a auto');
+	});
+
+	it('keeps the prior R2 output when one of two required sources becomes empty or disappears', async () => {
+		await addHostWithFiles('h1', [{ path: '/etc/a.txt', content: 'A' }, { path: '/etc/b.txt', content: 'B' }]);
+		const created = await post('/api/derived', { outputName: 'ordered.txt', combination: 'concat', sources: [{ pattern: '/etc/a.txt' }, { pattern: '/etc/b.txt' }], order: ['/etc/b.txt', '/etc/a.txt'] }, cookie);
+		const { id } = await created.json() as { id: string };
+		const first = await post('/api/derived/run', { id }, cookie);
+		expect(first.status).toBe(200);
+		const { objectId } = await first.json() as { objectId: number };
+		const row = await env.DB.prepare('SELECT object_key FROM objects WHERE id = ?').bind(objectId).first<{object_key: string}>();
+		expect(await (await env.BUCKET.get(row!.object_key))!.text()).toBe('B\nA\n');
+		await env.BUCKET.put('objects/h1/etc/b.txt', '');
+		expect((await post('/api/derived/run', { id }, cookie)).status).toBe(409);
+		await env.DB.prepare("UPDATE objects SET deleted_at = '2026-10-08' WHERE host_id = 'h1' AND path = '/etc/b.txt'").run();
+		expect((await post('/api/derived/run', { id }, cookie)).status).toBe(409);
+		const live = await env.DB.prepare("SELECT id FROM objects WHERE host_id = '@derived' AND path = '/ordered.txt' AND deleted_at IS NULL").first<{id: number}>();
+		expect(live?.id).toBe(objectId);
+		expect(await (await env.BUCKET.get(row!.object_key))!.text()).toBe('B\nA\n');
+	});
+
 	it('requires a session', async () => {
 		expect((await call('/api/derived')).status).toBe(401);
 		expect((await post('/api/derived', { outputName: 'x.yaml', combination: 'concat', sources: [{ pattern: '/etc/*' }] })).status).toBe(401);

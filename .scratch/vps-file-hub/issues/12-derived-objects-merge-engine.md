@@ -64,6 +64,13 @@ Established and tested:
 
 ## What is missing, and one question that needs a decision
 
+> Historical gap analysis below describes the original pure engine. Current code includes D1/R2
+> publication, provenance, protection, UI status and automatic refresh. The 2026-10-08 review repaired
+> source-scoped naming/references, machine identity, configured ordering and fail-closed missing/empty
+> inputs; see `docs/research/2026-10-08-yaml-policy-references.md`. `nameFromSource` exists through the
+> rule API. The extra three global groups/custom template matching the manual file still await a
+> separate product decision; they are not supplied by the generic union or this repair.
+
 Not yet built, all needing 05/08/09: storing the derived object, recording its sources and their hashes,
 marking it important, the current/stale display, and re-running automatically when a source changes.
 

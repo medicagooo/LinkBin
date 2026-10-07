@@ -4,7 +4,10 @@
   "requirements": [
     "User confirmed entire codebase review at b851c02",
     "Repair actionable correctness/security defects while preserving locked architecture",
-    "Push repaired and validated changes to main"
+    "Push repaired and validated changes to main",
+    "Second full-code review at ef44b77; fix source-qualified YAML name references and any reproducible current defects",
+    "Preserve configured source ordering and fail closed when any selected input/pattern is empty or missing",
+    "Keep source-specific names/references unambiguous across equal paths on different machines; preserve routing priority and resolve/report terminal conflicts"
   ],
   "constraints": [
     "Preserve the pre-existing BRANCHES.md pending-clear edit in the original checkout, outside task commits",
@@ -12,7 +15,8 @@
     "D1 multi-statement atomicity must not be assumed; only SSH_MASTER_KEY is a deployment secret",
     "Limits: 50 hosts, 100 MiB per file, 10 GiB total",
     "Derived text merge input is bounded to 8 MiB aggregate; larger selections are refused while preserving prior output",
-    "Unchanged files still transfer to determine hash; no live throughput or deployment verification in this task"
+    "Unchanged files still transfer to determine hash; no live throughput or deployment verification in this task",
+    "Customized 27-group merged-all template and user-supplied code execution are not authorized by the repair instruction"
   ],
   "acceptance": [
     "Independent standards/spec reviews completed",
@@ -30,9 +34,14 @@
     "Full-code standards/spec reviews completed; final recovery change independently reviewed",
     "686 tests in 43 files passed offline; 20 added regression tests cover fixes",
     "UI/migration guards and wrangler offline dry-run passed",
-    "src/storage.ts centralizes capacity, writer lease and durable publication recovery; no new migration/secret"
+    "src/storage.ts centralizes capacity, writer lease and durable publication recovery; no new migration/secret",
+    "Previous repair integrated and pushed: local main and GitHub main verified ef44b77bc7db41c094369d780e0eae213399fcc5 on 2026-10-08",
+    "Read-only real-file reproduction: rename yields 16 unresolved group references and 1 unresolved rule target",
+    "Second review:717/717 offline tests,31 new cases,guards and dry-run passed",
+    "Eight real files:40nodes24uniquegroups0danglingrefs1MATCHlast; no local files/R2 changed",
+    "Final focused Standards/Spec reviews found no remaining blockers; see e008"
   ],
-  "next": "Execute predeclared e004 local-main integration after checking source commit, ancestry and unchanged user-owned ledger delta; then e005 non-force push and verify remote SHA",
+  "next": "Execute predeclared e009 fast-forward after source/index/user-delta checks, then e010 non-force main push; verify GitHub API/HTTPS main SHA",
   "created_at": "2026-10-08T01:45:56.4799298+08:00",
-  "updated_at": "2026-10-08T02:33:34.6459962+08:00"
+  "updated_at": "2026-10-08T03:06:11.0735115+08:00"
 }

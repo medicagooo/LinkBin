@@ -2023,7 +2023,11 @@ if (path === '/api/status' && method === 'GET') {
  */
 async function refreshDerivedObjects(env: Env, recordIssue: CollectionPorts['recordIssue']): Promise<void> {
     const rows = await env.DB.prepare('SELECT id, rule_json, signature, created_at, updated_at FROM derived_rules ORDER BY id').all<any>();
-    const pending = (rows.results ?? []).map(row => parseStoredRule(row));
+    const pending: ReturnType<typeof parseStoredRule>[] = [];
+    for (const row of rows.results ?? []) {
+        try { pending.push(parseStoredRule(row)); }
+        catch (error) { await recordIssue({ path: null, kind: 'merge_failed', reason: (error as Error).message, size: null }); }
+    }
     while (pending.length) {
         const index = pending.findIndex(rule => !pending.some(other => other.id !== rule.id && rule.sources.some(source =>
             specMatches(source, { id: 0, hostId: derivedHostId(), path: `/${other.outputName}`, objectKey: '', sizeBytes: 0, contentHash: '' }))));
@@ -2087,8 +2091,6 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
 function definitionFrom(body: Partial<DerivedRuleDefinition>): DerivedRuleDefinition {
 	const sources = Array.isArray(body.sources)
 		? body.sources
-				.filter((spec): spec is MergeSourceSpec => Boolean(spec) && typeof spec.pattern === 'string')
-				.map((spec) => (spec.hostId === undefined ? { pattern: spec.pattern } : { pattern: spec.pattern, hostId: spec.hostId }))
 		: [];
 
 	const definition: DerivedRuleDefinition = {
@@ -2096,8 +2098,10 @@ function definitionFrom(body: Partial<DerivedRuleDefinition>): DerivedRuleDefini
 		combination: body.combination as MergeRule['combination'],
 		sources,
 	};
-	if (Array.isArray(body.order)) definition.order = body.order.filter((p): p is string => typeof p === 'string');
-	if (body.nameFromSource && typeof body.nameFromSource === 'object' && Array.isArray(body.nameFromSource.keys)) {
+	// Preserve supplied fields for definition-time validation; silently dropping malformed options
+	// would save/run a different rule than the operator submitted.
+	if (body.order !== undefined) definition.order = body.order;
+	if (body.nameFromSource !== undefined) {
 		definition.nameFromSource = body.nameFromSource;
 	}
 	return definition;

@@ -12,7 +12,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { detectCycle, mergeText, previewMerge } from './merge';
+import { detectCycle, mergeText, previewMerge, nameFromSourceProblem } from './merge';
 import type { MergePreview, MergeResult, MergeRule, MergeRuleRef, MergeSource, NameFromSource } from './merge';
 import { globToRegExp } from './remote';
 
@@ -91,6 +91,12 @@ export function ruleDefinitionProblem(
 		if (!spec || typeof spec.pattern !== 'string' || spec.pattern.trim().length === 0) {
 			return 'every source needs a pattern';
 		}
+		if (spec.hostId !== undefined && (typeof spec.hostId !== 'string' || !spec.hostId.trim())) return 'each source hostId must be a non-empty string';
+	}
+	if (definition.order !== undefined && (!Array.isArray(definition.order) || !definition.order.every(path => typeof path === 'string' && path.trim()))) return 'source order must be a list of non-empty paths';
+	if (definition.nameFromSource !== undefined) {
+		const problem = nameFromSourceProblem(definition.nameFromSource);
+		if (problem) return problem;
 	}
 
 	// The cycle check runs over the rules that would exist once this one is added, so a rule whose sources are
@@ -116,6 +122,7 @@ export function ruleDefinitionProblem(
 /** The engine's rule, derived from the stored definition. */
 export function engineRule(definition: DerivedRuleDefinition): MergeRule {
 	const rule: MergeRule = { outputName: definition.outputName, combination: definition.combination };
+	if (definition.order) rule.order = definition.order;
 	if (definition.nameFromSource) rule.nameFromSource = definition.nameFromSource;
 	return rule;
 }
@@ -124,6 +131,13 @@ export function engineRule(definition: DerivedRuleDefinition): MergeRule {
 export function specMatches(spec: MergeSourceSpec, object: StoredObject): boolean {
 	if (spec.hostId !== undefined && spec.hostId !== object.hostId) return false;
 	return globToRegExp(spec.pattern).test(object.path);
+}
+
+/** Every saved source pattern is required. A zero-match pattern cannot silently shorten a good output. */
+function missingSourceProblem(definition: DerivedRuleDefinition, selected: StoredObject[]): string | null {
+	if (selected.length === 0) return null; // Preserve the existing explanatory empty-selection response.
+	const missing = definition.sources.filter(spec => !selected.some(object => specMatches(spec, object)));
+	return missing.length ? `these source patterns matched nothing: ${missing.map(spec => `${spec.hostId ? `${spec.hostId}:` : ''}${spec.pattern}`).join(', ')}; the previous result is kept` : null;
 }
 
 /**
@@ -185,7 +199,8 @@ export function mergeSignature(definition: DerivedRuleDefinition, sources: Store
 		hash.update('\u0000');
 	};
 
-	part('linkbin-derived-v1');
+	// Version the transform contract too: unchanged inputs must rebuild after a correctness repair.
+	part('linkbin-derived-v2');
 	part(definition.outputName);
 	part(definition.combination);
 	part(JSON.stringify(definition.nameFromSource ?? null));
@@ -206,6 +221,7 @@ export function engineSources(
 ): MergeSource[] {
 	return objects.map((object) => ({
 		path: object.path,
+		hostId: object.hostId,
 		content: contents.get(object.id) ?? '',
 		// Passed through so the engine's own provenance reporting can attribute an entry to a source without
 		// re-hashing the bytes it was given.
@@ -256,6 +272,8 @@ export function previewDerived(
 	// before anything is read, and what it answers is "how much will this pull in", so it must come from the
 	// objects rather than from the engine.
 	const sourceBytes = selected.reduce((total, object) => total + object.sizeBytes, 0);
+	const missing = missingSourceProblem(definition, selected);
+	if (missing) return { ok: false, outputName: definition.outputName, sourceCount: selected.length, sourceBytes, notes: [], problem: missing, sources: paths, perPattern };
 
 	if (selected.length === 0) {
 		return {
@@ -320,6 +338,8 @@ export function runDerived(
 	contents: Map<number, string>,
 ): DerivedRunOutcome {
 	const signature = mergeSignature(definition, selected);
+	const missing = missingSourceProblem(definition, selected);
+	if (missing) return { ok: false, outputName: definition.outputName, sourceCount: selected.length, sourceBytes: selected.reduce((total, object) => total + object.sizeBytes, 0), signature, notes: [], problem: missing };
 
 	if (selected.length === 0) {
 		return {
@@ -369,7 +389,11 @@ export function parseStoredRule(row: { id: string; rule_json: string; signature:
 		throw new DerivedRuleProblem(`rule ${row.id} is stored as text that is not valid JSON, so it cannot be used`);
 	}
 
+	if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new DerivedRuleProblem(`rule ${row.id} must contain a definition object`);
 	const definition = parsed as DerivedRuleDefinition;
+	if (typeof definition.outputName !== 'string') throw new DerivedRuleProblem(`rule ${row.id} must contain an output name`);
+	const problem = ruleDefinitionProblem(definition, []);
+	if (problem) throw new DerivedRuleProblem(`rule ${row.id}: ${problem}`);
 	return {
 		id: row.id,
 		outputName: String(definition.outputName ?? ''),

@@ -83,7 +83,7 @@ describe('renaming entries after their source', () => {
 	it('makes entries from different sources distinguishable', () => {
 		// Without this, the merged file has two groups called 负载均衡 and no way to tell them apart.
 		const result = mergeText(
-			rule({ nameFromSource: { field: 'name', keys: ['proxy-groups'], keys: ['proxy-groups'] } }),
+			rule({ nameFromSource: { field: 'name', keys: ['proxy-groups'] } }),
 			[src('/s/dartnode.yaml', HOST_A), src('/s/rabisu.yaml', HOST_B)],
 		);
 
@@ -205,7 +205,7 @@ describe('renaming entries after their source', () => {
 		expect(forwards.content).toBe(backwards.content);
 	});
 
-	it('says so when the naming rule still leaves collisions', () => {
+	it('refuses when the naming rule still leaves collisions', () => {
 		// A partial fix that looks like a complete one is worse than no fix: the operator would ship a file
 		// with duplicated group names and believe it was resolved.
 		//
@@ -217,10 +217,9 @@ describe('renaming entries after their source', () => {
 			[src('/s/one.yaml', sameTwice)],
 		);
 
-		const merged = parseYaml(result.content!) as { 'proxy-groups': { name: string }[] };
-		const names = merged['proxy-groups'].map((g) => g.name);
-		expect(new Set(names).size).toBeLessThan(names.length);
-		expect(result.notes.join(' ')).toMatch(/still share a name/i);
+		expect(result.ok).toBe(false);
+		expect(result.content).toBeUndefined();
+		expect(result.problem).toMatch(/duplicate|ambiguous/i);
 	});
 
 	it('does not warn about collisions when the rule separates every entry', () => {
