@@ -312,7 +312,24 @@ export async function closeRun(
 		.run();
 }
 
-/** The cursor a stopped run leaves, naming the machine and how far it got. */
-export function cursorFor(hostId: string, outcomes: CollectedFile[] | { path: string }[]): string {
-	return JSON.stringify({ hostId, reached: outcomes.length });
+/**
+ * The cursor a stopped run leaves, naming the machine and how far it got.
+ *
+ * ## The shape is fixed by `parseCursor`, and the earlier version did not match it
+ *
+ * This wrote `{ hostId, reached }` and `parseCursor` requires `{ hostId, position, startedAt }`, rejecting
+ * anything else. **So every cursor this project ever wrote was unusable**: `planRun` received `null`, never set
+ * `resumeFrom`, and the run started from the beginning — while the route reported a cursor it had stored itself.
+ * The defect was invisible because each half was tested on its own and each half was internally consistent.
+ *
+ * `position` carries the count `collectFrom` reported: how many files from the front of the resolved order this
+ * run got through. It is a STRING because `RunCursor.position` is opaque to the scheduler, which only carries it;
+ * the walk is what interprets it, and the walk is what produced it.
+ *
+ * `startedAt` is the run's own start rather than the moment it stopped, because that is what the field means and
+ * what the rotation already uses `collection_runs.started_at` for. The two must agree, so the caller passes it in
+ * rather than this function reading a clock.
+ */
+export function cursorFor(hostId: string, resumed: number, startedAt: string): string {
+	return JSON.stringify({ hostId, position: String(resumed), startedAt });
 }

@@ -264,6 +264,24 @@ async function schemaReady(env: Env): Promise<{ ready: boolean; missing: string[
 // Authentication
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * A stored cursor position as an offset, or 0 when it cannot be trusted.
+ *
+ * Strict on purpose. The value comes from a JSON document this project wrote, but it has crossed a database and a
+ * release boundary, and the two ways of being wrong are not symmetric: resuming from 0 re-reads files and stores
+ * nothing, because the content hash decides, while resuming from a value that is too HIGH skips files that were
+ * never read and loses them silently.
+ *
+ * So a value that is not an exact non-negative integer is refused rather than rounded. `Math.trunc("1.5")` is `1`,
+ * which looks usable and drops a file; `parseInt("12abc")` is `12`, which does the same for a corrupt string.
+ */
+export function cursorPosition(stored: string | null | undefined): number {
+	if (stored === null || stored === undefined) return 0;
+	if (!/^\d+$/.test(stored)) return 0;
+	const value = Number(stored);
+	return Number.isSafeInteger(value) ? value : 0;
+}
+
 const SESSION_COOKIE = 'linkbin_session';
 
 /**
@@ -1581,6 +1599,15 @@ export default {
 						recordIssue: api.recordIssue,
 						recordProgress: api.recordProgress,
 						deadline,
+						// THE CURSOR IS FED BACK IN, which is what makes it a resume point rather than a receipt. The
+						// value is the file count a previous run reached; the walk skips that many and continues.
+						//
+						// ONLY AN EXACT NON-NEGATIVE INTEGER RESUMES. Anything else reads as "start from the
+						// beginning", the direction whose worst case is re-reading rather than losing a file — and
+						// that distinction is why this does not truncate: `Math.trunc("1.5")` is `1`, which SKIPS a
+						// file that was never read. The two failures are not symmetric, so a doubtful value must not
+						// be rounded into a usable-looking one.
+						resumeFrom: cursorPosition(plan.resumeFrom),
 					});
 					totals = result.totals;
 					outcomes = result.outcomes;
@@ -1588,7 +1615,7 @@ export default {
 
 					// `stopped` rather than `finished` when the budget ran out: marking it finished would claim a
 					// scan that did not happen, and the next run would not resume from the cursor.
-					await closeRun(env.DB, runId, stoppedEarly ? 'stopped' : 'finished', totals, stoppedEarly ? cursorFor(hostRow.id, outcomes) : null);
+					await closeRun(env.DB, runId, stoppedEarly ? 'stopped' : 'finished', totals, stoppedEarly ? cursorFor(hostRow.id, result.resumed, new Date(startedAt).toISOString()) : null);
 				} catch (err) {
 					// The run row is deliberately LEFT as `running`. The next invocation reads it as an unfinished
 					// run and its cursor, which is exactly what it is — and closing it as `finished` here would
@@ -1609,6 +1636,12 @@ export default {
 					resumeFrom: plan.resumeFrom ?? null,
 					stoppedEarly,
 					totals,
+					// The plan's notes are carried here for the same reason they are carried on the unreachable path:
+					// they include the explanation of what happened to a stored cursor — "the cursor belongs to
+					// another machine, so this one starts from the beginning". Without them an ignored cursor is
+					// indistinguishable from one that was never written, on the path where the operator is most
+					// likely to be looking.
+					notes: plan.notes,
 					// Reported so an operator can see that quota was released on their behalf, and so a cleanup that
 					// could NOT release something is visible rather than silent.
 					reclaimedSessions: cleaned.abandoned.length,

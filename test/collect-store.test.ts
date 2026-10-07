@@ -3,6 +3,7 @@ import worker from '../src/index';
 import { TEST_BASE_URL, TEST_MASTER_KEY } from './fixtures';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { closeRun, collectionPorts, cursorFor, liveObject, objectKeyFor, openRun } from '../src/collect-store';
+import { parseCursor } from '../src/schedule';
 
 /**
  * The storage side of a collection run, against real D1 and a real bucket.
@@ -204,7 +205,7 @@ describe('the run record', () => {
 		await closeRun(env.DB, finished, 'finished', { stored: 2, skipped: 0, failed: 0, bytesStored: 10 }, null);
 
 		const stopped = await openRun(env.DB, 'h1', null);
-		await closeRun(env.DB, stopped, 'stopped', { stored: 1, skipped: 0, failed: 0, bytesStored: 5 }, cursorFor('h1', [{ path: '/data/a.log' }]));
+		await closeRun(env.DB, stopped, 'stopped', { stored: 1, skipped: 0, failed: 0, bytesStored: 5 }, cursorFor('h1', 1, '2026-06-01T00:00:00.000Z'));
 
 		const a = await env.DB.prepare('SELECT state, finished_at, cursor_json FROM collection_runs WHERE id = ?').bind(finished).first<{ state: string; finished_at: string | null; cursor_json: string | null }>();
 		const b = await env.DB.prepare('SELECT state, finished_at, cursor_json FROM collection_runs WHERE id = ?').bind(stopped).first<{ state: string; finished_at: string | null; cursor_json: string | null }>();
@@ -214,6 +215,13 @@ describe('the run record', () => {
 		expect(a!.cursor_json).toBeNull();
 		expect(b!.state).toBe('stopped');
 		expect(b!.finished_at, 'it did stop, so it has an end').not.toBeNull();
-		expect(JSON.parse(b!.cursor_json!), 'and it says how far it got').toEqual({ hostId: 'h1', reached: 1 });
+		// The stored cursor must be one `parseCursor` ACCEPTS, not merely one that parses as JSON. That
+		// distinction is the whole defect this assertion used to encode: it expected `{ hostId, reached }`, which
+		// `parseCursor` rejects, so a cursor written in that shape was stored, reported and silently unusable. The
+		// test agreed with the writer because both used the same wrong shape.
+		const stored = JSON.parse(b!.cursor_json!) as { hostId: string; position: string; startedAt: string };
+		expect(stored.hostId, 'it names the machine, because a position is meaningless without one').toBe('h1');
+		expect(typeof stored.position, 'and carries the position as the opaque string the scheduler expects').toBe('string');
+		expect(parseCursor(b!.cursor_json!), 'which the scheduler must be able to read back').not.toBeNull();
 	});
 });

@@ -94,6 +94,14 @@ export interface CollectionPorts {
 	recordProgress?(totals: RunTotals): Promise<void>;
 	/** A wall-clock budget, so the walk leaves before the invocation is killed. */
 	deadline?: number;
+	/**
+	 * How many files from the front of the resolved order a previous run already got through.
+	 *
+	 * The count comes from {@link CollectionPorts} — specifically from the `resumed` figure a previous
+	 * `collectFrom` returned — and is opaque here beyond being a non-negative integer. The caller stores it; this
+	 * module interprets it as an offset into the same order it produced.
+	 */
+	resumeFrom?: number;
 	now?: () => number;
 }
 
@@ -110,7 +118,7 @@ export const MAX_FILES_PER_RUN = 2000;
 export async function collectFrom(
 	remote: RemoteHost,
 	ports: CollectionPorts,
-): Promise<{ totals: RunTotals; outcomes: FileOutcome[]; evaluations: RuleEvaluation[]; stoppedEarly: boolean }> {
+): Promise<{ totals: RunTotals; outcomes: FileOutcome[]; evaluations: RuleEvaluation[]; stoppedEarly: boolean; resumed: number }> {
 	const now = ports.now ?? (() => Date.now());
 	const totals: RunTotals = { stored: 0, skipped: 0, failed: 0, unchanged: 0, bytesStored: 0 };
 	const outcomes: FileOutcome[] = [];
@@ -139,13 +147,31 @@ export async function collectFrom(
 
 	let stoppedEarly = false;
 
-	for (const file of wanted.slice(0, MAX_FILES_PER_RUN)) {
+	// HOW FAR A PREVIOUS RUN GOT, in files from the front of the resolved order.
+	//
+	// The order `resolveRules` produces is deterministic for a given rule set, so a count is a usable position —
+	// and a count is the ONLY thing this module can produce without inventing a position scheme the store would
+	// then have to understand. The value is opaque to the caller: it comes back verbatim as `resumed`.
+	//
+	// A malformed or negative value is treated as NO resume point rather than as an error. Re-reading files that
+	// were already stored costs a comparison each and stores nothing, because the content hash decides; skipping
+	// files that were never read would lose them silently. The two failures are not symmetric, so the doubtful
+	// reading is the safe one.
+	const from = Number.isInteger(ports.resumeFrom) && (ports.resumeFrom ?? 0) > 0 ? (ports.resumeFrom as number) : 0;
+
+	// Counted from files the run actually STARTED on, not from the slice it was handed. A file counted as done
+	// without being attempted would be skipped by the next run without ever having been read.
+	let handled = 0;
+
+	for (const file of wanted.slice(from, from + MAX_FILES_PER_RUN)) {
 		if (ports.deadline !== undefined && now() >= ports.deadline) {
 			// Left rather than killed. The caller marks the run unfinished and records the cursor, so the next run
 			// resumes instead of starting again.
 			stoppedEarly = true;
 			break;
 		}
+
+		handled += 1;
 
 		let stat: { size?: number; mtime?: number; isDirectory: boolean };
 		try {
@@ -237,5 +263,5 @@ export async function collectFrom(
 		if (ports.recordProgress) await ports.recordProgress(totals);
 	}
 
-	return { totals, outcomes, evaluations, stoppedEarly };
+	return { totals, outcomes, evaluations, stoppedEarly, resumed: from + handled };
 }
