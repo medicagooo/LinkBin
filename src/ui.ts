@@ -93,7 +93,31 @@ export function renderIndexPage(locale: Locale = 'en'): string {
 
   <div id="setup"></div>
 
-  <main class="grid">
+  <!--
+    The gate. Nothing behind it is fetched until authentication succeeds, so an unauthenticated
+    visitor sees a sign-in form rather than a broken-looking empty interface — and, more to the point,
+    the management calls are never even attempted without a session.
+  -->
+  <section class="glass gate" id="gate" hidden aria-labelledby="gate-h">
+    <h2 id="gate-h"></h2>
+    <p class="lede" id="gate-lede"></p>
+    <form id="gate-form" autocomplete="on">
+      <label class="f" id="gate-current-wrap" hidden>
+        <span data-i18n="auth.current"></span>
+        <input id="gate-current" type="password" autocomplete="current-password">
+      </label>
+      <label class="f">
+        <span id="gate-password-label" data-i18n="auth.password"></span>
+        <input id="gate-password" type="password" autocomplete="current-password" required>
+      </label>
+      <div class="actions">
+        <button class="primary" type="submit" id="gate-submit"></button>
+      </div>
+    </form>
+    <p class="hint" id="gate-hint"></p>
+  </section>
+
+  <main class="grid" id="app" hidden>
     <section class="glass rail" aria-labelledby="hosts-h">
       <h2 id="hosts-h" data-i18n="hosts.title">Hosts</h2>
       <p class="lede" data-i18n="hosts.lede"></p>
@@ -159,6 +183,90 @@ export function renderIndexPage(locale: Locale = 'en'): string {
   var BOOT = { locale: ${JSON.stringify(locale)}, locales: ${JSON.stringify(LOCALES)}, labels: ${JSON.stringify(LOCALE_LABELS)} };
 
   var T = ${translationsLiteral()};
+
+  // --- the gate ------------------------------------------------------------------------------
+  /**
+   * Decides what the visitor sees before anything else runs.
+   *
+   * Three states, and the difference between the first two matters: a deployment with no password
+   * offers to create one, and a deployment with a password asks for it. The third is the normal case,
+   * where the interface simply loads.
+   */
+  var authMode = 'loading';
+
+  function showGate(mode, message) {
+    authMode = mode;
+    var gate = $('gate');
+    var app = $('app');
+    gate.hidden = false;
+    app.hidden = true;
+
+    var isSetup = mode === 'setup';
+    $('gate-h').textContent = t(isSetup ? 'auth.setupTitle' : 'auth.signInTitle');
+    $('gate-lede').textContent = t(isSetup ? 'auth.setupLede' : 'auth.signInLede');
+    $('gate-submit').textContent = t(isSetup ? 'auth.setupAction' : 'auth.signInAction');
+    $('gate-password').setAttribute('autocomplete', isSetup ? 'new-password' : 'current-password');
+    $('gate-hint').textContent = message ? message : t(isSetup ? 'auth.setupHint' : '');
+    $('gate-hint').className = message ? 'hint error' : 'hint';
+    $('gate-password').value = '';
+    $('gate-password').focus();
+  }
+
+  function hideGate() {
+    authMode = 'in';
+    $('gate').hidden = true;
+    $('app').hidden = false;
+    $('setup').hidden = false;
+  }
+
+  function authState() {
+    return api('/api/auth/state').then(function (r) {
+      if (r.body.configured && r.body.signedIn) {
+        hideGate();
+        refreshAll();
+      } else if (r.body.configured) {
+        // Authenticated pages exist but this visitor has no session yet.
+        $('setup').hidden = true;
+        showGate('signin');
+      } else {
+        $('setup').hidden = true;
+        showGate('setup');
+      }
+    });
+  }
+
+  $('gate-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    var password = $('gate-password').value;
+    var button = $('gate-submit');
+    button.disabled = true;
+
+    var request =
+      authMode === 'setup'
+        ? api('/api/auth/setup', { method: 'POST', body: JSON.stringify({ password: password }) })
+        : api('/api/auth/login', { method: 'POST', body: JSON.stringify({ password: password }) });
+
+    request.then(function (r) {
+      button.disabled = false;
+      if (r.ok && r.body.ok) {
+        // After setting a password the operator is not signed in yet, so sign in straight away rather
+        // than making them type it twice.
+        if (authMode === 'setup') {
+          api('/api/auth/login', { method: 'POST', body: JSON.stringify({ password: password }) }).then(function () {
+            $('gate-password').value = '';
+            hideGate();
+            refreshAll();
+          });
+        } else {
+          $('gate-password').value = '';
+          hideGate();
+          refreshAll();
+        }
+        return;
+      }
+      showGate(authMode, r.body.error || t('auth.failed'));
+    });
+  });
 
   // --- locale ------------------------------------------------------------------------------
   // Precedence is URL, then the reader's stored choice, then the device, then whatever the server
@@ -720,6 +828,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     applyStaticText();
     renderLangSwitch();
     renderThemeSwitch();
+    if (authMode !== 'in') return;
     loadStatus();
     loadHosts();
     loadRules();
@@ -822,7 +931,12 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     });
   });
 
-  refreshAll();
+  // Boot order matters: the chrome is filled in first so the language and appearance controls work
+  // even on the gate, then authentication decides whether the management panels load at all.
+  applyStaticText();
+  renderLangSwitch();
+  renderThemeSwitch();
+  authState();
 
   // --- layout diagnostic ---------------------------------------------------------------------
   // ?debug=layout lists every element wider than the viewport. A horizontal overflow at a narrow
@@ -957,6 +1071,16 @@ function translationsLiteral(): string {
 			'fact.diskValue': '{free} GB free of {size} GB',
 			'theme.auto': 'Follow the device',
 			'theme.light': 'Light',
+			'auth.setupTitle': 'Choose a password',
+			'auth.setupLede': 'This deployment has no password yet. Whoever sets it first controls the interface, so set it now.',
+			'auth.setupAction': 'Set password and continue',
+			'auth.setupHint': 'At least 12 characters. A phrase you can remember beats a short jumble of symbols.',
+			'auth.signInTitle': 'Sign in',
+			'auth.signInLede': 'This interface manages stored machine credentials, so it is not open.',
+			'auth.signInAction': 'Sign in',
+			'auth.password': 'Password',
+			'auth.current': 'Current password',
+			'auth.failed': 'That did not work.',
 			'theme.dark': 'Dark',
 		},
 		'zh-CN': {
@@ -1041,6 +1165,16 @@ function translationsLiteral(): string {
 			'fact.diskValue': '共 {size} GB，可用 {free} GB',
 			'theme.auto': '跟随设备',
 			'theme.light': '浅色',
+			'auth.setupTitle': '设置密码',
+			'auth.setupLede': '这个部署还没有密码。谁先设置，谁就掌管这个界面，所以现在就设。',
+			'auth.setupAction': '设置密码并继续',
+			'auth.setupHint': '至少 12 个字符。一句你能记住的话，比一串短乱的符号更可靠。',
+			'auth.signInTitle': '登录',
+			'auth.signInLede': '这个界面管理着已存储的主机凭据，因此不对外开放。',
+			'auth.signInAction': '登录',
+			'auth.password': '密码',
+			'auth.current': '当前密码',
+			'auth.failed': '没有成功。',
 			'theme.dark': '深色',
 		},
 		'zh-TW': {
@@ -1125,6 +1259,16 @@ function translationsLiteral(): string {
 			'fact.diskValue': '共 {size} GB，可用 {free} GB',
 			'theme.auto': '跟隨裝置',
 			'theme.light': '淺色',
+			'auth.setupTitle': '設定密碼',
+			'auth.setupLede': '這個部署還沒有密碼。誰先設定，誰就掌管這個介面，所以現在就設。',
+			'auth.setupAction': '設定密碼並繼續',
+			'auth.setupHint': '至少 12 個字元。一句你能記住的話，比一串短亂的符號更可靠。',
+			'auth.signInTitle': '登入',
+			'auth.signInLede': '這個介面管理著已儲存的主機憑證，因此不對外開放。',
+			'auth.signInAction': '登入',
+			'auth.password': '密碼',
+			'auth.current': '目前密碼',
+			'auth.failed': '沒有成功。',
 			'theme.dark': '深色',
 		},
 		ja: {
@@ -1209,6 +1353,16 @@ function translationsLiteral(): string {
 			'fact.diskValue': '{size} GB 中 {free} GB 空き',
 			'theme.auto': '端末に合わせる',
 			'theme.light': 'ライト',
+			'auth.setupTitle': 'パスワードを設定',
+			'auth.setupLede': 'この配備にはまだパスワードがありません。最初に設定した人がこの画面を管理することになるので、今設定してください。',
+			'auth.setupAction': '設定して続ける',
+			'auth.setupHint': '12 文字以上。覚えられる一文のほうが、短い記号の羅列より安全です。',
+			'auth.signInTitle': 'サインイン',
+			'auth.signInLede': 'この画面は保存されたマシンの認証情報を扱うため、公開していません。',
+			'auth.signInAction': 'サインイン',
+			'auth.password': 'パスワード',
+			'auth.current': '現在のパスワード',
+			'auth.failed': 'うまくいきませんでした。',
 			'theme.dark': 'ダーク',
 		},
 	};
@@ -1427,6 +1581,18 @@ body {
 .segbtn.active { background: var(--glass); color: var(--fg); font-weight: 640; box-shadow: var(--inset); }
 .segbtn.icon { padding: 5px 9px; font-size: 14px; line-height: 1; }
 .segbtn:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+
+/* ---------- the gate ---------- */
+/* Centred and narrow: it holds one field, and a full-width form for a single input reads as a form
+   that lost its content. */
+.gate { max-width: 460px; margin: 8vh auto 0; padding: 26px 26px 24px; }
+.gate h2 { font-size: 21px; letter-spacing: -.02em; margin-bottom: 6px; }
+.gate .lede { margin-bottom: 18px; }
+.gate form { display: grid; gap: 12px; }
+.gate .actions { margin-top: 4px; }
+.gate .actions button { width: 100%; }
+.hint.error { color: var(--err); }
+@media (max-width: 560px) { .gate { margin-top: 4vh; padding: 20px 18px; } }
 
 /* ---------- headings ---------- */
 h2 { font-size: 15px; font-weight: 660; letter-spacing: -.005em; margin: 0 0 4px; }

@@ -74,8 +74,12 @@ describe('schema bootstrap', () => {
 		expect(body.objects).toContain('objects');
 	});
 
-	it('reports whether the schema is present, and names what is missing when it is not', async () => {
+	it('reports the schema is applied, through a route reachable before signing in', async () => {
+		// `/api/status` is in the public set on purpose: the interface has to be able to say "the tables
+		// are missing" before anyone can sign in, because on a fresh deployment there is nowhere to store
+		// a password yet.
 		const res = await call('/api/status');
+		expect(res.status).toBe(200);
 		const body: any = await res.json();
 		expect(body.schema.ready).toBe(true);
 		expect(body.schema.missing).toEqual([]);

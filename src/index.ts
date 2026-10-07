@@ -30,6 +30,18 @@ import { credentialFingerprint, decryptField, encryptField, generateMasterKey } 
 import { getHost, listHosts, nowIso, rulesForHost, slugify, type HostRow, type SourceRuleRow } from './db';
 import { LOCALES, pickLocale, renderIndexPage, type Locale } from './ui';
 import { statementsOf } from './sql';
+import {
+	attemptLimits,
+	hashPassword,
+	minPasswordLength,
+	newNonce,
+	newSalt,
+	passwordProblem,
+	sessionMaxAgeSeconds,
+	signSession,
+	timingSafeEqual,
+	verifySession,
+} from './auth';
 // Wrangler's default bundling treats `.sql` as a `Text` module, so these are plain strings at
 // runtime. Importing the migration files keeps the CLI path and the in-Worker path on one schema.
 // A new migration must be added here AND to the list below, or a CLI-less deployment would never
@@ -66,10 +78,14 @@ class HttpError extends Error {
 	}
 }
 
-function json(body: unknown, status = 200): Response {
+function json(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
 	return new Response(JSON.stringify(body, null, 2), {
 		status,
-		headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+		headers: {
+			'content-type': 'application/json; charset=utf-8',
+			'cache-control': 'no-store',
+			...headers,
+		},
 	});
 }
 
@@ -191,6 +207,211 @@ async function schemaStatus(env: Env): Promise<{ ready: boolean; missing: string
 	const { results } = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','index')").all<{ name: string }>();
 	const present = new Set((results ?? []).map((r) => r.name));
 	return { ready: required.every((t) => present.has(t)), missing: required.filter((t) => !present.has(t)) };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Authentication
+// ---------------------------------------------------------------------------------------------
+
+const SESSION_COOKIE = 'linkbin_session';
+
+/**
+ * Routes reachable without signing in.
+ *
+ * `/api/auth/*` obviously, or there would be no way in. `/api/admin/apply-schema` is here because on a
+ * fresh deployment the tables do not exist yet, so there is nowhere to store a password and no way to
+ * authenticate — the bootstrap has to precede the lock. It is idempotent, creates only tables and
+ * indexes, and reads nothing, so the exposure is bounded to "someone could ensure the schema exists".
+ * Everything else, including every route that touches a stored credential, requires a session.
+ */
+function isPublicApi(path: string): boolean {
+	if (path.startsWith('/api/auth/')) return true;
+	if (path === '/api/admin/apply-schema') return true;
+	// Needed before a password can exist, and it exposes no credential.
+	if (path === '/api/status') return true;
+	return false;
+}
+
+/** The master key, or a test-only stand-in so the suite does not need a real secret. */
+function signingKey(env: Env): string {
+	return env.SSH_MASTER_KEY ?? 'linkbin-test-key-not-for-deployment';
+}
+
+interface AuthRow {
+	salt: string;
+	hash: string;
+	iterations: number;
+	changed_at: string;
+	sessions_revoked_at: string;
+}
+
+async function authRow(env: Env): Promise<AuthRow | null> {
+	return await env.DB.prepare('SELECT salt, hash, iterations, changed_at, sessions_revoked_at FROM auth_secret WHERE id = 1').first<AuthRow>();
+}
+
+/** Reads a timestamp as epoch milliseconds; 0 when absent, so a missing floor blocks nothing. */
+function millis(iso: string | null | undefined): number {
+	if (!iso) return 0;
+	const value = Date.parse(iso);
+	return Number.isFinite(value) ? value : 0;
+}
+
+/** The instant before which a session is no longer honoured. */
+async function sessionFloor(env: Env): Promise<number> {
+	const row = await authRow(env);
+	if (!row) return 0;
+	return Math.max(millis(row.changed_at), millis(row.sessions_revoked_at));
+}
+
+function readSessionToken(request: Request): string | null {
+	const cookie = request.headers.get('cookie');
+	if (cookie) {
+		for (const part of cookie.split(';')) {
+			const [name, ...rest] = part.trim().split('=');
+			if (name === SESSION_COOKIE) return rest.join('=') || null;
+		}
+	}
+	// A bearer token as well as a cookie, so a non-browser caller does not have to fake a cookie jar.
+	const auth = request.headers.get('authorization');
+	if (auth && /^Bearer\s+/i.test(auth)) return auth.replace(/^Bearer\s+/i, '').trim() || null;
+	return null;
+}
+
+async function isSignedIn(env: Env, request: Request): Promise<boolean> {
+	const token = readSessionToken(request);
+	if (!token) return false;
+	const check = await verifySession(signingKey(env), token, await sessionFloor(env));
+	return check.valid;
+}
+
+/**
+ * Failed attempts from one caller within the window. Counted, not incremented, so it cannot drift out
+ * of step with what actually happened.
+ *
+ * Scoped to the caller deliberately. Counting failures globally would let anyone lock the operator out
+ * simply by failing repeatedly — turning a protection into a denial of service against the only
+ * account this deployment has.
+ */
+async function recentFailures(env: Env, remote: string): Promise<number> {
+	const { windowSeconds } = attemptLimits();
+	const since = new Date((Math.floor(Date.now() / 1000) - windowSeconds) * 1000).toISOString();
+	const row = await env.DB.prepare('SELECT COUNT(*) AS n FROM auth_attempts WHERE succeeded = 0 AND at >= ? AND remote IS ?')
+		.bind(since, remote)
+		.first<{ n: number }>();
+	return Number(row?.n ?? 0);
+}
+
+/** The caller's address, as far as this deployment can tell. */
+function callerAddress(request: Request): string {
+	return request.headers.get('cf-connecting-ip') ?? request.headers.get('x-forwarded-for') ?? 'unknown';
+}
+
+async function recordAttempt(env: Env, succeeded: boolean, remote: string | null): Promise<void> {
+	// One statement, so no atomicity is needed; a lost row weakens the limit slightly rather than
+	// breaking anything, which is the right way round for a rate limiter with no transactions.
+	await env.DB.prepare('INSERT INTO auth_attempts (at, succeeded, remote) VALUES (?, ?, ?)')
+		.bind(nowIso(), succeeded ? 1 : 0, remote)
+		.run();
+}
+
+function sessionCookieHeader(token: string, maxAge: number): string {
+	// HttpOnly so a script cannot read it, SameSite=Lax so a cross-site form post cannot use it, and
+	// Secure so it is not sent over plain HTTP. `Path=/` because the whole interface needs it.
+	return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=${maxAge}`;
+}
+
+function clearedCookieHeader(): string {
+	return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0`;
+}
+
+async function handleAuth(path: string, request: Request, env: Env): Promise<Response> {
+	const row = await authRow(env);
+
+	if (path === '/api/auth/state' && request.method === 'GET') {
+		return json({
+			configured: row !== null,
+			signedIn: row !== null && (await isSignedIn(env, request)),
+			minPasswordLength: minPasswordLength(),
+		});
+	}
+
+	// First visit: set the password. Refused once one exists, so this cannot be used to overwrite it —
+	// the check is the row's existence, not a flag that could be reset.
+	if (path === '/api/auth/setup' && request.method === 'POST') {
+		if (row) throw new HttpError(409, 'a password is already set; sign in and change it instead');
+
+		const body = (await request.json()) as { password?: string };
+		const problem = passwordProblem(String(body.password ?? ''));
+		if (problem) throw new HttpError(400, problem);
+
+		const salt = newSalt();
+		const hash = await hashPassword(body.password!, salt);
+		const now = nowIso();
+		await env.DB.prepare(
+			'INSERT INTO auth_secret (id, salt, hash, iterations, changed_at, sessions_revoked_at, created_at) VALUES (1, ?, ?, ?, ?, ?, ?)',
+		)
+			.bind(salt, hash, 210_000, now, now, now)
+			.run();
+
+		return json({ ok: true, configured: true });
+	}
+
+	if (path === '/api/auth/login' && request.method === 'POST') {
+		if (!row) throw new HttpError(409, 'no password is set yet');
+
+		const remote = callerAddress(request);
+		const { max } = attemptLimits();
+		if ((await recentFailures(env, remote)) >= max) {
+			throw new HttpError(429, 'too many failed attempts; wait a few minutes and try again');
+		}
+
+		const body = (await request.json()) as { password?: string };
+		const candidate = String(body.password ?? '');
+		const hash = await hashPassword(candidate, row.salt, Number(row.iterations));
+		const ok = timingSafeEqual(hash, row.hash);
+		await recordAttempt(env, ok, remote);
+
+		if (!ok) throw new HttpError(401, 'that password is not correct');
+
+		const token = await signSession(signingKey(env), Date.now(), newNonce());
+		return json({ ok: true, expiresInSeconds: sessionMaxAgeSeconds() }, 200, {
+			'set-cookie': sessionCookieHeader(token, sessionMaxAgeSeconds()),
+		});
+	}
+
+	// Sign-out is server-enforced: the floor moves past this token, so it stops working immediately
+	// rather than only being forgotten by whatever was holding it.
+	if (path === '/api/auth/logout' && request.method === 'POST') {
+		if (row) {
+			await env.DB.prepare('UPDATE auth_secret SET sessions_revoked_at = ? WHERE id = 1').bind(nowIso()).run();
+		}
+		return json({ ok: true }, 200, { 'set-cookie': clearedCookieHeader() });
+	}
+
+	if (path === '/api/auth/password' && request.method === 'POST') {
+		if (!row) throw new HttpError(409, 'no password is set yet');
+		if (!(await isSignedIn(env, request))) throw new HttpError(401, 'sign in first');
+
+		const body = (await request.json()) as { current?: string; next?: string };
+		const currentHash = await hashPassword(String(body.current ?? ''), row.salt, Number(row.iterations));
+		if (!timingSafeEqual(currentHash, row.hash)) throw new HttpError(401, 'the current password is not correct');
+
+		const problem = passwordProblem(String(body.next ?? ''));
+		if (problem) throw new HttpError(400, problem);
+
+		// A fresh salt: reusing one across two passwords would let a precomputed table for the old
+		// password apply to the new one.
+		const salt = newSalt();
+		const hash = await hashPassword(body.next!, salt);
+		const now = nowIso();
+		await env.DB.prepare('UPDATE auth_secret SET salt = ?, hash = ?, iterations = ?, changed_at = ?, sessions_revoked_at = ? WHERE id = 1')
+			.bind(salt, hash, 210_000, now, now)
+			.run();
+
+		return json({ ok: true }, 200, { 'set-cookie': clearedCookieHeader() });
+	}
+
+	throw new HttpError(404, `unknown auth route ${path}`);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -576,6 +797,20 @@ export default {
 		const method = request.method;
 
 		try {
+			// --- authentication ---------------------------------------------------------------
+			// Auth routes come first, and the guard below comes before anything that touches a stored
+			// credential. The interface itself stays public so there is somewhere to sign in.
+			if (path.startsWith('/api/auth/')) return await handleAuth(path, request, env);
+
+			if (path.startsWith('/api/') && !isPublicApi(path)) {
+				if (!(await isSignedIn(env, request))) {
+					// A single refusal for every protected route, whether or not the route exists. Saying
+					// "not found" for an unknown one and "unauthorised" for a known one would let a stranger
+					// map the API by probing it.
+					throw new HttpError(401, 'sign in to use this');
+				}
+			}
+
 			if (path === '/' && method === 'GET') {
 				// The server picks the initial locale from Accept-Language so the first paint is already
 				// in the reader's language; the client can then switch instantly without a reload.
@@ -587,7 +822,15 @@ export default {
 				});
 			}
 
-			if (path === '/api/status' && method === 'GET') {
+			/**
+ * The answer to "is this deployment usable yet", reachable without signing in.
+ *
+ * Public because a fresh deployment has no tables and therefore nowhere to store a password, so the
+ * interface must be able to report that state before anyone can authenticate. It deliberately exposes
+ * nothing sensitive: whether a password is set, whether storage is bound, and which tables are
+ * present. Routes that touch a stored credential are all behind the session check.
+ */
+if (path === '/api/status' && method === 'GET') {
 				const schema = await schemaStatus(env).catch((err) => ({ ready: false, missing: [`error: ${(err as Error).message}`] }));
 				// Host count is included because the ceiling is only useful if it is visible: an
 				// operator who cannot see "49 of 50" discovers the limit by being refused.

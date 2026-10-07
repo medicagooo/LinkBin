@@ -88,3 +88,41 @@ CREATE TABLE IF NOT EXISTS object_sources (
 );
 
 CREATE INDEX IF NOT EXISTS idx_object_sources_source ON object_sources (source_object_id);
+
+-- The operator's password, for the single-operator authentication.
+--
+-- One row, ever: this is a tool for one person, so there is no user table and no roles. The row's
+-- presence IS "a password has been set", which is how the first-visit setup path knows to close
+-- itself — and closing it is enforced by this row existing rather than by a flag someone could reset.
+--
+-- Only a salted, deliberately slow hash is kept. The plaintext is never stored, never logged, and
+-- never returned, so a database leak does not hand over the interface. `iterations` is stored beside
+-- the hash so the cost can be raised later without invalidating existing passwords.
+--
+-- `changed_at` is what makes "changing the password ends existing sessions" true. Sessions are signed
+-- cookies rather than rows, so there is nothing to delete; instead a session carries the moment it
+-- was issued, and any session issued before this timestamp is refused.
+CREATE TABLE IF NOT EXISTS auth_secret (
+    id                  INTEGER PRIMARY KEY CHECK (id = 1),
+    salt                TEXT NOT NULL,
+    hash                TEXT NOT NULL,
+    iterations          INTEGER NOT NULL,
+    changed_at          TEXT NOT NULL,
+    sessions_revoked_at TEXT NOT NULL,
+    created_at          TEXT NOT NULL
+);
+
+-- Raised on failed sign-in attempts, so the one secret standing between the internet and the stored
+-- machine credentials cannot be ground down by brute force.
+--
+-- One row per attempt rather than a counter, because a counter needs updating on both success and
+-- failure and a failed update would silently stop limiting anything. A time-windowed count over rows
+-- cannot get out of step with what actually happened.
+CREATE TABLE IF NOT EXISTS auth_attempts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    at         TEXT NOT NULL,
+    succeeded  INTEGER NOT NULL DEFAULT 0,
+    remote     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_attempts_at ON auth_attempts (at DESC);
