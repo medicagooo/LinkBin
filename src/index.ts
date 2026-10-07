@@ -251,9 +251,25 @@ function isPublicApi(path: string): boolean {
 	return false;
 }
 
-/** The master key, or a test-only stand-in so the suite does not need a real secret. */
+/**
+ * The key session tokens are signed with.
+ *
+ * It refuses when the deployment has no master key rather than substituting a stand-in, and that change came
+ * from an adversarial audit. The stand-in was a constant published in this repository, so a deployment that
+ * had somehow lost its secret would not merely fail — it would accept a session minted by **anyone who read
+ * the source**, and the share routes would then be openable by a stranger. Failing closed turns a silent
+ * catastrophe into a visible misconfiguration.
+ *
+ * The message names the fix rather than the symptom, because the person reading it is the operator.
+ */
 function signingKey(env: Env): string {
-	return env.SSH_MASTER_KEY ?? 'linkbin-test-key-not-for-deployment';
+	if (!env.SSH_MASTER_KEY) {
+		throw new HttpError(
+			503,
+			'this deployment has no SSH_MASTER_KEY set, so sessions cannot be signed and nothing can be authenticated. Set it as a Worker secret.',
+		);
+	}
+	return env.SSH_MASTER_KEY;
 }
 
 interface AuthRow {
@@ -333,9 +349,20 @@ async function recentFailures(env: Env, remote: string): Promise<number> {
 	return Number(row?.n ?? 0);
 }
 
-/** The caller's address, as far as this deployment can tell. */
+/**
+ * The caller's address, as far as this deployment can tell.
+ *
+ * **Only the Cloudflare-set header is trusted.** An adversarial audit showed the previous version falling back
+ * to `x-forwarded-for`, which Cloudflare documents as *client-supplied* and appended to rather than replaced —
+ * so the rate-limit bucket key was chosen by the caller, and rotating one character in a header reset the
+ * count. A rate limit an attacker can reset is not a rate limit.
+ *
+ * When Cloudflare has not set the header, the caller is unknown **and that is recorded as such** rather than
+ * being folded into the same bucket as everybody else. Collapsing all unknown callers together was itself a
+ * denial of service: an attacker's failures made the operator's correct password answer `429`.
+ */
 function callerAddress(request: Request): string {
-	return request.headers.get('cf-connecting-ip') ?? request.headers.get('x-forwarded-for') ?? 'unknown';
+	return request.headers.get('cf-connecting-ip') ?? 'unknown-caller';
 }
 
 async function recordAttempt(env: Env, succeeded: boolean, remote: string | null): Promise<void> {
@@ -379,11 +406,31 @@ async function handleAuth(path: string, request: Request, env: Env): Promise<Res
 		const salt = newSalt();
 		const hash = await hashPassword(body.password!, salt);
 		const now = nowIso();
-		await env.DB.prepare(
-			'INSERT INTO auth_secret (id, salt, hash, iterations, changed_at, sessions_revoked_at, created_at) VALUES (1, ?, ?, ?, ?, ?, ?)',
-		)
-			.bind(salt, hash, 210_000, now, now, now)
-			.run();
+
+		// The insert is the FIRST statement that needs the table to exist, and it is attempted here rather than
+		// guarded earlier so that the refusal names the actual remedy. A deployment whose schema is unapplied
+		// reaches this route by design — it is exempt from the schema guard so a first visitor can bootstrap —
+		// and used to answer with a raw `no such table: auth_secret` from the driver. An adversarial audit
+		// proved it, along with the second case below.
+		try {
+			await env.DB.prepare(
+				'INSERT INTO auth_secret (id, salt, hash, iterations, changed_at, sessions_revoked_at, created_at) VALUES (1, ?, ?, ?, ?, ?, ?)',
+			)
+				.bind(salt, hash, 210_000, now, now, now)
+				.run();
+		} catch (err) {
+			const message = (err as Error).message ?? '';
+			if (/no such table/i.test(message)) {
+				throw new HttpError(503, 'the database has no tables yet, so there is nowhere to store a password. Apply the schema first.');
+			}
+			// Two setups racing: both read "no password yet", and the primary key refuses the loser. That is a
+			// clean conflict rather than a fault — the winner's password stands and the loser was simply too
+			// late — so it answers as one instead of surfacing a constraint error as a 500.
+			if (/UNIQUE constraint failed/i.test(message)) {
+				throw new HttpError(409, 'a password was set by another request a moment ago; sign in with it instead');
+			}
+			throw err;
+		}
 
 		return json({ ok: true, configured: true });
 	}
@@ -413,10 +460,17 @@ async function handleAuth(path: string, request: Request, env: Env): Promise<Res
 
 	// Sign-out is server-enforced: the floor moves past this token, so it stops working immediately
 	// rather than only being forgotten by whatever was holding it.
+	//
+	// **It now requires the session it is ending**, and that is a fix from an adversarial audit rather than a
+	// nicety. The floor is a single global value, so an unauthenticated caller could move it and end the
+	// operator's session — repeatably, with no credential and no limit. Anyone who could reach the Worker
+	// could therefore keep the only account permanently signed out. The project had already learned this shape
+	// once, in the rate limiter: a global switch a stranger can move is a denial of service against the single
+	// operator. Someone with no session has nothing to sign out of, so refusing is also the honest answer.
 	if (path === '/api/auth/logout' && request.method === 'POST') {
-		if (row) {
-			await env.DB.prepare('UPDATE auth_secret SET sessions_revoked_at = ? WHERE id = 1').bind(nowIso()).run();
-		}
+		if (!row) throw new HttpError(409, 'no password is set yet');
+		if (!(await isSignedIn(env, request))) throw new HttpError(401, 'sign in first');
+		await env.DB.prepare('UPDATE auth_secret SET sessions_revoked_at = ? WHERE id = 1').bind(nowIso()).run();
 		return json({ ok: true }, 200, { 'set-cookie': clearedCookieHeader() });
 	}
 
@@ -482,13 +536,28 @@ async function shareByToken(db: D1Database, token: string): Promise<ShareJoinRow
 	}
 }
 
+/**
+ * The name a recipient sees for the file.
+ *
+ * Trailing separators are stripped **before** splitting, and that order is a fix from an adversarial audit.
+ * A stored path ending in a separator — `/srv/private/dumps/` — splits to an empty last segment, so the
+ * fallback handed the recipient the **entire source path**, which is exactly the directory layout the share
+ * view exists to withhold.
+ */
+function filenameOf(path: string): string {
+	const trimmed = path.replace(/\/+$/, '');
+	if (!trimmed) return 'download';
+	const last = trimmed.split('/').pop();
+	return last && last.length > 0 ? last : 'download';
+}
+
 /** What the recipient is told before any bytes move. Never includes the object key or the machine. */
 function publicShareView(row: ShareJoinRow): Record<string, unknown> {
 	return {
 		token: row.token,
-		// The filename is the last path segment, not the full source path: the recipient has no business
-		// learning the directory layout of a machine they were not given access to.
-		filename: row.path.split('/').pop() || row.path,
+		// The file name, never the source path: the recipient has no business learning the directory layout of
+		// a machine they were not given access to.
+		filename: filenameOf(row.path),
 		sizeBytes: row.size_bytes,
 		expiresAt: row.expires_at,
 		needsPassword: Boolean(row.password_hash),
@@ -634,7 +703,7 @@ async function serveShare(env: Env, request: Request, token: string, baseUrl: st
 		.bind(new Date().toISOString(), row.token)
 		.run();
 
-	const filename = row.path.split('/').pop() || 'download';
+	const filename = filenameOf(row.path);
 
 	// Streamed, not buffered: the per-file limit is far larger than this runtime's memory, so reading the
 	// object into a variable here would defeat the entire streaming pipeline that stored it.
@@ -683,6 +752,13 @@ interface StorageUsage {
  * charged — a figure counting only live objects could pass the ceiling while the real total was over it.
  * `object_flags` is joined rather than a column on `objects`, because adding a column is the one migration
  * change that cannot be applied twice (see migration 0003).
+ *
+ * **Bounded at 5000 rows, and the trade is stated rather than hidden.** An adversarial audit found this
+ * reading every row with no limit. The limit is not free: past 5000 objects the total under-reports what is
+ * held, so the budget would be judged on a subset — the wrong direction for a storage ceiling to be wrong in.
+ * 5000 is at the point where the documented design says "this is as large as it gets": 50 machines each
+ * holding 100 files. `objectCount` is returned alongside the total precisely so a deployment large enough to
+ * reach the bound is visible rather than quietly mis-measured.
  */
 async function storageObjects(db: D1Database): Promise<BudgetObject[]> {
 	const { results } = await db
@@ -694,7 +770,9 @@ async function storageObjects(db: D1Database): Promise<BudgetObject[]> {
 			        CASE WHEN o.deleted_at IS NULL THEN 0 ELSE 1 END AS deleted,
 			        o.created_at        AS created_at
 			 FROM objects o
-			 LEFT JOIN object_flags f ON f.object_id = o.id`,
+			 LEFT JOIN object_flags f ON f.object_id = o.id
+			 ORDER BY o.created_at DESC
+			 LIMIT 5000`,
 		)
 		.all<{ id: number; size: number; important: number; superseded: number; deleted: number; created_at: string }>();
 
@@ -1098,8 +1176,17 @@ export default {
 			// not need one. This is the one place where an unauthenticated request can obtain file bytes, and
 			// what bounds it is that a token grants exactly one file and is checked here rather than at storage.
 			if (path.startsWith(PUBLIC_SHARE_PREFIX)) {
-				const token = decodeURIComponent(path.slice(PUBLIC_SHARE_PREFIX.length));
-				if (!token) throw new HttpError(404, 'no share token given');
+				// A token that does not survive decoding is treated as a wrong token rather than as a fault.
+				// `decodeURIComponent` throws on a malformed escape — `/s/%` reached the error handler and
+				// produced a 500 — and a malformed token is exactly what a wrong token is. The audit found
+				// this; the giveaway was a crash on input that a recipient could type by accident.
+				let token: string;
+				try {
+					token = decodeURIComponent(path.slice(PUBLIC_SHARE_PREFIX.length));
+				} catch {
+					token = '';
+				}
+				if (!token) return json({ ok: false, error: 'this link is not valid', reason: 'unknown' }, 404);
 				return await serveShare(env, request, token, new URL(request.url).origin);
 			}
 
@@ -1223,11 +1310,13 @@ if (path === '/api/status' && method === 'GET') {
 			}
 
 			if (path === '/api/shares' && method === 'GET') {
+				// Bounded like every other listing. An adversarial audit found this one unbounded: nothing caps how
+				// many shares can be created, so the response grew with use until it stopped fitting.
 				const { results } = await env.DB.prepare(
 					`SELECT s.*, o.object_key, o.path, o.size_bytes, o.content_hash, o.host_id
 					 FROM shares s
 					 JOIN objects o ON o.id = s.object_id
-					 ORDER BY s.created_at DESC`,
+					 ORDER BY s.created_at DESC LIMIT 200`,
 				).all<ShareJoinRow>();
 				return json({ ok: true, shares: (results ?? []).map(operatorShareView) });
 			}
@@ -1280,8 +1369,12 @@ if (path === '/api/status' && method === 'GET') {
 				const row = await env.DB.prepare('SELECT * FROM collection_runs WHERE id = ?').bind(id).first<RunRow>();
 				if (!row) throw new HttpError(404, 'no run with that id');
 
-				// Ordered by creation so an interrupted run's issues read in the order they happened.
-				const issues = await env.DB.prepare('SELECT * FROM collection_issues WHERE run_id = ? ORDER BY created_at, id')
+				// Ordered by creation so an interrupted run's issues read in the order they happened, and bounded
+				// for the same reason `/api/issues` is: one run can produce an issue per file it could not handle,
+				// so this grew with the machine's contents until it stopped fitting in a response.
+				const issues = await env.DB.prepare(
+					'SELECT * FROM collection_issues WHERE run_id = ? ORDER BY created_at, id LIMIT 200',
+				)
 					.bind(id)
 					.all<IssueRow>();
 
@@ -1332,6 +1425,9 @@ if (path === '/api/status' && method === 'GET') {
 					objects: (rows.results ?? []).map(objectView),
 					total: Number(total?.n ?? 0),
 					limit: query.limit,
+					// Said out loud, because "nothing matched" and "your search was too long to evaluate" look
+					// identical in an empty list and lead to opposite next steps.
+					termTooLong: query.termTooLong,
 				});
 			}
 
@@ -1417,12 +1513,17 @@ if (path === '/api/status' && method === 'GET') {
 			}
 
 			if (path === '/api/rules' && method === 'GET') {
+				// Bounded, like every other listing. An adversarial audit found this unbounded: rules are added one
+				// row per accepted pattern with no cap, so the response grew with use. 500 is generous for a
+				// deployment whose machine ceiling is 50, and still finite.
 				const hostId = url.searchParams.get('hostId');
 				const { results } = hostId
-					? await env.DB.prepare('SELECT * FROM source_rules WHERE host_id IS NULL OR host_id = ? ORDER BY host_id, is_exclude, pattern')
+					? await env.DB.prepare(
+							'SELECT * FROM source_rules WHERE host_id IS NULL OR host_id = ? ORDER BY host_id, is_exclude, pattern LIMIT 500',
+						)
 							.bind(slugify(hostId))
 							.all<SourceRuleRow>()
-					: await env.DB.prepare('SELECT * FROM source_rules ORDER BY host_id, is_exclude, pattern').all<SourceRuleRow>();
+					: await env.DB.prepare('SELECT * FROM source_rules ORDER BY host_id, is_exclude, pattern LIMIT 500').all<SourceRuleRow>();
 				return json({ ok: true, rules: (results ?? []).map(publicRule) });
 			}
 
@@ -1448,12 +1549,33 @@ if (path === '/api/status' && method === 'GET') {
 		} catch (err) {
 			const e = err as Error;
 			const status = e instanceof HttpError ? e.status : 500;
-			// Errors reach the operator, but never carry decrypted material: messages that could are
-			// built only from the host id and the field name. The stack is included because this
-			// Worker is deployed with no type checking in the build, so a shape mistake in a
-			// dependency call surfaces only here — and a stack turns that from guesswork into a line
-			// number. (This is exactly how a bare-string `algorithms.cipher` was found.)
-			return json({ ok: false, error: e.message, name: e.name, status, stack: e.stack }, status);
+
+			// Errors reach the operator, but never carry decrypted material: messages that could are built only
+			// from the host id and the field name.
+			//
+			// **The stack is logged, never returned.** It used to be included, and the reasoning was sound at
+			// the time: this Worker is deployed with no type checking in the build, so a shape mistake in a
+			// dependency call surfaces only here, and a stack turns that from guesswork into a line number —
+			// which is exactly how a bare-string `algorithms.cipher` was found. What that reasoning missed is
+			// that the response also goes to **anonymous callers**: an adversarial audit showed a 401 and a 500
+			// handing out absolute source paths and line numbers to anyone who asked, including through a
+			// malformed share link.
+			//
+			// `observability` is enabled in `wrangler.jsonc`, so the stack is still available to the operator
+			// where it belongs — in the logs — and the caller gets a message they can act on instead.
+			console.error(
+				JSON.stringify({
+					at: 'request-failed',
+					path,
+					method,
+					status,
+					name: e.name,
+					message: e.message,
+					stack: e.stack,
+				}),
+			);
+
+			return json({ ok: false, error: e.message, name: e.name, status }, status);
 		}
 	},
 } satisfies ExportedHandler<Env>;

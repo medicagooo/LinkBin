@@ -32,6 +32,16 @@ import { hashPassword, timingSafeEqual } from './auth';
 export const DEFAULT_SHARE_SECONDS = 2 * 60 * 60;
 
 /**
+ * The shortest share password accepted.
+ *
+ * Raised from four, because an adversarial audit pointed out that a share password is the only thing standing
+ * between a link and its file and this route had **no throttling at all**: a four-character password over a
+ * small alphabet is worth guessing when nothing counts the attempts. Four was chosen for convenience; eight is
+ * chosen so that the absence of throttling matters less.
+ */
+const MIN_SHARE_PASSWORD_LENGTH = 8;
+
+/**
  * The longest lifetime a share may be given.
  *
  * Substantially longer than the default, because a legitimate "I need this for a day" exists — but far
@@ -159,7 +169,25 @@ export async function describeShare(
 export function sharePasswordProblem(password: unknown): string | null {
 	if (typeof password !== 'string') return 'the password must be text';
 	if (password.trim().length === 0) return 'the password cannot be empty; leave it out entirely if the link needs no password';
-	if (password.length < 4) return 'the password must be at least 4 characters';
+	// Control characters are refused for the same measured reason as on the interface password: this runtime's
+	// raw-key import drops trailing NUL bytes, so a password of NULs hashes to the same digest as the empty
+	// string — and a share whose stored digest is the empty string's is served to anyone who submits nothing.
+	// Proved end to end before this rule existed.
+	// eslint-disable-next-line no-control-regex
+	if (/[\u0000-\u001f\u007f]/.test(password)) {
+		return 'the password cannot contain control characters, which are not accepted because they cannot be typed back reliably';
+	}
+	// Surrounding whitespace is refused too, and an adversarial audit is why. A share created with the password
+	// `"secret "` was downloadable with `"secret"`: the emptiness check trimmed and the hash did not, so two
+	// different strings verified against one stored value. Whitespace in a password is legitimate in
+	// principle, but a share password exists to be told to somebody, and one that cannot be typed back
+	// exactly is worse than one refused at creation.
+	if (password !== password.trim()) {
+		return 'the password cannot start or end with a space, because nobody could tell whether one was intended';
+	}
+	if (password.length < MIN_SHARE_PASSWORD_LENGTH) {
+		return `the password must be at least ${MIN_SHARE_PASSWORD_LENGTH} characters`;
+	}
 	return null;
 }
 

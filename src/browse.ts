@@ -55,22 +55,54 @@ export interface ObjectRow {
 /**
  * The sorts the interface offers, each with its tie-break.
  *
- * The tie-break is not cosmetic: rows sharing a timestamp come back in whatever order the database chooses,
- * so without one two identical requests can disagree and a list appears to shuffle on refresh.
+ * A **null-prototype object**, and that is load-bearing rather than stylistic. As a plain object literal this
+ * lookup answered `constructor`, `toString`, `valueOf`, `hasOwnProperty`, `isPrototypeOf` and `__proto__`
+ * with inherited members of `Object.prototype`: `?sort=constructor` resolved to the `Object` function, the
+ * template literal stringified its source into the statement, and the result was `ORDER BY o.function
+ * Object() { [native code] }` — a syntax error rather than the documented fallback. An adversarial audit
+ * found it, along with the fact that the error carried a stack trace to an anonymous caller.
+ *
+ * With no prototype there is nothing to inherit, so the lookup finds only the sorts listed here.
+ *
+ * The tie-break is not cosmetic either: rows sharing a timestamp come back in whatever order the database
+ * chooses, so without one two identical requests can disagree and the list appears to shuffle on refresh.
  */
-const SORTS: Record<BrowseSort, string> = {
+const SORTS: Record<BrowseSort, string> = Object.assign(Object.create(null) as Record<BrowseSort, string>, {
 	newest: 'created_at DESC, id DESC',
 	oldest: 'created_at ASC, id ASC',
 	largest: 'size_bytes DESC, id DESC',
 	smallest: 'size_bytes ASC, id ASC',
 	path: 'path ASC, id ASC',
-};
+});
 
 const DEFAULT_SORT: BrowseSort = 'newest';
 
 /** One page. A browse read is bounded, because an unbounded one grows until it stops fitting in a response. */
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
+
+/**
+ * The most bytes a LIKE pattern may occupy.
+ *
+ * D1 refuses a longer pattern with `LIKE or GLOB pattern too complex`, and the refusal arrives as an **error**
+ * rather than as "no match" — so an ordinary 49-character search term, or a 50-byte directory prefix, turned
+ * the objects page into a 500. An adversarial audit measured the boundary exactly: 48 characters pass, 49
+ * fail.
+ *
+ * A term long enough to exceed this cannot match anything a person meant to type, so it is answered with an
+ * empty result instead of an error. Measured in **bytes** rather than characters, because the limit is on the
+ * pattern as bytes — a non-ASCII search term reaches it sooner, and counting characters would let those
+ * through to the same 500.
+ *
+ * Source: https://developers.cloudflare.com/d1/platform/limits/ — "Maximum characters (bytes) in a LIKE or
+ * GLOB pattern: 50 bytes".
+ */
+const MAX_LIKE_BYTES = 50;
+
+/** True when a LIKE pattern is short enough for the database to accept. */
+export function likePatternFits(pattern: string): boolean {
+	return new TextEncoder().encode(pattern).length <= MAX_LIKE_BYTES;
+}
 
 /**
  * Escapes a LIKE pattern so the user's characters are matched literally.
@@ -95,9 +127,19 @@ function patternToLike(pattern: string): string {
 	return `${escaped}%`;
 }
 
-function conditions(filter: BrowseFilter): { clauses: string[]; params: unknown[] } {
+/**
+ * A clause that matches nothing, used where the alternative is an error.
+ *
+ * The condition is deliberately one the database evaluates as false rather than a placeholder value: the
+ * caller asked something that cannot be answered, so the honest reply is an empty result, not a fault and not
+ * an unfiltered list.
+ */
+const MATCHES_NOTHING = '1 = 0';
+
+function conditions(filter: BrowseFilter): { clauses: string[]; params: unknown[]; tooLong: boolean } {
 	const clauses: string[] = [];
 	const params: unknown[] = [];
+	let tooLong = false;
 
 	// Deleted files are never listed, even when history is asked for: their bytes are gone, so offering a
 	// download that cannot happen would be worse than omitting them.
@@ -111,18 +153,32 @@ function conditions(filter: BrowseFilter): { clauses: string[]; params: unknown[
 
 	const pattern = (filter.pattern ?? '').trim();
 	if (pattern) {
-		clauses.push("path LIKE ? ESCAPE '\\'");
-		params.push(patternToLike(pattern));
+		const like = patternToLike(pattern);
+		if (likePatternFits(like)) {
+			clauses.push("path LIKE ? ESCAPE '\\'");
+			params.push(like);
+		} else {
+			// Refused cleanly instead of handed to a database that answers with an error. See MAX_LIKE_BYTES:
+			// this is reachable with an ordinary directory prefix, and it used to turn the page into a 500.
+			tooLong = true;
+			clauses.push(MATCHES_NOTHING);
+		}
 	}
 
 	const search = (filter.search ?? '').trim();
 	if (search) {
 		// The whole path, not the last segment: searching for a directory name is an obvious thing to do.
-		clauses.push("path LIKE ? ESCAPE '\\'");
-		params.push(`%${escapeLike(search)}%`);
+		const like = `%${escapeLike(search)}%`;
+		if (likePatternFits(like)) {
+			clauses.push("path LIKE ? ESCAPE '\\'");
+			params.push(like);
+		} else {
+			tooLong = true;
+			clauses.push(MATCHES_NOTHING);
+		}
 	}
 
-	return { clauses, params };
+	return { clauses, params, tooLong };
 }
 
 export interface ObjectQuery {
@@ -131,29 +187,38 @@ export interface ObjectQuery {
 	countSql: string;
 	countParams: unknown[];
 	limit: number;
+	/**
+	 * True when a filter term was too long for the database to evaluate, so the result is empty by decision
+	 * rather than because nothing matched. The interface says "your search was too long" for this, which is a
+	 * different and more useful message than "nothing found".
+	 */
+	termTooLong: boolean;
 }
 
 /** Assembles the listing query, and the count that goes with it. */
 export function buildObjectQuery(filter: BrowseFilter): ObjectQuery {
-	const { clauses, params } = conditions(filter);
+	const { clauses, params, tooLong } = conditions(filter);
 	const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
-	// Looked up, never interpolated. An unrecognised value becomes the default rather than an error, since a
-	// bad sort should not break a page.
+	// Looked up, never interpolated, and the lookup is against a prototype-less object so that a value naming
+	// an inherited member cannot reach the statement. See SORTS.
 	const order = SORTS[filter.sort as BrowseSort] ?? SORTS[DEFAULT_SORT];
 
 	const requested = Number(filter.limit);
 	const limit = Number.isFinite(requested) && requested > 0 ? Math.min(Math.floor(requested), MAX_LIMIT) : DEFAULT_LIMIT;
 
+	const qualified = where.replace(/\b(host_id|path|deleted_at|superseded_by)\b/g, 'o.$1');
+
 	return {
 		sql: `SELECT o.*, CASE WHEN f.object_id IS NULL THEN 0 ELSE 1 END AS important
 		      FROM objects o
 		      LEFT JOIN object_flags f ON f.object_id = o.id
-		      ${where.replace(/\b(host_id|path|deleted_at|superseded_by)\b/g, 'o.$1')}
+		      ${qualified}
 		      ORDER BY o.${order} LIMIT ?`,
 		params: [...params, limit],
-		countSql: `SELECT COUNT(*) AS n FROM objects o ${where.replace(/\b(host_id|path|deleted_at|superseded_by)\b/g, 'o.$1')}`,
+		countSql: `SELECT COUNT(*) AS n FROM objects o ${qualified}`,
 		countParams: params,
 		limit,
+		termTooLong: tooLong,
 	};
 }

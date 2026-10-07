@@ -34,6 +34,15 @@ const ATTEMPT_WINDOW_SECONDS = 15 * 60;
 
 const MIN_PASSWORD_LENGTH = 12;
 
+/**
+ * How far a session may be stamped ahead of this server's clock before it is refused.
+ *
+ * Not zero, because the signer and the verifier are the same Worker and their clocks agree — but a token
+ * could in principle be minted moments before a check that happens to land on an earlier millisecond. A
+ * minute is far below the session lifetime and far above any real skew between two calls in one isolate.
+ */
+const CLOCK_TOLERANCE_MS = 60_000;
+
 const encoder = new TextEncoder();
 
 function toBase64(bytes: Uint8Array): string {
@@ -176,7 +185,19 @@ export async function verifySession(master: string, token: string, notBefore: nu
 	// Strictly after: a token minted in the same millisecond as a revocation is refused, which is the
 	// safe direction for a comparison this coarse to be wrong in.
 	if (issuedAt <= notBefore) return invalid;
-	if (issuedAt + SESSION_SECONDS * 1000 < Date.now()) return invalid;
+
+	// A token stamped in the FUTURE is refused outright. This is a real finding from an adversarial audit,
+	// not a theoretical one.
+	//
+	// The floor can only revoke a token whose issued-at is in the past: a password change sets the floor to
+	// now, and a token claiming to have been issued next year stays newer than that floor for as long as it
+	// keeps claiming so. A future-dated token therefore survives every revocation this system has, and only
+	// ages out when the clock eventually catches up. Nothing legitimate mints one — the signer uses its own
+	// clock — so a future timestamp means a forged token or a badly wrong clock, and honouring it is wrong
+	// either way.
+	const clock = Date.now();
+	if (issuedAt > clock + CLOCK_TOLERANCE_MS) return invalid;
+	if (issuedAt + SESSION_SECONDS * 1000 < clock) return invalid;
 
 	return { valid: true, issuedAt };
 }
@@ -200,14 +221,30 @@ export function attemptLimits(): { max: number; windowSeconds: number } {
 /**
  * Rejects a password that would make the single secret trivial.
  *
- * Length is the only rule enforced, deliberately: composition rules ("one digit, one symbol") are
- * well established to push people towards predictable substitutions while adding nothing against an
- * offline attack. A long passphrase is both stronger and easier to remember.
+ * Length is the main rule, deliberately: composition rules ("one digit, one symbol") are well established to
+ * push people towards predictable substitutions while adding nothing against an offline attack. A long
+ * passphrase is both stronger and easier to remember.
+ *
+ * **Control characters are refused too, and that rule is not cosmetic.** Direct measurement on this runtime
+ * showed that its raw-key import **drops trailing NUL bytes**: `hashPassword('P\0')` produces the same digest
+ * as `hashPassword('P')`, and therefore `hashPassword('\0'.repeat(12))` produces the same digest as
+ * `hashPassword('')`. A password of twelve NULs was consequently accepted by the length rule and stored as the
+ * hash of the empty string — after which a sign-in attempt with an **empty password** computed that same
+ * digest and succeeded, issuing a session. A deployment the operator believed was password-protected was open
+ * to anyone who submitted nothing.
+ *
+ * Refusing control characters closes that at the only place it can be closed: the value that gets stored.
+ * Checking at verification instead would leave the unusable password in the database and depend on every
+ * future verification path remembering to special-case it.
  */
 export function passwordProblem(password: string): string | null {
 	if (typeof password !== 'string') return 'a password is required';
 	const trimmed = password.trim();
 	if (trimmed.length === 0) return 'a password is required';
+	// eslint-disable-next-line no-control-regex
+	if (/[\u0000-\u001f\u007f]/.test(password)) {
+		return 'the password cannot contain control characters, which are not accepted because they cannot be typed back reliably';
+	}
 	if (password.length < MIN_PASSWORD_LENGTH) {
 		return `the password must be at least ${MIN_PASSWORD_LENGTH} characters`;
 	}

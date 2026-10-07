@@ -168,17 +168,31 @@ describe('setting a password on a share', () => {
 	it('gives a length message for a short password rather than the empty one', () => {
 		// The two cases must stay distinguishable, or one of the messages is unreachable.
 		const problem = sharePasswordProblem('abc');
-		expect(problem).toMatch(/at least 4/i);
+		expect(problem).toMatch(/at least 8/i);
 		expect(problem).not.toMatch(/empty/i);
 	});
 
 	it('refuses something too short to be worth calling a password', () => {
+		// The minimum is eight rather than four because this route has no throttling: a share password is the
+		// only thing between a link and its file, and a four-character one over a small alphabet is worth
+		// guessing when nothing counts the attempts.
 		expect(sharePasswordProblem('abc')).not.toBeNull();
+		expect(sharePasswordProblem('short')).not.toBeNull();
+		expect(sharePasswordProblem('seven77')).not.toBeNull();
+	});
+
+	it('refuses a password containing control characters, which hash unpredictably', () => {
+		// Measured on this runtime: its raw-key import drops TRAILING NUL bytes, so a password of NULs hashes to
+		// the same digest as the empty string. A share stored that way was served to anyone who submitted
+		// nothing — proved end to end before this rule existed.
+		expect(sharePasswordProblem('abcdefg\u0000')).not.toBeNull();
+		expect(sharePasswordProblem('\u0000\u0000\u0000\u0000')).not.toBeNull();
+		expect(sharePasswordProblem('ab\u0001cd')).not.toBeNull();
 	});
 
 	it('accepts a password of reasonable length', () => {
-		expect(sharePasswordProblem('abcd')).toBeNull();
 		expect(sharePasswordProblem('a much longer shared phrase')).toBeNull();
+		expect(sharePasswordProblem('eightchr')).toBeNull();
 	});
 
 	it('refuses a non-string, so a number or object cannot become a password', () => {

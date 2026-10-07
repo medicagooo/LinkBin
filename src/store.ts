@@ -137,6 +137,19 @@ export async function storeStream(
 	const reader = source.getReader();
 	const digest = new IncrementalSha256();
 
+	/**
+	 * Whether a whole part is held back rather than sent as soon as it is available.
+	 *
+	 * Only worth doing when this upload may use parts, because holding a part back is what lets a source that
+	 * ends on a part boundary be sent as one final part instead of being padded with a forbidden empty one.
+	 *
+	 * It is skipped when the file is known to be small — by its declared size — or when the caller has asked
+	 * for a single write. In those cases everything is sent the moment it is available, so a small file is one
+	 * `put` of exactly its bytes rather than a leftover batch.
+	 */
+	const pipelined =
+		threshold > 0 && !(options.declaredSize !== undefined && options.declaredSize <= threshold);
+
 	/** Bytes read from the machine so far. */
 	let bytes = 0;
 
@@ -158,6 +171,11 @@ export async function storeStream(
 	};
 
 	const abortMultipart = async (): Promise<void> => {
+		// Checks the MODE, not the handle. A throw from `createMultipartUpload` leaves the mode set with no
+		// upload to abort, and checking the handle meant that case skipped cleanup entirely — which then
+		// replaced the original error with whatever failed next. That is how a storage rejection surfaced as
+		// `1 = 0`, a message naming none of the things involved.
+		if (!useMultipart) return;
 		if (!multipart) return;
 		try {
 			// An abandoned upload is cleaned up rather than left holding storage against the budget.
@@ -174,13 +192,29 @@ export async function storeStream(
 		multipart = null;
 	};
 
-	/** Uploads one accumulated part, releasing its memory only once it is committed. */
-	const uploadPart = async (bytes: Uint8Array, final: boolean): Promise<void> => {
+	/**
+	 * Sends one batch, deciding **once** whether this upload uses parts.
+	 *
+	 * The decision is made from the batch size, and the batch size is what makes it correct. An adversarial
+	 * audit proved the previous version wrong in two ways, and both came from deciding per flush instead:
+	 *
+	 *   - `!final` was true for every read-loop flush, so `multipartThreshold: 0` — documented as "one write,
+	 *     never parts" — still uploaded in parts, reporting a resumable id for a file that was never resumable.
+	 *   - With a part size below storage's 5 MiB minimum (permitted only because that same bug skipped the
+	 *     guard), a small file went up in parts and storage refused it **at completion**, after the whole file
+	 *     had been transferred, storing nothing.
+	 *
+	 * Batches are now exactly `partSize` except the last, so the size alone decides: a batch of `partSize` is
+	 * part of a larger file, and anything smaller is the whole file. Nothing depends on knowing the future.
+	 */
+	const sendBatch = async (batch: Uint8Array, isLastPlanned: boolean): Promise<void> => {
 		if (!decided) {
-			// The file is uploaded in parts when it reaches the part size, or when the whole thing has been
-			// read and turns out to be above the threshold. Below both, it is one write.
-			useMultipart = !final || bytes.byteLength > threshold;
+			useMultipart = isLastPlanned ? batch.byteLength > threshold : true;
 			decided = true;
+			// `multipart` stays null when the mode is single-write, and it stays null if this call throws —
+			// which is why `abortMultipart` checks `useMultipart` and not `multipart`. Checking the handle was a
+			// bug: a throw here left the mode set with no upload to abort, so a later failure skipped the abort
+			// entirely and the real error was replaced by the cleanup's own.
 			if (useMultipart) {
 				multipart = await bucket.createMultipartUpload(key);
 				completedUploadId = multipart.uploadId;
@@ -188,31 +222,97 @@ export async function storeStream(
 		}
 
 		if (useMultipart && multipart) {
-			uploaded.push(await multipart!.uploadPart(uploaded.length + 1, bytes));
+			uploaded.push(await multipart.uploadPart(uploaded.length + 1, batch));
+		} else if (useMultipart) {
+			// Multipart was chosen and there is no upload to use: the creation call failed, and its error is on
+			// its way to the caller. Saying so plainly beats a downstream failure that blames something else.
+			throw new Error('the upload could not be started, so nothing was stored');
 		} else {
-			await bucket.put(key, bytes);
+			await bucket.put(key, batch);
 		}
 
 		parts += 1;
-		committedBytes += bytes.byteLength;
-		options.onPart?.(bytes.byteLength);
+		committedBytes += batch.byteLength;
+		options.onPart?.(batch.byteLength);
 		options.onProgress?.(committedBytes);
-		release(bytes.byteLength);
+		release(batch.byteLength);
 	};
 
 	/**
-	 * Uploads whatever is buffered as the final piece.
+	 * Releases buffered bytes one part at a time.
 	 *
-	 * Does nothing when the buffer is empty **and** something has already been uploaded. A run whose last
-	 * chunk exactly filled a part has no tail, and uploading an empty one would add a zero-byte part —
-	 * which storage forbids, and which breaks the rule that every part but the last is the same size.
+	 * A source is free to hand over a chunk larger than the part size — nothing in the `ReadableStream`
+	 * contract prevents it — and the previous version concatenated whatever it had and uploaded it as one part.
+	 * An adversarial audit proved the consequences: peak memory became the chunk rather than the part, and two
+	 * non-final parts of different sizes are refused by storage **at completion**, after the whole transfer.
+	 *
+	 * Subarray views rather than copies: the underlying chunk is released once its last view has been sent, so
+	 * a 12 MiB chunk split across three 5 MiB parts is still held once rather than three times.
+	 */
+	/**
+	 * Sends whole parts, keeping at most one part buffered.
+	 *
+	 * The holdback exists so a source that ends mid-part leaves a final batch of its own size rather than
+	 * forcing a forbidden empty part. It is expressed as "hold back up to one part" rather than "only act when
+	 * two parts are buffered", and the difference is not stylistic: the earlier form returned as soon as the
+	 * buffer dropped below two parts, so the *next* whole part was only sent once a further part had arrived —
+	 * and a file of exactly two parts therefore ended with a second batch of one-and-a-bit parts instead of
+	 * one, which storage refuses at completion after the whole transfer.
+	 *
+	 * `heldBack` is zero when the upload is known to be a single write, so everything available goes at once.
+	 */
+	const drainFullParts = async (holdBack: number): Promise<void> => {
+		// Strictly greater: a full part is sent as soon as there is more than a full part buffered, so what is
+		// held back is the *remainder* rather than the whole part. Anything left when the source ends becomes the
+		// final batch, of whatever size it is, which is what storage requires of a last part.
+		while (bufferedBytes > holdBack && bufferedBytes >= partSize) {
+			// `takeExactly` copies rather than viewing, so the released chunk is genuinely free afterwards and
+			// the buffer's accounting moves by exactly one part.
+			await sendBatch(takeExactly(partSize), false);
+		}
+	};
+
+	/** Takes exactly `count` bytes from the buffer, in order, as one contiguous view where possible. */
+	const takeExactly = (count: number): Uint8Array => {
+		if (buffered.length === 1 && buffered[0].byteLength === count) {
+			const only = buffered[0];
+			buffered = [];
+			bufferedBytes = 0;
+			return only;
+		}
+
+		const out = new Uint8Array(count);
+		let filled = 0;
+		let index = 0;
+		while (filled < count) {
+			const chunk = buffered[index];
+			const need = count - filled;
+			if (chunk.byteLength <= need) {
+				out.set(chunk, filled);
+				filled += chunk.byteLength;
+				index += 1;
+			} else {
+				out.set(chunk.subarray(0, need), filled);
+				buffered[index] = chunk.subarray(need);
+				filled += need;
+			}
+		}
+
+		buffered = buffered.slice(index);
+		bufferedBytes -= count;
+		return out;
+	};
+
+	/**
+	 * Sends whatever remains as the final batch.
+	 *
+	 * Does nothing when the buffer is empty and something has already been sent: a file whose last chunk exactly
+	 * filled a part has no tail, and an empty part is both forbidden by storage and a break of the rule that
+	 * every part but the last is the same size.
 	 */
 	const flushTail = async (): Promise<void> => {
 		if (bufferedBytes === 0 && parts > 0) return;
-		const tail = concat(buffered, bufferedBytes);
-		buffered = [];
-		bufferedBytes = 0;
-		await uploadPart(tail, true);
+		await sendBatch(takeExactly(bufferedBytes), true);
 	};
 
 	try {
@@ -231,7 +331,12 @@ export async function storeStream(
 			}
 
 			const { done, value } = await reader.read();
-			if (done) break;
+
+			if (done) {
+				// The source ended, so whatever is buffered is the file's last batch and may be any size.
+				await flushTail();
+				break;
+			}
 
 			if (value && value.byteLength > 0) {
 				bytes += value.byteLength;
@@ -253,15 +358,12 @@ export async function storeStream(
 				bufferedBytes += value.byteLength;
 			}
 
-			if (bufferedBytes >= partSize) {
-				const part = concat(buffered, bufferedBytes);
-				buffered = [];
-				bufferedBytes = 0;
-				await uploadPart(part, false);
-			}
+			// A whole part is held back only when this upload may use parts, so that a source ending on a part
+			// boundary becomes a final part of its own size instead of a forbidden empty one. When the file is
+			// known small, or the caller asked for a single write, nothing is held back and everything available
+			// is sent at once.
+			await drainFullParts(pipelined ? partSize : 0);
 		}
-
-		await flushTail();
 
 		if (useMultipart && multipart) {
 			await multipart!.complete(uploaded);
