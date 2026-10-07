@@ -208,6 +208,59 @@ describe('a first collection', () => {
 describe('what is not collected', () => {
 	beforeEach(reset);
 
+	it('records a capacity refusal as an issue naming capacity, so a full store has an answer', async () => {
+		// Ticket 07's last criterion, and it could not be met until now: `collection_issues.run_id` is a NOT NULL
+		// foreign key to a run, so a capacity refusal had nowhere to be written until collection created runs.
+		// "Why did this stop syncing" now has an answer that names capacity rather than going silent.
+		//
+		// The store is filled by claiming large sizes rather than by writing gigabytes: the budget arithmetic reads
+		// `size_bytes`, and the refusal happens before any read, so what is being tested does not need real bytes.
+		await env.BUCKET.put('objects/web-01/filler', new TextEncoder().encode('x'));
+		await env.DB.prepare(
+			`INSERT INTO objects (host_id, path, object_key, size_bytes, content_hash, created_at)
+			 VALUES ('web-01', '/filler', 'objects/web-01/filler', ?, 'filler', '2026-01-01T00:00:00.000Z')`,
+		)
+			.bind(10 * 1024 * 1024 * 1024 - 10)
+			.run();
+
+		await addRule('/var/log/*.log');
+		const body = (await collect(machine({ '/var/log': [{ name: 'app.log', content: 'x', size: 1000 }] }))).body;
+
+		expect(body.totals.stored, 'nothing was stored, because there was no room').toBe(0);
+		expect(body.totals.failed).toBe(1);
+
+		const issues = await issuesFor(body.runId);
+		expect(issues).toHaveLength(1);
+		expect(issues[0].kind, 'capacity is its own kind, so it reads as a reason and not as a failure to diagnose').toBe('capacity');
+		expect(issues[0].reason).toMatch(/budget/i);
+	});
+
+	it('does not request the bytes of a file refused for capacity', async () => {
+		// The same read-counting argument as the size skip: a refusal that happens after a transfer has already
+		// cost the transfer, and on a metered machine that is the difference that matters.
+		await env.BUCKET.put('objects/web-01/filler', new TextEncoder().encode('x'));
+		await env.DB.prepare(
+			`INSERT INTO objects (host_id, path, object_key, size_bytes, content_hash, created_at)
+			 VALUES ('web-01', '/filler', 'objects/web-01/filler', ?, 'filler', '2026-01-01T00:00:00.000Z')`,
+		)
+			.bind(10 * 1024 * 1024 * 1024 - 10)
+			.run();
+
+		await addRule('/var/log/*.log');
+		let reads = 0;
+		const base = machine({ '/var/log': [{ name: 'app.log', content: 'x', size: 1000 }] });
+		const watched: RemoteHost = {
+			...base,
+			async read(path: string) {
+				reads += 1;
+				return base.read(path);
+			},
+		};
+
+		await collect(watched);
+		expect(reads, 'the bytes were never requested').toBe(0);
+	});
+
 	it('does not collect a file matching no rule', async () => {
 		await addRule('/var/log/*.log');
 		const body = (await collect(machine({ '/var/log': [{ name: 'app.log', content: 'x' }], '/etc': [{ name: 'passwd', content: 'secret' }] }))).body;
