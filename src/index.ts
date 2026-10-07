@@ -35,6 +35,7 @@ import { planAdmission, type BudgetObject } from './budget';
 import { makeRoomFor, type EvictionOutcome } from './evict';
 import { collectFrom, type CollectionPorts } from './collect';
 import { closeRun, collectionPorts, cursorFor, openRun } from './collect-store';
+import { abandonStaleSessions } from './multipart';
 import { buildObjectQuery, type BrowseFilter, type BrowseSort, type ObjectRow } from './browse';
 import { issuesForHost, runDetail, summarizeRuns, toIssueDetail, type IssueRow, type RunRow } from './receipts';
 import { parseCursor, planRun } from './schedule';
@@ -1424,6 +1425,13 @@ export default {
 
 				if (hostRow.enabled !== 1) throw new HttpError(409, 'the chosen machine is disabled');
 
+				// BEFORE the run, not after it. The only uploads that can still be live belong to an invocation that
+				// has already ended, because a run for this machine is not concurrent with itself — so this is the
+				// one moment at which "abandoned" is certain rather than a guess. Doing it here also means a file
+				// that keeps failing cannot accumulate parts run after run, which is a slow leak: each attempt adds
+				// parts, none are released, and the store fills with uploads nothing will ever complete.
+				const cleaned = await abandonStaleSessions(env.DB, env.BUCKET, hostRow.id);
+
 				// THE RUN ROW IS OPENED BEFORE ANYTHING ELSE HAPPENS, so an invocation killed mid-collection leaves
 				// a run that is visibly unfinished rather than no run at all. Everything after this point either
 				// closes it or leaves it `running` for the next invocation to see.
@@ -1519,6 +1527,10 @@ export default {
 					resumeFrom: plan.resumeFrom ?? null,
 					stoppedEarly,
 					totals,
+					// Reported so an operator can see that quota was released on their behalf, and so a cleanup that
+					// could NOT release something is visible rather than silent.
+					reclaimedSessions: cleaned.abandoned.length,
+					unreleasedSessions: cleaned.failed.length,
 					// The files themselves are not returned: this is a receipt, and a machine with a large directory
 					// would make the response unbounded. The interface reads them from the run detail.
 					collectionImplemented: true,

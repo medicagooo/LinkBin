@@ -17,6 +17,7 @@
 import type { CollectedFile } from './collect';
 import { storeStream } from './store';
 import { nowIso } from './db';
+import { closeSession, recordMultipartSession } from './multipart';
 
 /** The per-file ceiling and the total capacity budget. Duplicated from the router deliberately; see below. */
 const MAX_FILE_BYTES = 100 * 1024 * 1024;
@@ -175,6 +176,13 @@ export function collectionPorts(
 			});
 
 			if (!outcome.ok) {
+				// A multipart upload that was started and then failed has already sent parts, and those parts hold
+				// quota until something aborts them. The id is recorded HERE, on the failure path, because that is
+				// the only moment it exists: `storeStream` aborts internally and does not return a resumable id, so
+				// what a later cleanup can do is bounded by what this records.
+				if (outcome.uploadId) {
+					await recordMultipartSession(env.DB, { hostId, path, objectKey: key, uploadId: outcome.uploadId, partSize: options.partSize ?? 0, totalBytes: outcome.committedBytes });
+				}
 				// A file refused for size is a SKIP and everything else is a failure. That distinction is what
 				// `DELIBERATE_KINDS` reads to decide whether an operator needs to look.
 				const tooLarge = /larger than|limit/i.test(outcome.problem ?? '');
@@ -185,6 +193,12 @@ export function collectionPorts(
 			// second read can race a change and record a hash of something that was never uploaded.
 			const hash = outcome.hash ?? '';
 			const bytes = outcome.bytes;
+
+			// A MULTIPART upload that has already been completed leaves its session row behind if one was opened,
+			// and an unfinished one is exactly what cleanup exists for. The distinction matters: a completed upload
+			// whose row stayed 'open' would be aborted by the next run's cleanup, which for a completed upload is a
+			// no-op at storage but a lie in the table.
+			await closeSession(env.DB, hostId, key);
 
 			// Content decides whether a file is new, not the timestamp. A touched file is the same file, and an
 			// edit is detected even when the modification time did not move — which `mtimes` a size check would
