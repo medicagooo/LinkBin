@@ -206,6 +206,12 @@ export function renderIndexPage(locale: Locale = 'en'): string {
         <div id="sharelist"></div>
       </section>
 
+      <section class="glass runs" aria-labelledby="runs-h">
+        <h2 id="runs-h" data-i18n="runs.title">Collection history</h2>
+        <p class="lede" data-i18n="runs.lede"></p>
+        <div id="runlist"></div>
+      </section>
+
       <section class="glass panel" id="panel" aria-labelledby="result-h">
         <h2 id="result-h" data-i18n="result.title">Connection test</h2>
         <div id="result"><p class="lede" data-i18n="result.empty"></p></div>
@@ -1084,6 +1090,136 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     });
   }
 
+  // --- collection history --------------------------------------------------------------------
+  /**
+   * The outcome of a run, as a word rather than as its counts.
+   *
+   * Unfinished is deliberately not called a failure: it means the run stopped part way, which is a
+   * different thing from one that ran and had problems, and only one of them is expected to fix itself.
+   */
+  function outcomeChip(outcome) {
+    if (outcome === 'success') return chip(t('runs.ok'), 'ok');
+    if (outcome === 'problems') return chip(t('runs.problems'), 'warn');
+    return chip(t('runs.unfinished'), 'warn');
+  }
+
+  /** A duration as something readable, or nothing at all when the run never finished. */
+  function duration(seconds) {
+    if (seconds === null || seconds === undefined) return t('runs.noDuration');
+    if (seconds < 90) return seconds + 's';
+    if (seconds < 5400) return Math.round(seconds / 60) + 'm';
+    return Math.round(seconds / 3600) + 'h';
+  }
+
+  function renderRuns(runs) {
+    var host = $('runlist');
+    clear(host);
+
+    if (!runs.length) {
+      var empty = node('div', 'empty');
+      empty.appendChild(node('p', 'empty-line', t('runs.empty')));
+      empty.appendChild(node('p', 'hint', t('runs.emptyHint')));
+      host.appendChild(empty);
+      return;
+    }
+
+    var list = node('ul', 'rules-list');
+    runs.forEach(function (r) {
+      var li = node('li', 'rule');
+
+      var head = node('div', 'share-target');
+      head.appendChild(node('code', 'pattern', r.hostId));
+      head.appendChild(node('span', 'share-size', duration(r.seconds)));
+      li.appendChild(head);
+
+      li.appendChild(outcomeChip(r.outcome));
+
+      // The counts are always shown, including zeros. A run that stored nothing and found nothing is a real
+      // answer, and hiding the zeros would make it indistinguishable from a run with no receipt.
+      var counts = node('span', 'run-counts');
+      counts.textContent = t('runs.counts')
+        .replace('{stored}', r.stored)
+        .replace('{skipped}', r.skipped)
+        .replace('{failed}', r.failed);
+      li.appendChild(counts);
+
+      if (r.issueCount) {
+        var issueChip = chip(t('runs.issues').replace('{n}', r.issueCount), 'warn');
+        li.appendChild(issueChip);
+      }
+
+      var tail = node('div', 'rule-tail');
+      // Only offered when there is something to open: a control that reveals an empty panel reads as broken.
+      if (r.issueCount) {
+        var open = node('button', 'ghost small', t('runs.showIssues'));
+        open.type = 'button';
+        open.addEventListener('click', function () { showRunDetail(r.id); });
+        tail.appendChild(open);
+      }
+      li.appendChild(tail);
+
+      list.appendChild(li);
+    });
+    host.appendChild(list);
+  }
+
+  function showRunDetail(runId) {
+    var host = $('runlist');
+    api('/api/runs/detail?id=' + runId).then(function (r) {
+      if (!r.ok) return;
+      var run = r.body.run;
+
+      var box = node('div', 'run-detail');
+      var title = node('p', 'share-made-title', t('runs.detailTitle').replace('{id}', run.id));
+      box.appendChild(title);
+
+      if (run.byKind && Object.keys(run.byKind).length) {
+        var kinds = node('div', 'share-made-row');
+        Object.keys(run.byKind).sort().forEach(function (kind) {
+          // The kind is translated when a translation exists and shown raw when it does not: too_large is a
+          // database value, and showing it untranslated beats hiding a kind nobody has written a word for.
+          var key = 'runs.kind.' + kind;
+          var label = t(key);
+          kinds.appendChild(chip(label === key ? kind : label, 'quiet'));
+          kinds.appendChild(chip(String(run.byKind[kind]), 'warn'));
+        });
+        box.appendChild(kinds);
+      }
+
+      var list = node('ul', 'rules-list');
+      run.issues.forEach(function (issue) {
+        var li = node('li', 'rule');
+        var target = node('div', 'share-target');
+        target.appendChild(node('code', 'pattern', issue.path || issue.hostId));
+        li.appendChild(target);
+
+        li.appendChild(chip(issue.deliberate ? t('runs.deliberate') : t('runs.fault'), issue.deliberate ? 'quiet' : 'warn'));
+        if (issue.sizeBytes) li.appendChild(chip(bytes(issue.sizeBytes), 'quiet'));
+
+        // The machine's own words, shown as it said them. The whole point of keeping them verbatim is that
+        // this line is what someone diagnoses from.
+        li.appendChild(node('p', 'hint', issue.reason));
+        list.appendChild(li);
+      });
+      box.appendChild(list);
+
+      var back = node('button', 'ghost small', t('runs.back'));
+      back.type = 'button';
+      back.addEventListener('click', function () { loadRuns(); });
+      box.appendChild(back);
+
+      // Shown under the list rather than replacing it, so the run being examined stays in view.
+      clear(host);
+      host.appendChild(box);
+    });
+  }
+
+  function loadRuns() {
+    return api('/api/runs').then(function (r) {
+      if (r.ok) renderRuns(r.body.runs || []);
+    });
+  }
+
   // --- data ----------------------------------------------------------------------------------
   function loadStatus() {
     return api('/api/status').then(function (r) {
@@ -1115,6 +1251,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     loadRules();
     loadShares();
     loadObjects();
+    loadRuns();
   }
 
   // --- events --------------------------------------------------------------------------------
@@ -1424,6 +1561,26 @@ function translationsLiteral(): string {
 			'auth.password': 'Password',
 			'auth.current': 'Current password',
 			'auth.failed': 'That did not work.',
+			'runs.title': 'Collection history',
+			'runs.lede': 'What each run did, and anything it could not handle.',
+			'runs.ok': 'ok',
+			'runs.problems': 'had problems',
+			'runs.unfinished': 'stopped early',
+			'runs.noDuration': 'no duration',
+			'runs.counts': '{stored} stored · {skipped} skipped · {failed} failed',
+			'runs.issues': '{n} issue(s)',
+			'runs.showIssues': 'Show issues',
+			'runs.detailTitle': 'Run {id}: what it could not handle',
+			'runs.deliberate': 'skipped on purpose',
+			'runs.fault': 'error',
+			'runs.back': 'Back to the list',
+			'runs.empty': 'Nothing has been collected yet.',
+			'runs.emptyHint': 'Runs appear here once a machine has been collected, with anything that went wrong.',
+			'runs.kind.too_large': 'too large',
+			'runs.kind.capacity': 'no room',
+			'runs.kind.error': 'error',
+			'runs.kind.excluded': 'excluded',
+			'runs.kind.unchanged': 'unchanged',
 			'browse.title': 'Stored files',
 			'browse.lede': 'Everything collected so far. Search by any part of a path.',
 			'browse.search': 'Search',
@@ -1568,6 +1725,26 @@ function translationsLiteral(): string {
 			'auth.password': '密码',
 			'auth.current': '当前密码',
 			'auth.failed': '没有成功。',
+			'runs.title': '采集历史',
+			'runs.lede': '每一次采集做了什么，以及有哪些没能处理。',
+			'runs.ok': '正常',
+			'runs.problems': '有问题',
+			'runs.unfinished': '提前停止',
+			'runs.noDuration': '无时长',
+			'runs.counts': '存入 {stored} · 跳过 {skipped} · 失败 {failed}',
+			'runs.issues': '{n} 个问题',
+			'runs.showIssues': '查看问题',
+			'runs.detailTitle': '第 {id} 次采集：没能处理的内容',
+			'runs.deliberate': '有意跳过',
+			'runs.fault': '出错',
+			'runs.back': '返回列表',
+			'runs.empty': '还没有采集过。',
+			'runs.emptyHint': '采集过一台主机后，这里会显示每次采集的结果和出问题的地方。',
+			'runs.kind.too_large': '文件过大',
+			'runs.kind.capacity': '空间不足',
+			'runs.kind.error': '出错',
+			'runs.kind.excluded': '已排除',
+			'runs.kind.unchanged': '未变化',
 			'browse.title': '已存文件',
 			'browse.lede': '目前采集到的全部文件。可搜索路径的任意片段。',
 			'browse.search': '搜索',
@@ -1712,6 +1889,26 @@ function translationsLiteral(): string {
 			'auth.password': '密碼',
 			'auth.current': '目前密碼',
 			'auth.failed': '沒有成功。',
+			'runs.title': '採集歷史',
+			'runs.lede': '每一次採集做了什麼，以及有哪些沒能處理。',
+			'runs.ok': '正常',
+			'runs.problems': '有問題',
+			'runs.unfinished': '提前停止',
+			'runs.noDuration': '無時長',
+			'runs.counts': '存入 {stored} · 跳過 {skipped} · 失敗 {failed}',
+			'runs.issues': '{n} 個問題',
+			'runs.showIssues': '查看問題',
+			'runs.detailTitle': '第 {id} 次採集：沒能處理的內容',
+			'runs.deliberate': '有意跳過',
+			'runs.fault': '出錯',
+			'runs.back': '返回列表',
+			'runs.empty': '還沒有採集過。',
+			'runs.emptyHint': '採集過一台主機後，這裡會顯示每次採集的結果和出問題的地方。',
+			'runs.kind.too_large': '檔案過大',
+			'runs.kind.capacity': '空間不足',
+			'runs.kind.error': '出錯',
+			'runs.kind.excluded': '已排除',
+			'runs.kind.unchanged': '未變化',
 			'browse.title': '已存檔案',
 			'browse.lede': '目前採集到的全部檔案。可搜尋路徑的任意片段。',
 			'browse.search': '搜尋',
@@ -1856,6 +2053,26 @@ function translationsLiteral(): string {
 			'auth.password': 'パスワード',
 			'auth.current': '現在のパスワード',
 			'auth.failed': 'うまくいきませんでした。',
+			'runs.title': '収集履歴',
+			'runs.lede': '各回の収集が何をしたか、そして扱えなかったもの。',
+			'runs.ok': '正常',
+			'runs.problems': '問題あり',
+			'runs.unfinished': '途中で停止',
+			'runs.noDuration': '所要時間なし',
+			'runs.counts': '保存 {stored} · スキップ {skipped} · 失敗 {failed}',
+			'runs.issues': '{n} 件の問題',
+			'runs.showIssues': '問題を表示',
+			'runs.detailTitle': '第 {id} 回の収集：扱えなかったもの',
+			'runs.deliberate': '意図的にスキップ',
+			'runs.fault': 'エラー',
+			'runs.back': '一覧に戻る',
+			'runs.empty': 'まだ何も収集していません。',
+			'runs.emptyHint': 'マシンを収集すると、各回の結果と問題点がここに表示されます。',
+			'runs.kind.too_large': 'サイズ超過',
+			'runs.kind.capacity': '空き容量なし',
+			'runs.kind.error': 'エラー',
+			'runs.kind.excluded': '除外',
+			'runs.kind.unchanged': '変更なし',
 			'browse.title': '保存済みファイル',
 			'browse.lede': 'これまでに収集したすべてのファイルです。パスの一部で検索できます。',
 			'browse.search': '検索',
@@ -2136,6 +2353,16 @@ body {
 .gate .actions button { width: 100%; }
 .hint.error { color: var(--err); }
 @media (max-width: 560px) { .gate { margin-top: 4vh; padding: 20px 18px; } }
+
+/* ---------- collection history ---------- */
+/* The counts sit inline with the chips rather than in a column, because a run's line reads as a sentence:
+   which machine, how long, how it ended, what it did. */
+.run-counts { font-size: 12px; color: var(--muted); }
+.run-detail { border: 1px solid var(--glass-line); border-radius: var(--r-md); padding: 12px 14px; background: var(--code-bg); box-shadow: var(--inset); }
+.run-detail .rule { border-bottom: 0; }
+/* The machine's own words, allowed to wrap: an error message that is cut off is the one thing this panel
+   exists to show, so it is the last thing that should be truncated by layout. */
+.run-detail .hint { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; }
 
 /* ---------- stored files ---------- */
 /* The count sits above the list rather than below it, because "showing 50 of 214" is only useful before
