@@ -45,8 +45,20 @@ export function nowIso(): string {
 	return new Date().toISOString();
 }
 
+/**
+ * The machines the operator can see.
+ *
+ * The `@derived` row is excluded, and that is not cosmetic. It exists because `objects.host_id` is
+ * `NOT NULL REFERENCES hosts (id)` and a merged file comes from no machine — but it is not a machine, so
+ * listing it would offer it as a target for collection rules and for a manual run. Failing to connect to it
+ * would be the honest outcome of that mistake; the point is not to offer it.
+ *
+ * Excluded here rather than by `enabled = 0` alone, because that flag is also how a real machine is
+ * temporarily switched off, and the two must not be conflated: an operator who disabled a machine expects to
+ * still see it.
+ */
 export async function listHosts(db: D1Database): Promise<HostRow[]> {
-	const { results } = await db.prepare('SELECT * FROM hosts ORDER BY label').all<HostRow>();
+	const { results } = await db.prepare("SELECT * FROM hosts WHERE id != '@derived' ORDER BY label").all<HostRow>();
 	return results ?? [];
 }
 

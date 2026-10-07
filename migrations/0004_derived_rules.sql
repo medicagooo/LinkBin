@@ -48,3 +48,20 @@ CREATE TABLE IF NOT EXISTS derived_objects (
 );
 
 CREATE INDEX IF NOT EXISTS idx_derived_objects_rule ON derived_objects (rule_id);
+
+-- The machine id a derived object is filed under.
+--
+-- `objects.host_id` is `NOT NULL REFERENCES hosts (id)`, so every object needs one, and a derived object comes
+-- from no machine. A reserved row is created here rather than a real host being borrowed, because attributing a
+-- merged file to whichever machine happened to be first would make "where did this come from" answer something
+-- untrue — and that question is the whole reason the interface shows a host at all.
+--
+-- `ON CONFLICT (id) DO NOTHING` rather than `INSERT OR IGNORE`: the latter suppresses every constraint
+-- violation, including a `NOT NULL` one that would mean this statement itself is broken, while this suppresses
+-- exactly the re-run case that makes the migration repeatable.
+--
+-- `enabled` is 0 so it cannot be selected for collection, and the leading `@` cannot collide with a real id
+-- because `slugify` produces those from hostnames.
+INSERT INTO hosts (id, label, address, port, username, enabled, created_at, updated_at)
+VALUES ('@derived', 'Derived files', '-', 0, '-', 0, '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z')
+ON CONFLICT (id) DO NOTHING;

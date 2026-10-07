@@ -84,8 +84,18 @@ describe('a stranger gets nothing', () => {
 	it('refuses to create a host without a session, and does not create it', async () => {
 		const res = await post('/api/hosts', { label: 'x', address: 'h.invalid', username: 'root' });
 		expect(res.status).toBe(401);
-		const { results } = await env.DB.prepare('SELECT * FROM hosts').all();
-		expect(results?.length).toBe(0);
+
+		// `@derived` is excluded, and it has to be: migration 0004 inserts that row on EVERY deployment because
+		// `objects.host_id` is `NOT NULL REFERENCES hosts (id)` and a merged file comes from no machine. So
+		// "the table is empty" stopped being a usable proxy for "nothing was created" the moment derived objects
+		// existed. What the test is actually about is that THIS request created no machine, which is what it now
+		// asserts — and the excluded id is named rather than counted away, so a second stray row still fails.
+		const { results } = await env.DB.prepare("SELECT id FROM hosts WHERE id != '@derived'").all();
+		expect(results ?? [], 'an unauthenticated request must create nothing').toHaveLength(0);
+
+		// And the machine really is absent, rather than merely filtered out of that query.
+		const created = await env.DB.prepare("SELECT id FROM hosts WHERE address = 'h.invalid'").first();
+		expect(created).toBeNull();
 	});
 
 	it('does not reveal whether a resource exists: an unknown path and a protected one look alike', async () => {

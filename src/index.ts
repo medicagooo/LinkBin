@@ -36,6 +36,19 @@ import { buildObjectQuery, type BrowseFilter, type BrowseSort, type ObjectRow } 
 import { issuesForHost, runDetail, summarizeRuns, toIssueDetail, type IssueRow, type RunRow } from './receipts';
 import { parseCursor, planRun } from './schedule';
 import {
+	mergeSignature,
+	parseStoredRule,
+	planMergeSources,
+	previewDerived,
+	ruleDefinitionProblem,
+	runDerived,
+	type DerivedRuleDefinition,
+	type DerivedRunOutcome,
+	type MergeSourceSpec,
+	type StoredObject,
+} from './derived';
+import type { MergeRule, MergeRuleRef } from './merge';
+import {
 	describeShare,
 	newShareToken,
 	hashSharePassword,
@@ -1605,6 +1618,378 @@ if (path === '/api/status' && method === 'GET') {
 				await env.DB.prepare('DELETE FROM source_rules WHERE id = ?').bind(body.id).run();
 				return json({ ok: true, deleted: body.id });
 			}
+
+			// ---------------------------------------------------------------------------------------------
+			// Derived objects: merge rules, previews, and running them. Ticket 12.
+			//
+			// The engine in `merge.ts` is pure and the decisions live in `derived.ts`; this section is only the
+			// part that needs a database and a bucket. It is the boundary the two modules were shaped around, so
+			// what happens here is deliberately thin: read the rows, hand them to a decision, write what it says.
+			// ---------------------------------------------------------------------------------------------
+
+			if (path === '/api/derived' && method === 'GET') {
+				const { results } = await env.DB.prepare(
+					'SELECT id, output_name, rule_json, signature, created_at, updated_at FROM derived_rules ORDER BY output_name LIMIT 200',
+				).all<{ id: string; output_name: string; rule_json: string; signature: string; created_at: string; updated_at: string }>();
+
+				const rules = (results ?? []).map((row) => {
+					try {
+						const record = parseStoredRule(row);
+						return { ...record, stored: true as const };
+					} catch (err) {
+						// A rule whose text cannot be parsed is reported as broken rather than dropped from the
+						// list: an unlisted rule is one the operator cannot see, and therefore cannot repair.
+						return { id: row.id, outputName: row.output_name, problem: (err as Error).message, stored: false as const };
+					}
+				});
+
+				return json({ ok: true, rules });
+			}
+
+			if (path === '/api/derived' && method === 'POST') {
+				const body = (await request.json()) as Partial<DerivedRuleDefinition>;
+				const definition = definitionFrom(body);
+
+				const problem = await ruleProblemAgainstStored(env, definition);
+				if (problem) throw new HttpError(400, problem);
+
+				const now = nowIso();
+				const existing = await env.DB.prepare('SELECT id FROM derived_rules WHERE output_name = ?')
+					.bind(definition.outputName)
+					.first<{ id: string }>();
+
+				// Redefining is an update, not a second rule: two rules writing one output name would produce two
+				// objects claiming the same identity, and "which is current" would have no answer. The unique index
+				// on output_name enforces the same thing, so this is the readable path to the same guarantee.
+				const id = existing?.id ?? crypto.randomUUID();
+				const signature = mergeSignature(definition, []);
+
+				await env.DB.prepare(
+					`INSERT INTO derived_rules (id, output_name, rule_json, signature, created_at, updated_at)
+					 VALUES (?, ?, ?, ?, ?, ?)
+					 ON CONFLICT (id) DO UPDATE SET
+					   output_name = excluded.output_name,
+					   rule_json = excluded.rule_json,
+					   signature = excluded.signature,
+					   updated_at = excluded.updated_at`,
+				)
+					.bind(id, definition.outputName, JSON.stringify(definition), signature, now, now)
+					.run();
+
+				return json({ ok: true, id, rule: { id, ...definition, signature, createdAt: now, updatedAt: now } });
+			}
+
+			if (path === '/api/derived/delete' && method === 'POST') {
+				const body = (await request.json()) as { id?: string };
+				if (typeof body.id !== 'string' || !body.id) throw new HttpError(400, 'an id is required');
+				// The recorded result is deliberately left in place. It is a stored file like any other and deleting
+				// a rule is not a request to delete data; the interface says the object is no longer maintained.
+				await env.DB.prepare('DELETE FROM derived_rules WHERE id = ?').bind(body.id).run();
+				return json({ ok: true, deleted: body.id });
+			}
+
+			if ((path === '/api/derived/preview' || path === '/api/derived/run') && method === 'POST') {
+				const body = (await request.json()) as Partial<DerivedRuleDefinition> & { id?: string };
+
+				// A saved rule can be previewed or run by id; an unsaved one is previewed from the definition in the
+				// request, which is what lets the operator see what a rule would do before committing to it.
+				let definition: DerivedRuleDefinition;
+				let ruleId: string | null = null;
+				if (typeof body.id === 'string' && body.id) {
+					const row = await env.DB.prepare(
+						'SELECT id, output_name, rule_json, signature, created_at, updated_at FROM derived_rules WHERE id = ?',
+					)
+						.bind(body.id)
+						.first<{ id: string; output_name: string; rule_json: string; signature: string; created_at: string; updated_at: string }>();
+					if (!row) throw new HttpError(404, 'no rule with that id');
+					const record = parseStoredRule(row);
+					definition = {
+						outputName: record.outputName,
+						combination: record.combination,
+						sources: record.sources,
+						...(record.order === undefined ? {} : { order: record.order }),
+						...(record.nameFromSource === undefined ? {} : { nameFromSource: record.nameFromSource }),
+					};
+					ruleId = record.id;
+				} else {
+					definition = definitionFrom(body);
+					const problem = await ruleProblemAgainstStored(env, definition);
+					if (problem) throw new HttpError(400, problem);
+				}
+
+				const selection = await loadMergeSelection(env, definition);
+				const read = await readMergeContents(env, selection.objects);
+
+				// An unreadable source refuses the whole run, and this check is why `readMergeContents` reports one
+				// instead of quietly substituting empty text. WITHOUT IT the run would proceed with the missing
+				// file contributing nothing, produce a result that looks complete, and replace a good previous
+				// result with a short one — the silent partial success this entire feature is built to avoid.
+				// Found by its own test, which is the only reason it is not still here.
+				if (read.problem) {
+					return json({ ok: false, error: read.problem, notes: [], outputName: definition.outputName }, 409);
+				}
+
+				if (path === '/api/derived/preview') {
+					return json({ ok: true, preview: previewDerived(definition, selection.objects, read.contents) });
+				}
+
+				const outcome = runDerived(definition, selection.objects, read.contents);
+				if (!outcome.ok || outcome.content === undefined) {
+					// Nothing is written, so a previous result stays exactly as it was. That is the whole point of
+					// refusing a run rather than storing a partial one, and it is why `runDerived` never returns
+					// content alongside `ok: false`.
+					return json({ ok: false, error: outcome.problem, notes: outcome.notes, outputName: outcome.outputName }, 409);
+				}
+
+				const stored = await storeDerivedObject(env, definition, outcome, selection, ruleId);
+				return json({ ok: true, ...stored });
+			}
+
+/**
+ * The machine id a derived object is filed under.
+ *
+ * Derived objects need a `host_id` because the column is `NOT NULL REFERENCES hosts (id)`, and they come from no
+ * machine. A reserved row is created by migration 0004 rather than a real host being borrowed, so the sentinel
+ * is visible and explainable: a derived object attributed to whichever machine happened to be first would make
+ * "where did this file come from" answer a question that is not true.
+ *
+ * The leading `@` cannot collide with a real host id, which `slugify` produces from a hostname and therefore
+ * never begins with.
+ *
+ * A **function** rather than a `const`, and that is deliberate rather than stylistic. This is defined below the
+ * handler object that uses it, and a `const` sits in the temporal dead zone until its declaration is evaluated
+ * — so the first request to run a merge failed with `Cannot access 'DERIVED_HOST_ID' before initialization`.
+ * Function declarations are hoisted, so the ordering cannot matter.
+ */
+function derivedHostId(): string {
+	return '@derived';
+}
+
+/** SHA-256 of some bytes, as lowercase hex. Used for a derived object's content hash. */
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+	const digest = await crypto.subtle.digest('SHA-256', bytes);
+	return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * The merge rule from a request body, refused rather than coerced.
+ *
+ * The engine's `MergeRule` is trusted input — it comes from the operator's own saved rule — so this is the one
+ * place a request becomes one, and anything unrecognised is dropped here rather than travelling further in a
+ * shape nothing validates.
+ */
+function definitionFrom(body: Partial<DerivedRuleDefinition>): DerivedRuleDefinition {
+	const sources = Array.isArray(body.sources)
+		? body.sources
+				.filter((spec): spec is MergeSourceSpec => Boolean(spec) && typeof spec.pattern === 'string')
+				.map((spec) => (spec.hostId === undefined ? { pattern: spec.pattern } : { pattern: spec.pattern, hostId: spec.hostId }))
+		: [];
+
+	const definition: DerivedRuleDefinition = {
+		outputName: String(body.outputName ?? '').trim(),
+		combination: body.combination as MergeRule['combination'],
+		sources,
+	};
+	if (Array.isArray(body.order)) definition.order = body.order.filter((p): p is string => typeof p === 'string');
+	if (body.nameFromSource && typeof body.nameFromSource === 'object' && Array.isArray(body.nameFromSource.keys)) {
+		definition.nameFromSource = body.nameFromSource;
+	}
+	return definition;
+}
+
+/** The cycle check, against the rules actually stored rather than a list the caller supplied. */
+async function ruleProblemAgainstStored(env: Env, definition: DerivedRuleDefinition): Promise<string | null> {
+	const { results } = await env.DB.prepare('SELECT output_name, rule_json FROM derived_rules LIMIT 500').all<{
+		output_name: string;
+		rule_json: string;
+	}>();
+
+	const existing: MergeRuleRef[] = [];
+	for (const row of results ?? []) {
+		try {
+			const record = parseStoredRule({ id: '', rule_json: row.rule_json, signature: '', created_at: '', updated_at: '' });
+			existing.push({ outputName: record.outputName, uses: record.sources.map((spec) => spec.pattern) });
+		} catch {
+			// A stored rule that cannot be parsed cannot participate in a cycle, and refusing every new rule
+			// because an old one is corrupt would make the corruption unrecoverable through the interface.
+		}
+	}
+
+	return ruleDefinitionProblem(definition, existing);
+}
+
+/**
+ * The stored objects a rule takes, and the ids of objects that are themselves derived.
+ *
+ * Both reads are bounded for the same reason every other listing here is. The derived ids are needed so a rule
+ * cannot consume a previous result — belt as well as the cycle braces, because the cycle check reasons about
+ * output NAMES while this reasons about actual rows, and a rule renamed after storing a result would otherwise
+ * slip past the first check.
+ */
+async function loadMergeSelection(
+	env: Env,
+	definition: DerivedRuleDefinition,
+): Promise<{ objects: StoredObject[]; derivedIds: Set<number> }> {
+	const [objects, derived] = await Promise.all([
+		env.DB.prepare(
+			`SELECT o.id AS id, o.host_id AS host_id, o.path AS path, o.object_key AS object_key,
+			        o.size_bytes AS size_bytes, o.content_hash AS content_hash
+			 FROM objects o
+			 WHERE o.deleted_at IS NULL AND o.superseded_by IS NULL
+			 ORDER BY o.host_id, o.path
+			 LIMIT 5000`,
+		).all<{ id: number; host_id: string; path: string; object_key: string; size_bytes: number; content_hash: string }>(),
+		env.DB.prepare('SELECT object_id FROM derived_objects LIMIT 5000').all<{ object_id: number }>(),
+	]);
+
+	const derivedIds = new Set((derived.results ?? []).map((row) => Number(row.object_id)));
+	const stored: StoredObject[] = (objects.results ?? []).map((row) => ({
+		id: Number(row.id),
+		hostId: row.host_id,
+		path: row.path,
+		objectKey: row.object_key,
+		sizeBytes: Number(row.size_bytes),
+		contentHash: row.content_hash,
+	}));
+
+	return { objects: planMergeSources(definition, stored, derivedIds), derivedIds };
+}
+
+/**
+ * Reads the selected objects' text from the bucket.
+ *
+ * A source that cannot be read is a **refusal**, not an empty string. Substituting empty text would let a merge
+ * succeed while silently dropping a file, and the result would look complete — the failure this whole feature
+ * is built to avoid. The caller turns `problem` into a 409 and stores nothing.
+ */
+async function readMergeContents(
+	env: Env,
+	objects: StoredObject[],
+): Promise<{ contents: Map<number, string>; problem?: string }> {
+	const contents = new Map<number, string>();
+	const unreadable: string[] = [];
+
+	for (const object of objects) {
+		const stored = await env.BUCKET.get(object.objectKey);
+		if (!stored) {
+			unreadable.push(`${object.hostId}:${object.path}`);
+			continue;
+		}
+		contents.set(object.id, await stored.text());
+	}
+
+	if (unreadable.length > 0) {
+		return {
+			contents,
+			problem: `these sources could not be read from storage, so nothing was produced: ${unreadable.join(', ')}`,
+		};
+	}
+	return { contents };
+}
+
+/**
+ * Writes a successful merge as an object like any other.
+ *
+ * Three things make the result usable rather than merely present:
+ *
+ *   - It is marked **important**, because the budget never evicts an important object and a derived object whose
+ *     sources were evicted could never be rebuilt. The result is the one thing here that cannot be regenerated
+ *     from what is left.
+ *   - It records the sources and each one's hash in `object_sources`, which is what makes the interface able to
+ *     say what it came from, and what makes "is this current" answerable later.
+ *   - It records the signature **as built**. Recomputing it later from the sources is impossible once they are
+ *     gone, and a stale result must stay recognisable as stale rather than becoming indistinguishable from a
+ *     current one.
+ */
+async function storeDerivedObject(
+	env: Env,
+	definition: DerivedRuleDefinition,
+	outcome: DerivedRunOutcome,
+	selection: { objects: StoredObject[]; derivedIds: Set<number> },
+	ruleId: string | null,
+): Promise<Record<string, unknown>> {
+	const content = outcome.content ?? '';
+	const bytes = new TextEncoder().encode(content);
+	const hash = await sha256Hex(bytes);
+
+	const now = nowIso();
+	const hostId = derivedHostId();
+	const objectKey = `derived/${definition.outputName}`;
+	const path = `/${definition.outputName}`;
+
+	// The previous result is REPLACED, not added to. One output name means one live file, and a re-run that left
+	// two objects under `/merged.yaml` would break the uniqueness the object model and the browse view both rest
+	// on: `idx_objects_live` is a unique index over (host, path) for live rows, so a second insert would be
+	// refused anyway — but refused as a constraint error rather than as the intended replacement.
+	//
+	// The old row is tombstoned with `deleted_at` rather than deleted, so its idempotency spine is released
+	// while anything referring to it — a share, a run's issue — keeps resolving. The bytes are removed because
+	// nothing can legitimately read them again, and leaving them would hold capacity against a budget that
+	// counts every object in the bucket.
+	const previous = await env.DB.prepare(
+		"SELECT id, object_key FROM objects WHERE host_id = ? AND path = ? AND deleted_at IS NULL",
+	)
+		.bind(hostId, path)
+		.first<{ id: number; object_key: string }>();
+
+	if (previous) {
+		await env.DB.prepare('UPDATE objects SET deleted_at = ? WHERE id = ?').bind(now, previous.id).run();
+		try {
+			await env.BUCKET.delete(previous.object_key);
+		} catch {
+			// Best effort: the row is already tombstoned, so the object is unreachable either way. Capacity is the
+			// only thing at stake, and reporting a successful merge as failed over an uncollected orphan would be
+			// the worse trade.
+		}
+	}
+
+	await env.BUCKET.put(objectKey, bytes);
+
+	// The object row, then everything that refers to it. Not a transaction — D1 has none, and this project does
+	// not pretend otherwise — so the order is chosen so that an interruption leaves the least misleading state:
+	// the bytes are already durable, and a row without its source record is a derived object that appears as an
+	// ordinary file rather than one claiming provenance it does not have.
+	const inserted = await env.DB.prepare(
+		`INSERT INTO objects (host_id, path, object_key, size_bytes, content_hash, mtime, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+	)
+		.bind(hostId, path, objectKey, bytes.byteLength, hash, null, now)
+		.run();
+
+	const objectId = Number(inserted.meta.last_row_id);
+
+	if (ruleId) {
+		await env.DB.prepare('INSERT INTO derived_objects (object_id, rule_id, rule_signature, built_at) VALUES (?, ?, ?, ?)')
+			.bind(objectId, ruleId, outcome.signature, now)
+			.run();
+	}
+
+	// `INSERT OR REPLACE` and the columns the table actually has, matching how the importance route writes it.
+	// A re-run of a merge replaces the object row, so the flag has to be re-established for the new id; the old
+	// object's flag row goes with it when that row is tombstoned, but stating the flag unconditionally is what
+	// makes this correct whether or not a previous result existed.
+	await env.DB.prepare('INSERT OR REPLACE INTO object_flags (object_id, important, created_at) VALUES (?, 1, ?)')
+		.bind(objectId, now)
+		.run();
+
+	for (const source of selection.objects) {
+		await env.DB.prepare('INSERT INTO object_sources (object_id, source_object_id, source_hash) VALUES (?, ?, ?)')
+			.bind(objectId, source.id, source.contentHash)
+			.run();
+	}
+
+	return {
+		objectId,
+		outputName: definition.outputName,
+		bytes: bytes.byteLength,
+		contentHash: hash,
+		signature: outcome.signature,
+		// Reported rather than implied: an interrupted write is the one outcome a caller has to be told about,
+		// because the interface would otherwise show a result whose provenance is missing.
+		sourcesRecorded: selection.objects.length,
+		notes: outcome.notes,
+	};
+}
 
 			// The /probe* routes were REMOVED here. They existed only to answer whether a Worker can
 			// read a file over SSH, that verdict is recorded (PASS, see STATE.md D36), and they were an
