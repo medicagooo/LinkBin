@@ -98,6 +98,29 @@ async function deriveKey(master: string, purpose: string): Promise<CryptoKey> {
 }
 
 /**
+ * The credential a scheduler presents to trigger collection without a human.
+ *
+ * Derived from the master key with its own purpose string, which is what makes it a *different*
+ * credential from a session rather than another instance of one: rotating it, or refusing it, cannot
+ * affect an interactive session and vice versa.
+ *
+ * Nothing is stored for it. The operator holds the master key locally (it is the deployment's secret),
+ * so the same value can be produced on demand and handed to whatever calls the schedule endpoint.
+ * Revoking means changing the master key, which is already a deliberate, documented act — and that
+ * keeps this deployment at exactly one secret (D32) rather than adding one to carry a second token.
+ */
+export async function scheduleToken(master: string): Promise<string> {
+	const key = await deriveKey(master, 'schedule');
+	const signature = await crypto.subtle.sign('HMAC', key, encoder.encode('schedule/v1'));
+	return base64Url(new Uint8Array(signature));
+}
+
+/** True when the presented credential is the scheduler's, compared without leaking where it differs. */
+export async function isScheduleToken(master: string, presented: string): Promise<boolean> {
+	return timingSafeEqual(await scheduleToken(master), presented);
+}
+
+/**
  * Signs a session token.
  *
  * The payload is `<issuedAtMillis>.<random>`, so two sessions issued in the same millisecond are still

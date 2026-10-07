@@ -35,6 +35,16 @@ function sessionCookie(res: Response): string | null {
 
 const GOOD = 'correct horse battery staple';
 
+/**
+ * The signing key the Worker is using.
+ *
+ * The test environment has no `SSH_MASTER_KEY` secret, and the Worker falls back to a documented
+ * stand-in when one is absent so that `wrangler dev` works without a secret. A token minted here has
+ * to be signed with the same key the Worker verifies with, so this mirrors that fallback. The tests
+ * that use it also prove it, because the scheduler credential is derived from it.
+ */
+const MASTER_KEY = 'linkbin-test-key-not-for-deployment';
+
 async function setPassword(password = GOOD): Promise<Response> {
 	return post('/api/auth/setup', { password });
 }
@@ -244,6 +254,83 @@ describe('signing out and changing the password', () => {
 		const res = await post('/api/auth/password', { current: GOOD, next: 'tiny' }, { cookie: `linkbin_session=${cookie}` });
 		expect(res.status).toBe(400);
 		expect((await signIn(GOOD)).status).toBe(200);
+	});
+});
+
+describe('sessions expire', () => {
+	beforeEach(async () => {
+		await resetAuth();
+		await setPassword();
+	});
+
+	it('refuses a session older than its lifetime, and says so distinctly from a wrong password', async () => {
+		// Two separate rules decide whether a session is honoured: it must be newer than the floor set
+		// by a password change or sign-out, and newer than its own lifetime. To test the second alone,
+		// the floor is backdated far enough that a token issued just after it is still the older of the
+		// two — so age is the only reason to refuse.
+		const twentyHoursAgo = new Date(Date.now() - 20 * 60 * 60 * 1000).toISOString();
+		await env.DB.prepare('UPDATE auth_secret SET changed_at = ?, sessions_revoked_at = ? WHERE id = 1')
+			.bind(twentyHoursAgo, twentyHoursAgo)
+			.run();
+
+		const { signSession } = await import('../src/auth');
+		const stale = await signSession(MASTER_KEY, Date.parse(twentyHoursAgo) + 5, 'stale-nonce');
+
+		const res = await call('/api/hosts', { headers: { cookie: `linkbin_session=${stale}` } });
+		expect(res.status).toBe(401);
+
+		const wrongPassword = await signIn('definitely not it');
+		expect((await res.json() as any).error).not.toBe((await wrongPassword.json() as any).error);
+	});
+
+	it('accepts a session that is still inside its lifetime', async () => {
+		// Anchored just after the password was set, which is where a real sign-in lands. Minting at
+		// `now` would be indistinguishable from a token issued in the same millisecond as the floor.
+		const row = await env.DB.prepare('SELECT changed_at FROM auth_secret WHERE id = 1').first<{ changed_at: string }>();
+		const justAfter = Date.parse(row!.changed_at) + 5;
+		const { signSession } = await import('../src/auth');
+		const fresh = await signSession(MASTER_KEY, justAfter, 'fresh-nonce');
+
+		const res = await call('/api/hosts', { headers: { cookie: `linkbin_session=${fresh}` } });
+		expect(res.status).toBe(200);
+	});
+});
+
+describe('the scheduler credential is separate from a session', () => {
+	beforeEach(async () => {
+		await resetAuth();
+		await setPassword();
+	});
+
+	async function schedulerToken(): Promise<string> {
+		const { scheduleToken } = await import('../src/auth');
+		return await scheduleToken(env.SSH_MASTER_KEY ?? 'linkbin-test-key-not-for-deployment');
+	}
+
+	it('accepts the scheduler credential for triggering collection', async () => {
+		const token = await schedulerToken();
+		const res = await post('/api/collect', {}, { authorization: `Bearer ${token}` });
+		expect(res.status).toBe(200);
+		expect((await res.json() as any).accepted).toBe(true);
+	});
+
+	it('refuses a session where the scheduler credential is expected', async () => {
+		// If a session worked here, the two credentials would not really be separate.
+		const cookie = sessionCookie(await signIn())!;
+		const res = await post('/api/collect', {}, { authorization: `Bearer ${cookie}` });
+		expect(res.status).toBe(401);
+	});
+
+	it('refuses the scheduler credential where a session is expected', async () => {
+		// And the converse: the machine credential must not grant access to the management API.
+		const token = await schedulerToken();
+		const res = await call('/api/hosts', { headers: { authorization: `Bearer ${token}` } });
+		expect(res.status).toBe(401);
+	});
+
+	it('refuses a made-up scheduler credential', async () => {
+		const res = await post('/api/collect', {}, { authorization: 'Bearer not-the-scheduler-token' });
+		expect(res.status).toBe(401);
 	});
 });
 

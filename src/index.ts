@@ -39,6 +39,8 @@ import {
 	passwordProblem,
 	sessionMaxAgeSeconds,
 	signSession,
+	scheduleToken,
+	isScheduleToken,
 	timingSafeEqual,
 	verifySession,
 } from './auth';
@@ -282,6 +284,19 @@ async function isSignedIn(env: Env, request: Request): Promise<boolean> {
 	if (!token) return false;
 	const check = await verifySession(signingKey(env), token, await sessionFloor(env));
 	return check.valid;
+}
+
+/**
+ * Whether the caller presented the scheduler's credential rather than a session.
+ *
+ * Deliberately separate from {@link isSignedIn}: the two are different credentials, and a session must
+ * not be usable where the scheduler's is expected, nor the reverse. Collapsing them would mean
+ * revoking one silently disabled the other.
+ */
+async function isScheduler(env: Env, request: Request): Promise<boolean> {
+	const token = readSessionToken(request);
+	if (!token) return false;
+	return await isScheduleToken(signingKey(env), token);
 }
 
 /**
@@ -801,6 +816,22 @@ export default {
 			// Auth routes come first, and the guard below comes before anything that touches a stored
 			// credential. The interface itself stays public so there is somewhere to sign in.
 			if (path.startsWith('/api/auth/')) return await handleAuth(path, request, env);
+
+			// The scheduler's entry point. It accepts the derived scheduler credential and NOT a session,
+			// so the two are genuinely distinct: revoking one does not disable the other. Collection
+			// itself arrives with ticket 08; this exists now because a credential nobody can present is
+			// not evidence that the distinction works.
+			if (path === '/api/collect' && method === 'POST') {
+				if (!(await isScheduler(env, request))) {
+					throw new HttpError(401, 'this endpoint takes the scheduler credential');
+				}
+				return json({
+					ok: true,
+					accepted: true,
+					collectionImplemented: false,
+					note: 'the scheduler credential is recognised; running a collection arrives with ticket 08',
+				});
+			}
 
 			if (path.startsWith('/api/') && !isPublicApi(path)) {
 				if (!(await isSignedIn(env, request))) {
