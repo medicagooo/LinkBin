@@ -1560,7 +1560,12 @@ export function renderIndexPage(locale: Locale = 'en'): string {
    * one would end that literal early. The guard that catches this has now fired four times in this project.
    */
   function mergePatterns() {
-    return $('m-patterns').value.split('\n').map(function (line) {
+    /* \\n, NOT \n. This script body is emitted inside an outer template literal, so the WORKER evaluates the
+       escape before the browser ever sees it: a single backslash-n arrives as a real line break inside a string
+       literal, which is a syntax error — and because the whole client script is one block it stops EVERYTHING:
+       no dialogs, no data, no styling applied by script. That is exactly how this line broke the live page.
+       The guard's quote-tracking check missed it, which is why that check now also PARSES the emitted script. */
+    return $('m-patterns').value.split('\\n').map(function (line) {
       return line.trim();
     }).filter(function (line) {
       return line.length > 0;
@@ -2002,6 +2007,10 @@ export function renderIndexPage(locale: Locale = 'en'): string {
         rows.sort(function (a, b) { return b.width - a.width; });
         var pre = document.createElement('pre');
         pre.id = 'layout-debug';
+        /* Doubled for the same reason as mergePatterns: one layer of escaping is consumed by the outer template
+           literal. Written with a single backslash it reaches the browser as a literal backslash and an n, so the
+           debug panel would print the escape instead of breaking the line — wrong, but only cosmetically, which is
+           why it survived until the mechanism was understood. */
         pre.textContent = 'viewport ' + vw + '\\n' + rows.slice(0, 25).map(function (r) {
           return r.tag + '.' + r.cls + '  rect=' + r.width + ' scroll=' + r.scroll + ' client=' + r.client;
         }).join('\\n');

@@ -19,6 +19,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
 
 const file = new URL('../src/ui.ts', import.meta.url);
 const source = readFileSync(file, 'utf8');
@@ -27,6 +28,38 @@ const lines = source.split('\n');
 /** Regions that are the inside of a template literal: everything between a line ending in a
  *  backtick and the next line that is exactly a backtick followed by an optional statement end. */
 const offenders = [];
+
+/**
+ * Replaces every `${...}` with a placeholder, keeping the newlines each one contained.
+ *
+ * The newlines matter: a reported line number is only useful if it still points at the same source line after
+ * substitution, and an interpolation can span several lines. Brace depth is tracked rather than matching to the
+ * first `}`, because an interpolation may contain an object literal or a nested template.
+ */
+function replaceInterpolations(text, placeholder) {
+	let out = '';
+	let i = 0;
+	while (i < text.length) {
+		if (text[i] === '$' && text[i + 1] === '{') {
+			let depth = 1;
+			let j = i + 2;
+			let newlines = 0;
+			while (j < text.length && depth > 0) {
+				if (text[j] === '{') depth += 1;
+				else if (text[j] === '}') depth -= 1;
+				else if (text[j] === '\n') newlines += 1;
+				j += 1;
+			}
+			out += placeholder + '\n'.repeat(newlines);
+			i = j;
+			continue;
+		}
+		out += text[i];
+		i += 1;
+	}
+	return out;
+}
+
 let inTemplate = false;
 let templateStartLine = 0;
 
@@ -328,6 +361,95 @@ if (newlineInString.length) {
 	console.error('  Inside the template, write \\\\n instead of \\n so the escape reaches the browser.\n');
 	for (const o of newlineInString) console.error(`  line ${o.line}: ${o.text}`);
 	process.exit(1);
+}
+
+// --- Check 5: the EMITTED script must actually parse ------------------------------------------
+//
+// This is the decisive check, and it replaced a heuristic that had already failed once. The earlier
+// check tracked string quotes and comments by hand to find a literal newline inside a string; it is a
+// re-implementation of a JavaScript parser, and it missed one — `split('\n')` at line 1563, whose
+// single backslash the outer template literal evaluated into a real line break. Everything the
+// heuristic was approximating is answered exactly by parsing.
+//
+// The failure mode is worth stating because it does not look like a syntax error from outside: the
+// page still RENDERS — HTML and CSS are delivered — but the whole client script dies, so no dialog
+// appears, no data loads, and none of the styling the script applies is applied. It presents as "the
+// layout is broken and the password prompt never showed up", which is what it was reported as.
+//
+// The transform below is the one the Worker performs: inside the template literal, an escape is
+// evaluated. So a doubled backslash becomes one, and a single `\n` becomes a real newline. Only the
+// <script> region is taken, because the surrounding TypeScript is not valid browser JavaScript.
+{
+	const start = source.indexOf('<script>');
+	const end = source.indexOf('</script>', start + 1);
+	if (start < 0 || end < 0) {
+		console.error('\nUI template guard: could not locate the <script> region in src/ui.ts\n');
+		process.exit(1);
+	}
+
+	const body = source.slice(start + '<script>'.length, end);
+
+	// Two layers have to be modelled, and getting either wrong makes the check useless or noisy.
+	//
+	// LAYER 1 — the interpolations. `${...}` is TypeScript evaluated when the page is BUILT, and its VALUE lands
+	// in the script. Leaving it as a literal `${` makes the emitted text unparseable for a reason that has
+	// nothing to do with the script, so the check would fail on every run. Each is replaced, but its NEWLINES
+	// are kept so a reported line number still points at the right source line.
+	//
+	// The replacement is `null` rather than a string, because a string would break any interpolation used in a
+	// numeric or boolean position. `null` is syntactically valid wherever an interpolation is: as an operand, an
+	// argument, an object value, or an array element. This check is about SYNTAX — whether the text is a
+	// well-formed program — so substituting a value of the wrong type is harmless, and substituting one of the
+	// wrong SHAPE would not be.
+	const withPlaceholders = replaceInterpolations(body, 'null');
+
+	// LAYER 2 — the escaping. The Worker's template literal evaluates one level of it, exactly as the language
+	// specifies, and the mapping has to be the real one rather than "drop the backslash". The earlier version
+	// replaced `\` + any character with that character, which turns `\n` into the LETTER n — so `split('\n')`
+	// became `split('n')`, which parses perfectly. The check could not fail on the very defect it was written for,
+	// and it reported success on a source that broke the live page. `\n` must become a NEWLINE.
+	const emitted = withPlaceholders.replace(/\\\$\{/g, '${').replace(/\\([\s\S])/g, (_m, ch) => {
+		switch (ch) {
+			case 'n':
+				return '\n';
+			case 't':
+				return '\t';
+			case 'r':
+				return '\r';
+			case 'b':
+				return '\b';
+			case 'f':
+				return '\f';
+			case 'v':
+				return '\v';
+			case '0':
+				return '\0';
+			case '\n': // a line continuation: the backslash and the newline both vanish
+				return '';
+			default:
+				// `\\`, `\'`, `\"`, `` \` ``, `\$` and anything else: the backslash is consumed and the character
+				// stands for itself.
+				return ch;
+		}
+	});
+
+	try {
+		new vm.Script(emitted, { filename: 'emitted-ui-script.js' });
+	} catch (err) {
+		console.error('\nUI template guard: the script EMITTED to the browser does not parse\n');
+		console.error('  The page would still render, but no dialog would appear and no script-applied styling');
+		console.error('  would be applied — it looks like a layout bug, not a syntax error.\n');
+		console.error(`  ${err.message}\n`);
+		// The offset is into the transformed text, so the reported line is the emitted line. Show it.
+		const lineNo = Number(/emitted-ui-script\.js:(\d+)/.exec(err.stack ?? '')?.[1] ?? 0);
+		if (lineNo) {
+			const emittedLines = emitted.split('\n');
+			for (let k = Math.max(0, lineNo - 3); k < Math.min(emittedLines.length, lineNo + 2); k++) {
+				console.error(`  ${k + 1}: ${emittedLines[k].slice(0, 150)}`);
+			}
+		}
+		process.exit(1);
+	}
 }
 
 if (offenders.length) {
