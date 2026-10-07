@@ -26,6 +26,20 @@
     // Invocation logs carry CPU time and wall time, which the SSH probe needs as a measurement.
     "enabled": true
   },
+  "triggers": {
+    // Collection without anyone asking. D42: cron and the manual trigger coexist; cron is weakly delivered and a
+    // minute may be skipped, which is why resumability is a requirement and why nothing counts elapsed minutes.
+    //
+    // EVERY 5 MINUTES, against a spec target of 15-30 minutes freshness. Each invocation collects ONE machine
+    // (`planRun` picks the longest-waiting one), so the interval is NOT the per-machine frequency: with N enabled
+    // machines each is attempted about every N x 5 minutes. At the 50-host ceiling that is 4 hours per machine,
+    // which is exactly why the freshness report exists - it shows the achieved figure against the target rather
+    // than assuming the interval delivers it.
+    //
+    // 5 rather than 15 so a machine that failed is retried before the next full cycle, and so a run that stopped
+    // early on its budget resumes sooner.
+    "crons": ["*/5 * * * *"]
+  },
   "d1_databases": [
     {
       "binding": "DB",

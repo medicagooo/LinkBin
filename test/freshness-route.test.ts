@@ -128,8 +128,14 @@ describe('how fresh the store is', () => {
 
 	it('states the target it is comparing against', async () => {
 		// A worst case alone answers nothing: "3000 seconds" is fine or alarming depending on what was intended.
+		//
+		// 25 minutes is the midpoint of the spec's 15-30 minute range. The value was 40 when first written, taken
+		// from my own paraphrase of the spec rather than the spec, and the difference was permissive rather than
+		// obviously wrong: a machine 35 minutes stale would have been reported as healthy.
 		const body = await freshnessOf();
-		expect(body.targetSeconds).toBe(40 * 60);
+		expect(body.targetSeconds).toBe(25 * 60);
+		expect(body.targetSeconds, 'inside the range the spec states').toBeGreaterThanOrEqual(15 * 60);
+		expect(body.targetSeconds).toBeLessThanOrEqual(30 * 60);
 	});
 
 	it('excludes the derived sentinel, which is not a machine', async () => {

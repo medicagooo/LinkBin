@@ -123,11 +123,16 @@ const DEFAULT_RUN_BUDGET_MS = 5 * 60 * 1000;
 /**
  * The freshness the schedule is meant to achieve, so "is it keeping up" has something to compare against.
  *
- * The spec's target is "a few tens of minutes" for a store of this size, and forty is the middle of that. It is
- * stated as a figure rather than left as prose because `freshness` reports the WORST staleness across machines,
- * and a worst case is only meaningful next to a target — "worst is 3000 seconds" answers nothing on its own.
+ * **25 minutes is the midpoint of the spec's 15–30 minute target**, and the first value written here was 40 —
+ * which was not from the spec at all but from my own earlier paraphrase of it as "a few tens of minutes". The
+ * difference matters because this figure is what the interface compares the worst machine against: at 40, a
+ * machine 35 minutes stale would be reported as healthy while the spec calls it late. Reading the requirement
+ * rather than the summary of it is what corrected it.
+ *
+ * It is a figure rather than prose because `freshness` reports the WORST staleness across machines, and a worst
+ * case is only meaningful next to a target — "worst is 3000 seconds" answers nothing on its own.
  */
-const FRESHNESS_TARGET_MS = 40 * 60 * 1000;
+const FRESHNESS_TARGET_MS = 25 * 60 * 1000;
 
 class HttpError extends Error {
 	constructor(
@@ -260,6 +265,15 @@ async function schemaReady(env: Env): Promise<{ ready: boolean; missing: string[
 // ---------------------------------------------------------------------------------------------
 
 const SESSION_COOKIE = 'linkbin_session';
+
+/**
+ * The origin a scheduled invocation addresses itself to.
+ *
+ * Never resolved by DNS: the request is handed straight to `this.fetch`, so no network call and no loopback are
+ * involved, and the host is arbitrary. It is a full URL only because a Request needs one, and a fixed value
+ * keeps scheduled logs comparable between runs.
+ */
+const APP_ORIGIN = 'https://linkbin.internal';
 
 /**
  * Routes reachable without signing in.
@@ -1289,6 +1303,63 @@ async function createRule(env: Env, body: Record<string, unknown>): Promise<Resp
 // ---------------------------------------------------------------------------------------------
 
 export default {
+	/**
+	 * The trigger that makes collection happen without anyone asking.
+	 *
+	 * Without this, the feature only ever runs when an operator presses a button, which is not what it is for: the
+	 * point of collecting on a schedule is that nobody has to remember. `triggers.crons` in `wrangler.jsonc`
+	 * schedules this; the criterion it satisfies is "collection runs on a schedule without any human action".
+	 *
+	 * IT CALLS THE SAME ROUTE THE INTERFACE CALLS, rather than reimplementing the work. A second entry point that
+	 * walks machines itself would be a second place for the rotation, the budget, the cursor and the run record to
+	 * drift out of agreement — and the two would differ precisely in the unattended case, which is the one nobody
+	 * is watching. The credential presented is the scheduler's own token, derived from the master key, so the route
+	 * sees a genuine scheduler call and not a privileged bypass.
+	 *
+	 * A FAILURE IS LOGGED AND SWALLOWED, deliberately. A cron trigger has no caller to answer, so throwing would
+	 * only produce a retry of work the route has already recorded as an issue — and the route already answers 200
+	 * with `run: false` when there is nothing to do, which is not an error. What must NOT happen is a scheduled
+	 * invocation dying silently, so the outcome is written to the log either way.
+	 */
+	async scheduled(controller: ScheduledController, env: Env): Promise<void> {
+		const started = Date.now();
+
+		try {
+			// `signingKey` refuses when no master key is configured, and that must not be swallowed here: a
+			// deployment with no secret cannot authenticate anything, and a scheduled run that quietly did nothing
+			// would look identical to one that found nothing to collect.
+			const token = await scheduleToken(signingKey(env));
+			const request = new Request(`${APP_ORIGIN}/api/collect`, {
+				method: 'POST',
+				headers: { authorization: `Bearer ${token}` },
+			});
+
+			const response = await this.fetch(request, env);
+			const body = await response.text();
+
+			console.log(
+				JSON.stringify({
+					at: 'scheduled',
+					cron: controller.cron,
+					status: response.status,
+					ms: Date.now() - started,
+					// Truncated rather than logged whole: the response carries counts, not payloads, and an
+					// unbounded log line is a cost with no benefit.
+					body: body.length > 600 ? `${body.slice(0, 600)}…` : body,
+				}),
+			);
+		} catch (err) {
+			console.log(
+				JSON.stringify({
+					at: 'scheduled-failed',
+					cron: controller.cron,
+					ms: Date.now() - started,
+					message: (err as Error).message,
+				}),
+			);
+		}
+	},
+
 	async fetch(request: Request, env: Env): Promise<Response> {
 		const url = new URL(request.url);
 		const path = url.pathname;
