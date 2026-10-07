@@ -32,6 +32,7 @@ import { REQUIRED_SCHEMA, SCHEMA_MIGRATIONS } from './migrations';
 import { resolveRules, type RemoteHost } from './remote';
 import { connectRemote } from './ssh-remote';
 import { planAdmission, type BudgetObject } from './budget';
+import { makeRoomFor, type EvictionOutcome } from './evict';
 import { buildObjectQuery, type BrowseFilter, type BrowseSort, type ObjectRow } from './browse';
 import { issuesForHost, runDetail, summarizeRuns, toIssueDetail, type IssueRow, type RunRow } from './receipts';
 import { parseCursor, planRun } from './schedule';
@@ -859,13 +860,15 @@ async function storageObjects(db: D1Database): Promise<BudgetObject[]> {
 			        CASE WHEN f.object_id IS NULL THEN 0 ELSE 1 END AS important,
 			        CASE WHEN o.superseded_by IS NULL THEN 0 ELSE 1 END AS superseded,
 			        CASE WHEN o.deleted_at IS NULL THEN 0 ELSE 1 END AS deleted,
+			        CASE WHEN r.object_id IS NULL THEN 0 ELSE 1 END AS reclaimed,
 			        o.created_at        AS created_at
 			 FROM objects o
 			 LEFT JOIN object_flags f ON f.object_id = o.id
+			 LEFT JOIN object_reclaims r ON r.object_id = o.id
 			 ORDER BY o.created_at DESC
 			 LIMIT 5000`,
 		)
-		.all<{ id: number; size: number; important: number; superseded: number; deleted: number; created_at: string }>();
+		.all<{ id: number; size: number; important: number; superseded: number; deleted: number; reclaimed: number; created_at: string }>();
 
 	return (results ?? []).map((row) => ({
 		id: Number(row.id),
@@ -873,6 +876,7 @@ async function storageObjects(db: D1Database): Promise<BudgetObject[]> {
 		important: Number(row.important) === 1,
 		superseded: Number(row.superseded) === 1,
 		deleted: Number(row.deleted) === 1,
+		reclaimed: Number(row.reclaimed) === 1,
 		createdAt: String(row.created_at),
 	}));
 }
@@ -889,8 +893,17 @@ async function measureStorage(db: D1Database): Promise<StorageUsage> {
 	const objects = await storageObjects(db);
 	const plan = planAdmission({ ceilingBytes: STORAGE_BUDGET_BYTES, newSize: 0, objects });
 
-	const liveBytes = objects.filter((o) => !o.superseded && !o.deleted).reduce((total, o) => total + o.size, 0);
-	const importantBytes = objects.filter((o) => o.important).reduce((total, o) => total + o.size, 0);
+	// Reclaimed rows are excluded from every total, and not only from `plan.heldBytes`. A row whose bytes were
+	// removed is not occupying anything, so counting it here would have `liveBytes` plus `retainedBytes` disagree
+	// with `totalBytes` — and the figure the operator reads would exceed the one the policy acts on, which is the
+	// drift `measureStorage` delegates to `planAdmission` in order to avoid.
+	//
+	// Excluded by `reclaimed` and NOT by `deleted`, which is the distinction that matters: a soft-deleted row has
+	// been asked to go but its bytes are still in the bucket and still charged. Excluding those would report room
+	// that does not exist.
+	const held = objects.filter((o) => !o.reclaimed);
+	const liveBytes = held.filter((o) => !o.superseded && !o.deleted).reduce((total, o) => total + o.size, 0);
+	const importantBytes = held.filter((o) => o.important).reduce((total, o) => total + o.size, 0);
 
 	return {
 		liveBytes,
@@ -927,6 +940,54 @@ async function checkFileBudget(db: D1Database, size: number): Promise<{ ok: true
 		};
 	}
 	return { ok: true };
+}
+
+/**
+ * Reclaims room for an incoming file, against the real database and bucket.
+ *
+ * The two steps are ordered bytes-then-record, and the reasoning is in `evict.ts` where the order is decided:
+ * an interruption between them must leave a file that looks present but is not, rather than one that looks
+ * reclaimed while still occupying the budget.
+ *
+ * Returns what actually happened rather than what was intended, so a caller cannot report space as free that
+ * nothing freed.
+ */
+async function reclaimFor(db: D1Database, bucket: R2Bucket, size: number, at: string): Promise<EvictionOutcome> {
+	const objects = await storageObjects(db);
+	return await makeRoomFor({
+		ceilingBytes: STORAGE_BUDGET_BYTES,
+		newSize: size,
+		objects,
+		at,
+		ports: {
+			async objectKey(id) {
+				const row = await db.prepare('SELECT object_key FROM objects WHERE id = ?').bind(id).first<{ object_key: string }>();
+				return row?.object_key ?? null;
+			},
+			async deleteBytes(key) {
+				await bucket.delete(key);
+			},
+			async markDeleted(id, when) {
+				// TWO writes, and both are needed rather than one standing in for the other:
+				//
+				//   - `deleted_at` takes the row out of the live listing, so the browse view stops offering a
+				//     download. The row itself is kept, because it is what makes "this file existed and was removed
+				//     to make room" answerable afterwards.
+				//   - `object_reclaims` is the fact that the BYTES are gone. Without it the budget keeps charging
+				//     for space it has already freed, and the store reports itself full forever.
+				//
+				// The reclaimed row is written first, and it is the one that must not be lost: an interruption
+				// after it leaves a row still listed as live whose bytes are gone, which the browse view reports
+				// honestly. The other order would leave space charged for bytes that no longer exist.
+				const row = await db.prepare('SELECT size_bytes FROM objects WHERE id = ?').bind(id).first<{ size_bytes: number }>();
+				await db
+					.prepare('INSERT OR REPLACE INTO object_reclaims (object_id, bytes_freed, reclaimed_at) VALUES (?, ?, ?)')
+					.bind(id, Number(row?.size_bytes ?? 0), when)
+					.run();
+				await db.prepare('UPDATE objects SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL').bind(when, id).run();
+			},
+		},
+	});
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1574,6 +1635,58 @@ if (path === '/api/status' && method === 'GET') {
 				// The per-file limit travels with the totals: both are numbers the operator has to plan around,
 				// and a limit that is only enforced is one they discover by having a file refused.
 				return json({ ok: true, usage: { ...(await measureStorage(env.DB)), maxFileBytes: MAX_FILE_BYTES } });
+			}
+
+			// Makes room for a file of a given size, by evicting the oldest unprotected stored files.
+			//
+			// A route rather than only an internal step, for two reasons. The collection pipeline is not built, so
+			// without this nothing would ever call the eviction code and the policy would be unreviewable in
+			// practice. And an operator facing a full store needs a way to act — "make room for the next file"
+			// is a legitimate request on its own.
+			//
+			// It is a POST, and destructive, so it takes a session like every other management route. What it
+			// cannot do is delete a protected file: `mayEvict` has no exceptions, and `makeRoomFor` re-checks the
+			// plan's targets against it rather than trusting the plan.
+			if (path === '/api/usage/reclaim' && method === 'POST') {
+				const body = (await request.json().catch(() => ({}))) as { sizeBytes?: number };
+
+				// Checked as a TYPE rather than coerced, which is a fix from this route's own test. `Number(undefined
+				// ?? 0)` is 0 and passes every numeric check, and a body of `{"sizeBytes": null}` or a JSON string
+				// arrives as `undefined` after parsing — so a malformed request became a perfectly valid request for
+				// zero bytes, which reports success and reclaims nothing. That reads as a no-op rather than as the
+				// mistake it is.
+				if (body.sizeBytes !== undefined && typeof body.sizeBytes !== 'number') {
+					throw new HttpError(400, 'sizeBytes must be a number');
+				}
+				const size = body.sizeBytes ?? 0;
+				if (!Number.isFinite(size) || size < 0) throw new HttpError(400, 'sizeBytes must be a non-negative number');
+
+				const before = await measureStorage(env.DB);
+				if (size > MAX_FILE_BYTES) {
+					throw new HttpError(400, `that file is ${size} bytes, above the ${MAX_FILE_BYTES} byte per-file limit, so no amount of reclaiming would admit it`);
+				}
+				if (size > STORAGE_BUDGET_BYTES) {
+					// Refused before touching anything: reclaiming everything would still not make room, so doing it
+					// would delete files for a file that is refused either way.
+					throw new HttpError(400, `that file is larger than the whole ${STORAGE_BUDGET_BYTES} byte budget, so it can never be admitted and nothing was reclaimed`);
+				}
+
+				const outcome = await reclaimFor(env.DB, env.BUCKET, size, nowIso());
+				const after = await measureStorage(env.DB);
+
+				return json({
+					ok: outcome.admitted,
+					// Both figures, because the operator is being asked to accept deletions: what it was, what it is,
+					// and how many files paid for it.
+					before,
+					after,
+					admitted: outcome.admitted,
+					evicted: outcome.evicted,
+					evictedCount: outcome.evicted.length,
+					freedBytes: outcome.freedBytes,
+					saturatedByImportant: outcome.saturatedByImportant,
+					...(outcome.problem === undefined ? {} : { error: outcome.problem }),
+				}, outcome.admitted ? 200 : 409);
 			}
 
 			// Generates a candidate master key. It cannot install the key itself — a secret is

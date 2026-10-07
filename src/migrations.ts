@@ -64,6 +64,9 @@ export const REQUIRED_SCHEMA = [
 	'derived_objects',
 	'idx_derived_rules_name',
 	'idx_derived_objects_rule',
+	// Which objects have been reclaimed to make room. Its own fact, because a soft-deleted object is still charged
+	// while a reclaimed one is not.
+	'object_reclaims',
 	// The importance flag, in its own table because adding a column is the one migration change that
 	// cannot be applied twice.
 	'object_flags',

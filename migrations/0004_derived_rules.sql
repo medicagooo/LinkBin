@@ -49,6 +49,25 @@ CREATE TABLE IF NOT EXISTS derived_objects (
 
 CREATE INDEX IF NOT EXISTS idx_derived_objects_rule ON derived_objects (rule_id);
 
+-- Which objects have had their bytes RECLAIMED to make room.
+--
+-- A separate table rather than a column, for the reason this project's migrations always give: `ALTER TABLE ADD
+-- COLUMN` cannot be applied twice, and applying the schema twice is a promise the interface makes.
+--
+-- Why its own fact rather than reusing `objects.deleted_at`: those are two different states that want opposite
+-- answers from the budget. A **soft-deleted** object has been asked to go but its bytes are still there, so it is
+-- still charged. A **reclaimed** object has no bytes, so it is not. `deleted_at` is set in both cases, and a
+-- single flag cannot say which — counting a reclaimed object would report the store full forever after the first
+-- eviction, and excluding a soft-deleted one would report room that does not exist.
+--
+-- `bytes_freed` is recorded as the figure actually reclaimed rather than recomputed from the object later: the
+-- object's `size_bytes` is what it claimed, and the two are the same only when nothing went wrong.
+CREATE TABLE IF NOT EXISTS object_reclaims (
+    object_id   INTEGER PRIMARY KEY REFERENCES objects (id) ON DELETE CASCADE,
+    bytes_freed INTEGER NOT NULL,
+    reclaimed_at TEXT NOT NULL
+);
+
 -- The machine id a derived object is filed under.
 --
 -- `objects.host_id` is `NOT NULL REFERENCES hosts (id)`, so every object needs one, and a derived object comes

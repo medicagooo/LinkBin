@@ -35,6 +35,14 @@ export interface BudgetObject {
 	superseded: boolean;
 	/** True when soft-deleted. It still occupies storage until the bytes are gone. */
 	deleted: boolean;
+	/**
+	 * True when the bytes have actually been removed — evicted to make room.
+	 *
+	 * Distinct from `deleted`, and the distinction is load-bearing rather than tidy: a soft-deleted object still
+	 * occupies storage and is still charged, while a reclaimed one occupies nothing. One bit cannot answer both,
+	 * and the two answers are opposites.
+	 */
+	reclaimed?: boolean;
 	createdAt: string;
 }
 
@@ -98,6 +106,24 @@ export function planAdmission(input: BudgetInput): AdmissionPlan {
 	for (const object of input.objects) {
 		if (seen.has(object.id)) continue;
 		seen.add(object.id);
+
+		// **An object whose bytes have been RECLAIMED is not held.**
+		//
+		// This is the distinction the whole field set turns on, and getting it wrong in either direction is a
+		// real defect:
+		//
+		//   - A soft-deleted object still occupies storage. Its row carries `deleted_at` because something asked
+		//     for it to go, but nothing has removed the bytes, so it is still charged. Counting only live objects
+		//     would report room that does not exist.
+		//   - A reclaimed object occupies nothing. Eviction removes the bytes and KEEPS the row, deliberately,
+		//     because the row is what makes "this file existed and was removed to make room" answerable. Counting
+		//     those meant the store reported itself full forever after the first reclaim: the space was freed and
+		//     the figure never noticed.
+		//
+		// `reclaimed` is the flag that tells them apart. Without it there is one bit for two states, and the two
+		// states want opposite answers.
+		if (object.reclaimed) continue;
+
 		objects.push(object.size < 0 ? { ...object, size: 0 } : object);
 	}
 
