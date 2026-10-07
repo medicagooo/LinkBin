@@ -1991,6 +1991,102 @@ async function storeDerivedObject(
 	};
 }
 
+			if (path === '/api/derived/status' && method === 'GET') {
+				// Whether each stored result is still current, and what it was built from.
+				//
+				// This is the answer to a question the schema deliberately made decidable: the signature is
+				// recomputed from the rule and the sources as they are NOW, and compared against the signature
+				// recorded when the result was BUILT. Any difference means the result no longer matches its inputs
+				// — the rule changed, a source's content changed, or a source appeared or disappeared — and the
+				// three are not distinguished because the useful fact is the same in all three cases: rebuild.
+				//
+				// The stored signature is what makes this answerable after the sources are gone. Recomputing from
+				// the sources alone would make an evicted source indistinguishable from an unchanged one, so a
+				// result whose inputs had been evicted would report itself current — the one wrong answer that
+				// matters.
+				const { results: ruleRows } = await env.DB.prepare(
+					'SELECT id, output_name, rule_json, signature, created_at, updated_at FROM derived_rules ORDER BY output_name LIMIT 200',
+				).all<{ id: string; output_name: string; rule_json: string; signature: string; created_at: string; updated_at: string }>();
+
+				const { results: builtRows } = await env.DB.prepare(
+					`SELECT d.object_id, d.rule_id, d.rule_signature, d.built_at, o.path, o.size_bytes, o.content_hash, o.deleted_at
+					 FROM derived_objects d
+					 JOIN objects o ON o.id = d.object_id
+					 ORDER BY d.built_at DESC
+					 LIMIT 500`,
+				).all<{
+					object_id: number;
+					rule_id: string;
+					rule_signature: string;
+					built_at: string;
+					path: string;
+					size_bytes: number;
+					content_hash: string;
+					deleted_at: string | null;
+				}>();
+
+				const statuses = [];
+				for (const row of ruleRows ?? []) {
+					let record;
+					try {
+						record = parseStoredRule(row);
+					} catch (err) {
+						// A rule whose stored text will not parse is reported as broken rather than omitted, so it
+						// stays visible enough to be repaired.
+						statuses.push({ ruleId: row.id, outputName: row.output_name, problem: (err as Error).message, current: false });
+						continue;
+					}
+
+					const definition: DerivedRuleDefinition = {
+						outputName: record.outputName,
+						combination: record.combination,
+						sources: record.sources,
+						...(record.order === undefined ? {} : { order: record.order }),
+						...(record.nameFromSource === undefined ? {} : { nameFromSource: record.nameFromSource }),
+					};
+
+					// The newest result for this rule, which is the one the operator is being told about. A rule
+					// can have an older tombstoned result from before a re-run; reporting on that one would answer
+					// about a file nobody can download.
+					const built = (builtRows ?? []).find((b) => b.rule_id === row.id && b.deleted_at === null) ?? null;
+
+					const selection = await loadMergeSelection(env, definition);
+					const nowSignature = mergeSignature(definition, selection.objects);
+					const sources = await env.DB.prepare(
+						`SELECT s.source_object_id, s.source_hash, o.path AS path, o.host_id AS host_id
+						 FROM object_sources s
+						 LEFT JOIN objects o ON o.id = s.source_object_id
+						 WHERE s.object_id = ?
+						 ORDER BY o.host_id, o.path
+						 LIMIT 500`,
+					)
+						.bind(built?.object_id ?? -1)
+						.all<{ source_object_id: number; source_hash: string; path: string | null; host_id: string | null }>();
+
+					statuses.push({
+						ruleId: row.id,
+						outputName: record.outputName,
+						// `null` rather than `false` when nothing has been built: "not built yet" and "built and now
+						// stale" are different situations and lead to different actions.
+						current: built === null ? null : built.rule_signature === nowSignature,
+						builtAt: built?.built_at ?? null,
+						objectId: built?.object_id ?? null,
+						sizeBytes: built?.size_bytes ?? null,
+						// Stated so the interface can say "3 of 3 sources still match" rather than only current/stale,
+						// and so an operator can see WHICH source changed.
+						sourceCount: selection.objects.length,
+						sources: (sources.results ?? []).map((s) => ({
+							objectId: s.source_object_id,
+							path: s.path ?? '(no longer stored)',
+							hostId: s.host_id ?? '(no longer stored)',
+							hash: s.source_hash,
+						})),
+					});
+				}
+
+				return json({ ok: true, rules: statuses });
+			}
+
 			// The /probe* routes were REMOVED here. They existed only to answer whether a Worker can
 			// read a file over SSH, that verdict is recorded (PASS, see STATE.md D36), and they were an
 			// unauthenticated remote-command and arbitrary-file-read surface: with no PROBE_* set they

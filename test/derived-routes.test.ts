@@ -271,6 +271,90 @@ describe('running a merge', () => {
 	});
 });
 
+describe('whether a stored result is still current', () => {
+	beforeEach(reset);
+
+	async function ruleAndRun(): Promise<{ id: string; objectId: number }> {
+		const created = await post('/api/derived', { outputName: 'merged.yaml', combination: 'yaml-list-union', sources: [{ pattern: '/etc/app/*.yaml' }] }, cookie);
+		const id = ((await created.json()) as { id: string }).id;
+		const run = await post('/api/derived/run', { id }, cookie);
+		expect(run.status).toBe(200);
+		return { id, objectId: ((await run.json()) as { objectId: number }).objectId };
+	}
+
+	async function statusOf(): Promise<{ current: boolean | null; sourceCount: number; sources: { path: string }[] }> {
+		const listed = (await (await call('/api/derived/status', { headers: { cookie } })).json()) as {
+			rules: { current: boolean | null; sourceCount: number; sources: { path: string }[] }[];
+		};
+		return listed.rules[0];
+	}
+
+	it('reports a freshly built result as current, and names the sources it came from', async () => {
+		await addHostWithFiles('h1', [{ path: '/etc/app/a.yaml', content: 'proxies:\n  - name: p\n' }]);
+		await ruleAndRun();
+
+		const status = await statusOf();
+		expect(status.current).toBe(true);
+		expect(status.sourceCount).toBe(1);
+		expect(status.sources.map((s) => s.path)).toEqual(['/etc/app/a.yaml']);
+	});
+
+	it('reports "not built yet" as null rather than as current or stale', async () => {
+		// The three states lead to different actions — build it, leave it, rebuild it — so collapsing "never
+		// built" into either of the others would make the interface say something untrue.
+		await addHostWithFiles('h1', [{ path: '/etc/app/a.yaml', content: 'proxies:\n  - name: p\n' }]);
+		await post('/api/derived', { outputName: 'merged.yaml', combination: 'yaml-list-union', sources: [{ pattern: '/etc/app/*.yaml' }] }, cookie);
+
+		expect((await statusOf()).current).toBeNull();
+	});
+
+	it('goes stale when a source changes content, and says so without rebuilding', async () => {
+		await addHostWithFiles('h1', [{ path: '/etc/app/a.yaml', content: 'proxies:\n  - name: p\n' }]);
+		const { objectId } = await ruleAndRun();
+		expect((await statusOf()).current).toBe(true);
+
+		// The stored file changes. The derived result is now out of date, and nothing has run since.
+		await addHostWithFiles('h1', [{ path: '/etc/app/b.yaml', content: 'proxies:\n  - name: q\n' }]).catch(() => undefined);
+		await env.DB.prepare("UPDATE objects SET content_hash = 'changed' WHERE path = '/etc/app/a.yaml'").run();
+
+		const status = await statusOf();
+		expect(status.current, 'a changed source must make the result stale').toBe(false);
+		expect(status.sourceCount).toBe(1);
+
+		// Stale is a REPORT, not an action: the previously built object is untouched and still downloadable.
+		const still = await env.DB.prepare('SELECT deleted_at FROM objects WHERE id = ?').bind(objectId).first<{ deleted_at: string | null }>();
+		expect(still?.deleted_at).toBeNull();
+	});
+
+	it('goes stale when the rule itself changes', async () => {
+		await addHostWithFiles('h1', [{ path: '/etc/app/a.yaml', content: 'proxies:\n  - name: p\n' }]);
+		const { id } = await ruleAndRun();
+
+		// Same output name, different combination: the rule is edited in place, which changes what the result
+		// should be without changing any source.
+		await post('/api/derived', { outputName: 'merged.yaml', combination: 'concat', sources: [{ pattern: '/etc/app/*.yaml' }] }, cookie);
+		void id;
+
+		expect((await statusOf()).current, 'an edited rule must make its previous result stale').toBe(false);
+	});
+
+	it('goes stale when a source stops matching the pattern', async () => {
+		await addHostWithFiles('h1', [{ path: '/etc/app/a.yaml', content: 'proxies:\n  - name: p\n' }]);
+		await ruleAndRun();
+
+		// The file is removed from the store. A result whose inputs have gone is stale, not current — which is
+		// exactly the case that recomputing from the sources alone would get wrong.
+		await env.DB.prepare("UPDATE objects SET deleted_at = '2026-01-02T00:00:00.000Z' WHERE path = '/etc/app/a.yaml'").run();
+
+		const status = await statusOf();
+		expect(status.current, 'a result whose source is gone must not report itself current').toBe(false);
+		expect(status.sourceCount).toBe(0);
+		// The sources it WAS built from are still named, because "what did this come from" is a fact about the
+		// past and stays true after the source is evicted.
+		expect(status.sources.map((s) => s.path)).toEqual(['/etc/app/a.yaml']);
+	});
+});
+
 describe('the machines list', () => {
 	beforeEach(reset);
 
