@@ -163,6 +163,44 @@ test('late search replies cannot replace the latest file results', async () => {
   assert.doesNotMatch(p.get('objectlist').textContent, /old.yaml/);
 });
 
+test('failed replacement search removes old pagination and retries its first page', async () => {
+  let failed = false;
+  const p = await page({ '/api/objects': path => {
+    if (!path.includes('q=new')) return { objects: [file], total: 60 };
+    if (!failed) { failed = true; return { status: 503, body: { error: 'search unavailable' } }; }
+    return { objects: [{ ...file, path: '/new.yaml' }], total: 1 };
+  } });
+  assert.ok(p.get('browseMore'));
+  p.get('b-search').value = 'new'; await p.get('b-search').dispatch('input'); await p.flush();
+  assert.equal(Boolean(p.get('browseMore')), false);
+  await p.get('objectlist').querySelector('button').dispatch('click'); await p.flush();
+  assert.match(p.get('objectlist').textContent, /new.yaml/);
+  assert.ok(p.calls.filter(c => c.path.includes('q=new')).every(c => !c.path.includes('offset=') || c.path.includes('offset=0')));
+});
+
+test('deleting a selected sharing file clears its selection and disables creation', async () => {
+  let deleted = false;
+  const p = await page({ '/api/files/delete': () => { deleted = true; return { ok: true }; },
+    '/api/objects': () => ({ objects: deleted ? [] : [file], total: deleted ? 0 : 1 }) });
+  p.get('s-object').value = '1'; await p.get('s-object').dispatch('change');
+  p.get('s-password').value = 'fixture password'; await p.get('s-password').dispatch('input');
+  assert.equal(p.get('makeShare').disabled, false);
+  const remove = p.get('objectlist').querySelectorAll('button').find(b => b.textContent === 'Delete file');
+  await remove.dispatch('click'); await p.flush();
+  assert.equal(p.get('s-object').value, '');
+  assert.equal(p.get('makeShare').disabled, true);
+});
+
+test('collection and upload timeout messages use their actual request budgets', async () => {
+  const aborted = Object.assign(new Error('fixture aborted'), { name: 'AbortError' });
+  const p = await page({ '/api/collect': aborted, '/api/files/upload': aborted });
+  await p.click('collectNow');
+  assert.match(p.get('collectResult').textContent, /360 seconds/);
+  p.get('f-upload').files = [{ name: 'a.yaml', size: 1 }];
+  await p.get('f-upload').dispatch('change'); await p.click('uploadFiles');
+  assert.match(p.get('uploadQueue').textContent, /120 seconds/);
+});
+
 test('navigation and new workflow copy work in all four locales', async () => {
   for (const locale of ['en','zh-CN','zh-TW','ja']) {
     const p = await page({}, { locale });

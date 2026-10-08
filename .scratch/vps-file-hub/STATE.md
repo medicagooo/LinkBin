@@ -1,5 +1,9 @@
 # STATE: vps-file-hub
 
+## 最新执行检查点：UI 排版与交互（2026-10-08）
+
+本轮事实、授权、验证和下一动作见 [UI 检查点](../ui-layout-repair/STATE.md)。代码与审查已离线完成，main 合入与推送按 e005/e006 预声明执行，发布结果必须核验实时 Git/GitHub 引用。下方旧发布前检查点仅作历史记录。
+
 ## 最新执行检查点：TypeScript 模板处理与 R2 文件管理（2026-10-08）
 
 - **阶段/授权**：第5步 implement、修复和离线验收完成。用户确认 TypeScript及merged-all目标结构/命名，增加R2文件管理、直链和确认密码下载分享；此前明确的review bug repair push main要求持续适用。不执行直接云写入、线上迁移或手工部署。

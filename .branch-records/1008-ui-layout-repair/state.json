@@ -22,9 +22,11 @@
   "status": "active",
   "integration": "unmerged",
   "evidence": [
-    "Local and GitHub main verified 6282b5129dabe6c11b7c27d3cdfa894cf410b806; five live panels have zero padding at828px"
+    "Local and GitHub main verified 6282b5129dabe6c11b7c27d3cdfa894cf410b806; five live panels have zero padding at828px",
+    "UI22/22; Workers744/744; guards and dry-run passed; browser160 combinations; both review axes clear",
+    "1008-ui-layout-repair-e004"
   ],
-  "next": "Implement in D:/proj/LinkBin-ui-1008; review and verify, then predeclare integration/push",
+  "next": "Commit final repairs and this registry; execute e005 main fast-forward preserving original ledger delta, then e006 non-force push and verify remote SHA",
   "created_at": "2026-10-08T15:53:57.1900217+08:00",
-  "updated_at": "2026-10-08T15:53:57.1900217+08:00"
+  "updated_at": "2026-10-08T16:33:59+08:00"
 }

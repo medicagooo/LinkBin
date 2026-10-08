@@ -58,16 +58,16 @@
     "vps-file-hub-e038: push main to origin to deploy the UI authentication fix (predeclared; awaiting execution)",
     "1008-r2-file-manager-e005: integrate reviewed feature into main preserving user delta (predeclared)",
     "1008-r2-file-manager-e006: push verified feature main to origin (predeclared)",
-    "1008-ui-layout-repair-e002: refresh origin/main (predeclared)",
-    "1008-ui-layout-repair-e003: create isolated UI repair worktree (predeclared)"
+    "1008-ui-layout-repair-e005: integrate reviewed UI into main preserving original ledger delta (predeclared)",
+    "1008-ui-layout-repair-e006: push reviewed main to GitHub (predeclared)"
   ],
   "remote": {
     "origin": "git@github.com:medicagooo/LinkBin.git",
     "url": "https://github.com/medicagooo/LinkBin",
     "visibility": "PUBLIC",
     "default_branch": "main",
-    "last_verified_main": "ef44b77bc7db41c094369d780e0eae213399fcc5",
-    "verified_at": "2026-10-08T02:45:24.0498328+08:00"
+    "last_verified_main": "6282b5129dabe6c11b7c27d3cdfa894cf410b806",
+    "verified_at": "2026-10-08T16:33:59+08:00"
   },
   "read": [],
   "changes": [
@@ -272,17 +272,22 @@
       "domain": "management UI / file workflows",
       "request": "1008-ui-layout-repair-e001",
       "requirement_date": "2026-10-08",
-      "implementation_date": null,
+      "implementation_date": "2026-10-08",
       "main_integration_date": null,
       "deployment_date": null,
       "before": "Five panels lack padding; fixed-width controls clip labels; empty/failed operations and collection result handling are incomplete",
-      "after": "Planned responsive sections, file-based sharing, upload queue, merge completeness and accurate collection feedback",
-      "rules": "Existing APIs and storage/authentication limits preserved",
-      "status": "planned",
+      "after": "Responsive five-view navigation with padded cards and readable controls; upload outcomes/retry, available-file sharing, verified merge definitions and actual collection receipts",
+      "rules": "Four languages/two themes;100MiB per-file validation;share picker200 results with search refinement;copy confirmation follows actual success;delete clears sharing selection;latest response owns each section;save merge after current preview;collection waits360s and unknown outcomes require refresh. Existing API/auth/storage rules preserved.",
+      "status": "implemented and verified offline; Standards and Spec reviews clear; main integration/push predeclared; deployment unverified",
       "evidence": [
-        ".scratch/ui-layout-repair/spec.md"
+        "src/ui.ts",
+        "src/ui-workflows.ts",
+        "docs/ui-workflows.md",
+        "test/ui-behavior.test.mjs",
+        "1008-ui-layout-repair-e004",
+        ".scratch/ui-layout-repair/STATE.md"
       ]
     }
   ],
-  "notes": "C-001/C-002 describe historical deployment and security cleanup before authentication and probe removal; their before/after statements are not current architecture. C-003 records the host form change. Collection, downloads and derived routes now exist; C-004/C-005/C-006 record the 2026-10-08 full-code repairs with offline verification, separately from unverified live deployment. See the latest checkpoint in .scratch/vps-file-hub/STATE.md."
+  "notes": "C-001/C-002 describe historical deployment and security cleanup before authentication and probe removal; their before/after statements are not current architecture. C-003 records the host form change. Collection, downloads and derived routes now exist; C-004/C-005/C-006 record the 2026-10-08 full-code repairs with offline verification, separately from unverified live deployment. See the latest checkpoint in .scratch/vps-file-hub/STATE.md. C-011 records UI layout/workflow repair; latest checkpoint is .scratch/ui-layout-repair/STATE.md."
 }

@@ -20,6 +20,11 @@ class Element {
   get parentElement() { return this.parentNode; }
   get options() { return this.children.filter(c => c.tagName === 'OPTION'); }
   appendChild(child) { child.parentNode = this; this.children.push(child); return child; }
+  get nextSibling() { return this.parentNode?.children[this.parentNode.children.indexOf(this) + 1] || null; }
+  insertBefore(child, reference) {
+    if (!reference) return this.appendChild(child);
+    child.parentNode = this; this.children.splice(this.children.indexOf(reference), 0, child); return child;
+  }
   removeChild(child) { this.children.splice(this.children.indexOf(child), 1); child.parentNode = null; return child; }
   remove() { this.parentNode?.removeChild(this); }
   setAttribute(name, value) { this.attrs[name] = String(value); if (name === 'class') this.className = String(value); }

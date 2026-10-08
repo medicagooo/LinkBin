@@ -494,19 +494,18 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     return node;
   }
 
-  // Every request is bounded. Without this a hung call leaves the page waiting forever - and a
-  // disabled button is the same class of dead end as a silent failure. The server's own SSH connect
-  // timeout is 20s, so 30s leaves room for that plus the round trip.
+  // Ordinary calls allow 30s; uploads allow 120s and collection allows 360s for its five-minute run budget.
   var REQUEST_TIMEOUT_MS = 30000;
 
   function api(path, options) {
     var opts = options || {};
     opts.headers = Object.assign({ 'content-type': 'application/json' }, opts.headers || {});
     var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var timeoutMs = path.indexOf('/api/files/upload') === 0 ? 120000 : path === '/api/collect' ? 360000 : REQUEST_TIMEOUT_MS;
     var timer = null;
     if (controller) {
       opts.signal = controller.signal;
-      timer = setTimeout(function () { controller.abort(); }, path.indexOf('/api/files/upload') === 0 ? 120000 : path === '/api/collect' ? 360000 : REQUEST_TIMEOUT_MS);
+      timer = setTimeout(function () { controller.abort(); }, timeoutMs);
     }
     function stopTimer() { if (timer) { clearTimeout(timer); timer = null; } }
     return fetch(path, opts).then(function (res) {
@@ -535,7 +534,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
         body: {
           ok: false,
           error: aborted
-            ? t('form.requestTimeout', { seconds: Math.round(REQUEST_TIMEOUT_MS / 1000) })
+            ? t('form.requestTimeout', { seconds: Math.round(timeoutMs / 1000) })
             : t('form.requestFailed', { detail: String((err && err.message) || err) }),
         },
       };
@@ -970,6 +969,8 @@ export function renderIndexPage(locale: Locale = 'en'): string {
    */
   function renderObjects(objects, total, limit, append) {
     var host = $('objectlist');
+    var oldPager = $('browseMore');
+    if (oldPager) oldPager.remove();
     if (!append) clear(host);
 
     var count = $('browseCount');
@@ -1094,7 +1095,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
           api('/api/files/delete', { method: 'POST', body: JSON.stringify({ id: o.id }) }).then(function (r) {
             remove.disabled = false;
             if (!r.ok) { alert(r.body.error || t('shares.failed')); return; }
-            loadObjects(); loadUsage(); loadDirectLinks(); loadShares();
+            loadObjects(); loadUsage(); loadDirectLinks(); loadShares(); loadShareFiles(); loadMerges();
           });
         });
         tail.appendChild(remove);
@@ -1165,6 +1166,11 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     });
   }
   function loadObjects(append) {
+    if (!append) {
+      var oldPager = $('browseMore');
+      if (oldPager) oldPager.remove();
+      clear($('browseCount')); browseState.skipped = 0;
+    }
     var query = [];
     if (browseState.search) query.push('q=' + encodeURIComponent(browseState.search));
     if (browseState.host) query.push('host=' + encodeURIComponent(browseState.host));
@@ -2216,8 +2222,8 @@ function translationsLiteral(): string {
 			'form.needPassword': 'Enter a password, or switch to the private key method.',
 			'form.needKey': 'Paste a private key, or switch to the password method.',
 			'form.saveFailed': 'Not saved: {detail}',
-			'form.requestFailed': 'The request never reached the Worker ({detail}). Nothing was changed.',
-			'form.requestTimeout': 'The Worker did not answer within {seconds} seconds. Nothing was changed; try again.',
+			'form.requestFailed': 'No response was received ({detail}). Refresh to check the outcome before trying again.',
+			'form.requestTimeout': 'The Worker did not answer within {seconds} seconds. Refresh to check the outcome before trying again.',
 			'rules.title': 'Directories to collect',
 			'rules.lede': 'A rule on all machines applies everywhere; a rule on one machine applies only there. Exclusions are checked first.',
 			'rules.scope': 'Applies to',
@@ -2455,8 +2461,8 @@ function translationsLiteral(): string {
 			'form.needPassword': '请填写密码，或切换到私钥方式。',
 			'form.needKey': '请粘贴私钥，或切换到密码方式。',
 			'form.saveFailed': '未保存：{detail}',
-			'form.requestFailed': '请求没有到达 Worker（{detail}），未做任何改动。',
-			'form.requestTimeout': 'Worker 在 {seconds} 秒内没有响应，未做任何改动，请重试。',
+			'form.requestFailed': '未收到响应（{detail}）。请先刷新确认结果，再决定是否重试。',
+			'form.requestTimeout': 'Worker 在 {seconds} 秒内没有响应。请先刷新确认结果，再决定是否重试。',
 			'rules.title': '要采集的目录',
 			'rules.lede': '对所有机器生效的规则处处适用；指定机器的规则只在那台生效。排除规则优先判断。',
 			'rules.scope': '适用范围',
@@ -2740,8 +2746,8 @@ function translationsLiteral(): string {
 			'form.needPassword': '請填寫密碼，或切換到私鑰方式。',
 			'form.needKey': '請貼上私鑰，或切換到密碼方式。',
 			'form.saveFailed': '未儲存：{detail}',
-			'form.requestFailed': '請求沒有到達 Worker（{detail}），未做任何變更。',
-			'form.requestTimeout': 'Worker 在 {seconds} 秒內沒有回應，未做任何變更，請重試。',
+			'form.requestFailed': '未收到回應（{detail}）。請先重新整理確認結果，再決定是否重試。',
+			'form.requestTimeout': 'Worker 在 {seconds} 秒內沒有回應。請先重新整理確認結果，再決定是否重試。',
 			'rules.title': '要採集的目錄',
 			'rules.lede': '對所有機器生效的規則處處適用；指定機器的規則只在那台生效。排除規則優先判斷。',
 			'rules.scope': '適用範圍',
@@ -2924,8 +2930,8 @@ function translationsLiteral(): string {
 			'form.needPassword': 'パスワードを入力するか、秘密鍵方式に切り替えてください。',
 			'form.needKey': '秘密鍵を貼り付けるか、パスワード方式に切り替えてください。',
 			'form.saveFailed': '保存できませんでした：{detail}',
-			'form.requestFailed': 'リクエストが Worker に到達しませんでした（{detail}）。変更は行われていません。',
-			'form.requestTimeout': 'Worker が {seconds} 秒以内に応答しませんでした。変更は行われていません。もう一度お試しください。',
+			'form.requestFailed': '応答を受信できませんでした（{detail}）。再試行する前に更新して結果を確認してください。',
+			'form.requestTimeout': 'Worker が {seconds} 秒以内に応答しませんでした。再試行する前に更新して結果を確認してください。',
 			'rules.title': '収集するディレクトリ',
 			'rules.lede': 'すべてのマシンに効くルールはどこでも適用され、特定のマシンのルールはそこだけで適用されます。除外が先に判定されます。',
 			'rules.scope': '適用範囲',
