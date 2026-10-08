@@ -20,6 +20,8 @@
  *      behind it to refract, so each theme has its own bloom field.
  */
 
+import { WORKFLOW_SCRIPT, WORKFLOW_STYLES, WORKFLOW_COPY } from './ui-workflows.ts';
+
 export type Locale = 'en' | 'zh-CN' | 'zh-TW' | 'ja';
 
 export const LOCALES: readonly Locale[] = ['zh-CN', 'zh-TW', 'ja', 'en'] as const;
@@ -72,7 +74,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
 <style>${STYLES}</style>
 </head>
 <body>
-<a class="skiplink" href="#panel" data-i18n="skip">Skip to content</a>
+<a class="skiplink" href="#app" data-i18n="skip">Skip to content</a>
 
 <div class="field" aria-hidden="true">
   <span class="bloom b1"></span><span class="bloom b2"></span><span class="bloom b3"></span>
@@ -117,8 +119,18 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     <p class="hint" id="gate-hint"></p>
   </section>
 
-  <main class="grid" id="app" hidden>
-    <section class="glass rail" aria-labelledby="hosts-h">
+  <div class="workspace" id="workspace" hidden>
+    <nav class="glass workspace-nav" aria-label="LinkBin">
+      <button type="button" class="ghost" data-view-button="files" data-i18n="ui.nav.files" aria-controls="files-panel">Files</button>
+      <button type="button" class="ghost" data-view-button="links" data-i18n="ui.nav.links" aria-controls="links-panel">Download links</button>
+      <button type="button" class="ghost" data-view-button="merges" data-i18n="ui.nav.merges" aria-controls="merges-panel">Combined files</button>
+      <button type="button" class="ghost" data-view-button="runs" data-i18n="ui.nav.runs" aria-controls="runs-panel">Collection</button>
+      <button type="button" class="ghost" data-view-button="hosts" data-i18n="ui.nav.hosts" aria-controls="hosts-panel">Hosts and rules</button>
+    </nav>
+    <div class="workspace-main">
+      <div class="workspace-summary"><p class="hint" id="usageSummary" role="status"></p><button type="button" class="ghost small" id="refreshData" data-i18n="ui.refresh">Refresh</button></div>
+  <main class="grid" id="app" hidden tabindex="-1">
+    <section class="glass rail" id="hosts-panel" data-panel="hosts" aria-labelledby="hosts-h">
       <h2 id="hosts-h" data-i18n="hosts.title">Hosts</h2>
       <p class="lede" data-i18n="hosts.lede"></p>
       <div id="hostlist"></div>
@@ -156,7 +168,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
         <div class="formmsg" id="formmsg" hidden role="status" aria-live="polite"></div>
       </section>
 
-      <section class="glass rules" aria-labelledby="rules-h">
+      <section class="glass rules" data-panel="hosts" aria-labelledby="rules-h">
         <h2 id="rules-h" data-i18n="rules.title">Directories to collect</h2>
         <p class="lede" data-i18n="rules.lede"></p>
         <div class="fields">
@@ -168,7 +180,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
         <div id="rulelist"></div>
       </section>
 
-      <section class="glass browse" aria-labelledby="browse-h">
+      <section class="glass browse" id="files-panel" data-panel="files" aria-labelledby="browse-h">
         <h2 id="browse-h" data-i18n="browse.title">Stored files</h2>
         <p class="lede" data-i18n="browse.lede"></p>
         <div class="fields">
@@ -184,30 +196,37 @@ export function renderIndexPage(locale: Locale = 'en'): string {
           <label class="f narrow toggle"><input id="b-history" type="checkbox"><span data-i18n="browse.history">Include replaced versions</span></label>
         </div>
         <div id="browseCount" class="browse-count"></div>
-        <div class="fields"><label class="f"><span data-i18n="files.upload">Upload files to R2</span><input id="f-upload" type="file" multiple></label></div>
-        <div class="actions"><button class="quiet" id="uploadFiles" data-i18n="files.uploadAction">Upload selected files</button></div>
-        <div id="uploadResult" role="status"></div>
+        <div class="upload-area">
+          <div class="fields"><label class="f"><span data-i18n="files.upload">Upload files to R2</span><input id="f-upload" type="file" multiple></label></div>
+          <div id="uploadQueue" role="status" aria-live="polite"></div>
+          <div class="actions"><button class="quiet" id="uploadFiles" data-i18n="files.uploadAction" disabled>Upload selected files</button><button class="ghost" id="retryUploads" data-i18n="ui.retryUploads" disabled>Retry failed files</button></div>
+          <div id="uploadResult" role="status"></div>
+        </div>
         <div id="objectlist"></div>
-        <h3 data-i18n="files.directTitle">Direct download links</h3>
+      </section>
+      <section class="glass direct" data-panel="links" aria-labelledby="direct-h">
+        <h2 id="direct-h" data-i18n="files.directTitle">Direct download links</h2>
         <p class="hint" data-i18n="files.directHint">Anyone with a direct link can download the latest version. Revoke it here to stop access.</p>
         <div id="directLinks"></div>
       </section>
 
-      <section class="glass storage" aria-labelledby="storage-h">
+      <section class="glass storage" data-panel="files" aria-labelledby="storage-h">
         <h2 id="storage-h" data-i18n="storage.title">Storage</h2>
-        <p class="lede" data-i18n="storage.lede"></p>
+        <button type="button" class="ghost small" id="largestFiles" data-i18n="ui.largestFiles">View largest files</button>
         <!--
           The numbers are the point, not decoration. A budget that is only ENFORCED is one the operator discovers
           by having a file refused, and by then the useful moment for planning around it has passed.
         -->
         <div id="usage"></div>
+        <details><summary data-i18n="ui.storagePolicy"></summary><p class="hint" data-i18n="storage.lede"></p></details>
       </section>
 
-      <section class="glass shares" aria-labelledby="shares-h">
+      <section class="glass shares" id="links-panel" data-panel="links" aria-labelledby="shares-h">
         <h2 id="shares-h" data-i18n="shares.title">Shared links</h2>
         <p class="lede" data-i18n="shares.lede"></p>
         <div class="fields">
-          <label class="f narrow"><span data-i18n="shares.objectId">Stored file id</span><input id="s-object" inputmode="numeric" spellcheck="false" placeholder="1"></label>
+          <label class="f"><span data-i18n="ui.findFile">Find a file by path</span><input id="s-search" type="search" autocomplete="off"></label>
+          <label class="f share-picker"><span data-i18n="ui.selectFile">Choose a stored file</span><select id="s-object"></select></label>
           <label class="f narrow"><span data-i18n="shares.lifetime">Lasts</span><select id="s-seconds">
             <option value="900" data-i18n="shares.15m">15 minutes</option>
             <option value="3600" data-i18n="shares.1h">1 hour</option>
@@ -217,17 +236,18 @@ export function renderIndexPage(locale: Locale = 'en'): string {
           </select></label>
           <label class="f"><span data-i18n="files.sharePassword">Sharing password (8–1024 characters)</span><input id="s-password" type="password" autocomplete="new-password" spellcheck="false" minlength="8" maxlength="1024"></label>
         </div>
-        <div class="actions"><button class="quiet" id="makeShare" data-i18n="shares.create">Create link</button></div>
+        <div id="shareChoices" role="status"></div><p id="shareSelected" class="share-selection"></p>
+        <div class="actions"><button class="quiet" id="makeShare" disabled data-i18n="shares.create">Create link</button></div>
         <div id="shareResult"></div>
         <div id="sharelist"></div>
       </section>
 
-      <section class="glass merges" aria-labelledby="merges-h">
+      <section class="glass merges" id="merges-panel" data-panel="merges" aria-labelledby="merges-h">
         <h2 id="merges-h" data-i18n="merges.title">Combined files</h2>
         <p class="lede" data-i18n="merges.lede"></p>
         <div class="fields">
-          <label class="f narrow"><span data-i18n="merges.outputName">Call the result</span><input id="m-name" spellcheck="false" placeholder="merged.yaml"></label>
-          <label class="f narrow"><span data-i18n="merges.combination">How to combine</span><select id="m-combination">
+          <label class="f output-name"><span data-i18n="merges.outputName">Call the result</span><input id="m-name" spellcheck="false" placeholder="merged.yaml"></label>
+          <label class="f combination"><span data-i18n="merges.combination">How to combine</span><select id="m-combination">
             <option value="yaml-list-union" selected data-i18n="merges.union">Merge their lists into one document</option>
             <option value="concat" data-i18n="merges.concat">Join them end to end</option>
             <option value="proxy-profile" data-i18n="files.profile">merged-all.yaml profile (8 providers)</option>
@@ -242,11 +262,13 @@ export function renderIndexPage(locale: Locale = 'en'): string {
           <button class="ghost" id="profilePreset" data-i18n="files.profilePreset">Use merged-all preset</button>
         </div>
         <!-- Preview output sits above the list so the thing just asked for is visible without scrolling. -->
-        <div id="mergePreview"></div>
+        <div id="presetStatus" role="status"></div>
+        <p class="hint" data-i18n="ui.previewRequired"></p>
+        <div id="mergePreview" role="status"></div>
         <div id="mergelist"></div>
       </section>
 
-      <section class="glass runs" aria-labelledby="runs-h">
+      <section class="glass runs" id="runs-panel" data-panel="runs" aria-labelledby="runs-h">
         <h2 id="runs-h" data-i18n="runs.title">Collection history</h2>
         <p class="lede" data-i18n="runs.lede"></p>
         <!--
@@ -261,15 +283,18 @@ export function renderIndexPage(locale: Locale = 'en'): string {
           belongs where its results appear.
         -->
         <div class="actions"><button class="quiet" id="collectNow" data-i18n="runs.collectNow">Collect now</button></div>
-        <div id="collectResult"></div>
+        <p class="hint" id="collectHint"></p>
+        <div id="collectResult" role="status" aria-live="polite"></div>
       </section>
 
-      <section class="glass panel" id="panel" aria-labelledby="result-h">
+      <section class="glass panel" id="panel" data-panel="hosts" aria-labelledby="result-h">
         <h2 id="result-h" data-i18n="result.title">Connection test</h2>
         <div id="result"><p class="lede" data-i18n="result.empty"></p></div>
       </section>
     </div>
   </main>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -313,6 +338,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     var app = $('app');
     gate.hidden = false;
     app.hidden = true;
+    $('workspace').hidden = true;
 
     var isSetup = mode === 'setup';
     $('gate-h').textContent = t(isSetup ? 'auth.setupTitle' : 'auth.signInTitle');
@@ -329,11 +355,13 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     authMode = 'in';
     $('gate').hidden = true;
     $('app').hidden = false;
+    $('workspace').hidden = false;
     $('setup').hidden = false;
   }
 
   function authState() {
     return api('/api/auth/state').then(function (r) {
+      if (!r.ok) { showGate('signin', r.body.error || t('auth.failed')); return; }
       if (r.body.configured && r.body.signedIn) {
         hideGate();
         refreshAll();
@@ -365,8 +393,9 @@ export function renderIndexPage(locale: Locale = 'en'): string {
         // After setting a password the operator is not signed in yet, so sign in straight away rather
         // than making them type it twice.
         if (authMode === 'setup') {
-          api('/api/auth/login', { method: 'POST', body: JSON.stringify({ password: password }) }).then(function () {
+          api('/api/auth/login', { method: 'POST', body: JSON.stringify({ password: password }) }).then(function (login) {
             $('gate-password').value = '';
+            if (!login.ok || !login.body.ok) { showGate('signin', login.body.error || t('auth.failed')); return; }
             hideGate();
             refreshAll();
           });
@@ -477,7 +506,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     var timer = null;
     if (controller) {
       opts.signal = controller.signal;
-      timer = setTimeout(function () { controller.abort(); }, path.indexOf('/api/files/upload') === 0 ? 120000 : REQUEST_TIMEOUT_MS);
+      timer = setTimeout(function () { controller.abort(); }, path.indexOf('/api/files/upload') === 0 ? 120000 : path === '/api/collect' ? 360000 : REQUEST_TIMEOUT_MS);
     }
     function stopTimer() { if (timer) { clearTimeout(timer); timer = null; } }
     return fetch(path, opts).then(function (res) {
@@ -913,7 +942,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
       var del = node('button', 'ghost small', t('rules.delete'));
       del.type = 'button';
       del.addEventListener('click', function () {
-        api('/api/rules/delete', { method: 'POST', body: JSON.stringify({ id: r.id }) }).then(function () { loadRules(); });
+        mutate(del, '/api/rules/delete', { id: r.id }, loadRules, li);
       });
       var tail = node('div', 'rule-tail');
       tail.appendChild(del);
@@ -967,6 +996,14 @@ export function renderIndexPage(locale: Locale = 'en'): string {
       var searching = browseState.search || browseState.host;
       empty.appendChild(node('p', 'empty-line', searching ? t('browse.noMatch') : t('browse.empty')));
       empty.appendChild(node('p', 'hint', searching ? t('browse.noMatchHint') : t('browse.emptyHint')));
+      if (!searching) {
+        var actions = node('div', 'actions empty-actions');
+        var upload = node('button', 'quiet', t('files.upload')); upload.type = 'button';
+        upload.addEventListener('click', function () { $('f-upload').focus(); $('f-upload').scrollIntoView({ block: 'center' }); });
+        var configure = node('button', 'ghost', t('ui.nav.hosts')); configure.type = 'button';
+        configure.addEventListener('click', function () { selectView('hosts'); });
+        actions.appendChild(upload); actions.appendChild(configure); empty.appendChild(actions);
+      }
       host.appendChild(empty);
       return;
     }
@@ -1064,19 +1101,16 @@ export function renderIndexPage(locale: Locale = 'en'): string {
         var share = node('button', 'ghost small', t('browse.share'));
         share.type = 'button';
         share.addEventListener('click', function () {
-          $('s-object').value = String(o.id);
-          $('s-object').scrollIntoView({ block: 'center' });
-          $('shares-h').scrollIntoView({ block: 'start' });
+          selectView('links');
+          $('s-search').value = '';
+          loadShareFiles(o).then(function () { $('s-password').focus(); });
         });
         tail.appendChild(share);
 
         var imp = node('button', 'ghost small', o.important ? t('browse.unprotect') : t('browse.protect'));
         imp.type = 'button';
         imp.addEventListener('click', function () {
-          api('/api/objects/importance', {
-            method: 'POST',
-            body: JSON.stringify({ id: o.id, important: !o.important })
-          }).then(function () { loadObjects(); });
+          mutate(imp, '/api/objects/importance', { id: o.id, important: !o.important }, function () { loadObjects(); loadUsage(); }, li);
         });
         tail.appendChild(imp);
       }
@@ -1108,41 +1142,40 @@ export function renderIndexPage(locale: Locale = 'en'): string {
 
   /** Copies text, falling back to a hidden selection where the clipboard API is unavailable. */
   function copyText(value, button, label, done) {
-    var restore = function () { button.textContent = label; };
-    if (navigator.clipboard) {
-      navigator.clipboard.writeText(value);
-    } else {
-      // The clipboard API is unavailable on plain HTTP, which a self-hosted deployment may well be. A control
-      // that silently does nothing is worse than one that copies by the old route.
-      var scratch = document.createElement('textarea');
-      scratch.value = value;
-      document.body.appendChild(scratch);
-      scratch.select();
-      try { document.execCommand('copy'); } catch (e) { /* nothing better to do */ }
-      document.body.removeChild(scratch);
+    button.disabled = true;
+    function legacyCopy() {
+      var scratch = node('textarea'); scratch.value = value; document.body.appendChild(scratch); scratch.select();
+      var copied = false;
+      try { copied = document.execCommand('copy'); } catch (error) {}
+      scratch.remove(); return copied;
     }
-    button.textContent = done;
-    setTimeout(restore, 1200);
+    var attempt = navigator.clipboard ? navigator.clipboard.writeText(value).then(function () { return true; }, legacyCopy) : Promise.resolve(legacyCopy());
+    return attempt.then(function (copied) {
+      button.disabled = false;
+      if (copied) {
+        button.textContent = done;
+        setTimeout(function () { button.textContent = label; }, 1200);
+      } else {
+        var existing = button.parentNode.querySelector('.manual-copy');
+        if (!existing) { existing = node('input', 'manual-copy'); existing.readOnly = true; button.parentNode.appendChild(existing); }
+        existing.value = value; existing.setAttribute('aria-label', t('ui.copyManual')); existing.focus(); existing.select();
+        button.textContent = label; button.title = t('ui.copyManual');
+      }
+      return copied;
+    });
   }
-
   function loadObjects(append) {
     var query = [];
     if (browseState.search) query.push('q=' + encodeURIComponent(browseState.search));
     if (browseState.host) query.push('host=' + encodeURIComponent(browseState.host));
-    if (browseState.sort) query.push('sort=' + encodeURIComponent(browseState.sort));
+    query.push('sort=' + encodeURIComponent(browseState.sort));
     if (browseState.history) query.push('history=1');
-    // Asks the server to check whether each row's bytes are actually stored, which is what lets an evicted file
-    // be marked unavailable rather than offered as a download. Skipped on a "load more" only in the sense that
-    // the answer is the same request: it is cheap because it is bounded by the page size.
-    query.push('verify=1');
-    query.push('limit=' + browseState.limit);
+    query.push('verify=1', 'limit=' + browseState.limit);
     if (append && browseState.skipped) query.push('offset=' + browseState.skipped);
-
-    return api('/api/objects?' + query.join('&')).then(function (r) {
-      if (r.ok) renderObjects(r.body.objects || [], r.body.total, r.body.limit, append === true);
-    });
+    return loadSection('objectlist', '/api/objects?' + query.join('&'), function (body) {
+      renderObjects(body.objects || [], body.total, body.limit, append === true);
+    }, function () { loadObjects(append); }, append === true);
   }
-
   /** Fills the machine filter from the machines that exist, so it cannot offer one that does not. */
   function fillHostFilter(hosts) {
     hosts = hosts.concat([{ id: '@uploads', label: t('files.uploaded') }, { id: '@derived', label: t('merges.title') }]);
@@ -1244,7 +1277,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
       link.select();
       // The clipboard API is unavailable on plain HTTP, which a self-hosted deployment may well be, so
       // the selection above is the fallback rather than an error the operator has to interpret.
-      if (navigator.clipboard) navigator.clipboard.writeText(share.url);
+      copyText(share.url, copy, t('shares.copy'), t('shares.copied'));
     });
 
     var row = node('div', 'share-made-row');
@@ -1291,15 +1324,14 @@ export function renderIndexPage(locale: Locale = 'en'): string {
         copyBtn.type = 'button';
         copyBtn.addEventListener('click', function () {
           var url = location.origin + '/s/' + s.token;
-          if (navigator.clipboard) navigator.clipboard.writeText(url);
-          copyBtn.textContent = t('shares.copied');
+          copyText(url, copyBtn, t('shares.copy'), t('shares.copied'));
         });
         tail.appendChild(copyBtn);
 
         var revoke = node('button', 'ghost small', t('shares.revoke'));
         revoke.type = 'button';
         revoke.addEventListener('click', function () {
-          api('/api/shares/revoke', { method: 'POST', body: JSON.stringify({ token: s.token }) }).then(function () { loadShares(); });
+          mutate(revoke, '/api/shares/revoke', { token: s.token }, loadShares, li);
         });
         tail.appendChild(revoke);
       }
@@ -1311,16 +1343,13 @@ export function renderIndexPage(locale: Locale = 'en'): string {
   }
 
   function loadShares() {
-    return api('/api/shares').then(function (r) {
-      if (r.ok) renderShares(r.body.shares || []);
-    });
+    return loadSection('sharelist', '/api/shares', function (body) { renderShares(body.shares || []); }, loadShares);
   }
-
   function loadDirectLinks() {
-    return api('/api/file-links').then(function (r) {
-      if (!r.ok) return;
+    return loadSection('directLinks', '/api/file-links', function (body) {
       var host = $('directLinks'); clear(host);
-      (r.body.links || []).forEach(function (link) {
+      if (!(body.links || []).length) host.appendChild(node('p', 'hint', t('ui.linksEmpty')));
+      (body.links || []).forEach(function (link) {
         var row = node('div', 'share-made');
         row.appendChild(node('code', 'pattern', link.host_id + ':' + link.path));
         if (link.revoked_at) { row.appendChild(chip(t('shares.revoked'), 'warn')); }
@@ -1343,7 +1372,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
         }
         host.appendChild(row);
       });
-    });
+    }, loadDirectLinks);
   }
 
   // --- collection history --------------------------------------------------------------------
@@ -1471,11 +1500,8 @@ export function renderIndexPage(locale: Locale = 'en'): string {
   }
 
   function loadRuns() {
-    return api('/api/runs').then(function (r) {
-      if (r.ok) renderRuns(r.body.runs || []);
-    });
+    return loadSection('runlist', '/api/runs', function (body) { renderRuns(body.runs || []); }, loadRuns);
   }
-
   // --- freshness -------------------------------------------------------------------------------
   /**
    * How far behind each machine is, and the worst case.
@@ -1544,11 +1570,8 @@ export function renderIndexPage(locale: Locale = 'en'): string {
   }
 
   function loadFreshness() {
-    return api('/api/freshness').then(function (r) {
-      if (r.ok) renderFreshness(r.body);
-    });
+    return loadSection('freshness', '/api/freshness', function (body) { renderFreshness(body); }, loadFreshness);
   }
-
   // --- data ----------------------------------------------------------------------------------
   function loadStatus() {
     return api('/api/status').then(function (r) {
@@ -1573,12 +1596,16 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     var host = $('usage');
     clear(host);
     if (!u) return;
+    usageCache = u;
+    $('usageSummary').textContent = t('storage.used', { used: bytes(u.totalBytes), total: bytes(u.budgetBytes), percent: ((Number(u.usedFraction) || 0) * 100).toFixed(1) });
+    renderUploadQueue();
 
     var fraction = Math.max(0, Math.min(1, Number(u.usedFraction) || 0));
     var bar = node('div', 'usage-bar');
     var fill = node('div', 'usage-fill' + (fraction >= 0.9 ? ' hot' : fraction >= 0.7 ? ' warm' : ''));
     fill.style.width = (fraction * 100).toFixed(1) + '%';
     bar.appendChild(fill);
+    bar.setAttribute('role', 'progressbar'); bar.setAttribute('aria-label', t('storage.title')); bar.setAttribute('aria-valuemin', '0'); bar.setAttribute('aria-valuemax', '100'); bar.setAttribute('aria-valuenow', (fraction * 100).toFixed(1));
     host.appendChild(bar);
 
     // "12.3 GB of 10 GB" — both figures, because the percentage alone does not tell the operator what a
@@ -1619,24 +1646,17 @@ export function renderIndexPage(locale: Locale = 'en'): string {
   }
 
   function loadUsage() {
-    return api('/api/usage').then(function (r) {
-      if (r.ok) renderUsage(r.body.usage);
-    });
+    return loadSection('usage', '/api/usage', function (body) { renderUsage(body.usage); }, loadUsage);
   }
-
   function loadHosts() {
-    return api('/api/hosts').then(function (r) {
-      var hosts = r.body.hosts || [];
-      renderHosts(hosts);
-      // The browse filter is built from the same response, so it can only offer machines that exist.
-      fillHostFilter(hosts);
-    });
+    hostsLoaded = false; updateActions();
+    return loadSection('hostlist', '/api/hosts', function (body) {
+      hostsLoaded = true; renderHosts(body.hosts || []); fillHostFilter(body.hosts || []); updateActions();
+    }, loadHosts).then(function (body) { if (body === null) { hostCache = []; updateActions(); } });
   }
-
   function loadRules() {
-    return api('/api/rules').then(function (r) { renderRules(r.body.rules || []); });
+    return loadSection('rulelist', '/api/rules', function (body) { renderRules(body.rules || []); }, loadRules);
   }
-
   // --- combined files --------------------------------------------------------------------------
   /**
    * The patterns, one per line.
@@ -1711,7 +1731,9 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     });
 
     if (p.sources && p.sources.length) {
-      box.appendChild(node('p', 'hint', p.sources.join(', ')));
+      var sources = node('ul', 'source-check');
+      p.sources.forEach(function (source) { sources.appendChild(node('li', 'pattern', source)); });
+      box.appendChild(sources);
     }
     if (p.notes && p.notes.length) {
       p.notes.forEach(function (note) { box.appendChild(node('p', 'hint', note)); });
@@ -1768,22 +1790,24 @@ export function renderIndexPage(locale: Locale = 'en'): string {
         api('/api/derived/run', { method: 'POST', body: JSON.stringify({ id: m.ruleId }) }).then(function (r) {
           run.disabled = false;
           if (!r.ok || !r.body.ok) {
-            note(r.body.error || t('merges.failed'), true);
+            feedback('mergePreview', r.body.error || t('merges.failed'), true);
           } else {
-            note(t('merges.built').replace('{bytes}', bytes(r.body.bytes)), false);
+            feedback('mergePreview', t('merges.built').replace('{bytes}', bytes(r.body.bytes)), false);
           }
-          loadMerges();
-          loadObjects();
+          loadMerges(); loadObjects(); loadUsage(); loadShareFiles();
         });
       });
       tail.appendChild(run);
+      if (m.objectId) {
+        var download = node('a', 'ghost small', t('files.download'));
+        download.href = '/api/files/download?id=' + m.objectId;
+        tail.appendChild(download);
+      }
 
       var del = node('button', 'ghost small', t('merges.forget'));
       del.type = 'button';
       del.addEventListener('click', function () {
-        api('/api/derived/delete', { method: 'POST', body: JSON.stringify({ id: m.ruleId }) }).then(function () {
-          loadMerges();
-        });
+        mutate(del, '/api/derived/delete', { id: m.ruleId }, loadMerges, li);
       });
       tail.appendChild(del);
 
@@ -1794,11 +1818,8 @@ export function renderIndexPage(locale: Locale = 'en'): string {
   }
 
   function loadMerges() {
-    return api('/api/derived/status').then(function (r) {
-      if (r.ok) renderMerges(r.body.rules || []);
-    });
+    return loadSection('mergelist', '/api/derived/status', function (body) { renderMerges(body.rules || []); }, loadMerges);
   }
-
   function refreshAll() {
     applyStaticText();
     renderLangSwitch();
@@ -1814,7 +1835,12 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     loadRuns();
     loadFreshness();
     loadMerges();
+    loadShareFiles();
+    renderUploadQueue();
+    selectView(currentView);
   }
+
+  ${WORKFLOW_SCRIPT}
 
   // --- events --------------------------------------------------------------------------------
   // Search is debounced: a keystroke-per-request would fire a query for every prefix of what is being typed,
@@ -1852,34 +1878,12 @@ export function renderIndexPage(locale: Locale = 'en'): string {
   });
 
   $('collectNow').addEventListener('click', function () {
-    var button = $('collectNow');
-    var host = $('collectResult');
-    button.disabled = true;
-    clear(host);
-
-    api('/api/collect', { method: 'POST' }).then(function (r) {
-      button.disabled = false;
-      if (!r.ok) {
-        host.appendChild(node('p', 'hint error', r.body.error || t('runs.collectFailed')));
-        return;
-      }
-      var body = r.body;
-
-      // Every answer is stated, including "there is nothing to do". A button that appears to do nothing is
-      // indistinguishable from one that is broken, and an empty deployment is the most likely reason.
-      if (!body.run) {
-        host.appendChild(node('p', 'hint', body.reason === 'out-of-time' ? t('runs.outOfTime') : t('runs.nothingToDo')));
-        return;
-      }
-
-      // The decision is reported as a decision. Collection itself is not built, and a message implying a
-      // machine had been updated would be a lie the operator would act on.
-      host.appendChild(node('p', 'hint', t('runs.planOnly').replace('{host}', body.machineId)));
-      if (body.resumeFrom) host.appendChild(node('p', 'hint', t('runs.resumeFrom').replace('{from}', body.resumeFrom)));
-      loadRuns();
+    if (collectBusy || $('collectNow').disabled) return;
+    collectBusy = true; updateActions(); feedback('collectResult', t('ui.collectWorking'), false);
+    api('/api/collect', { method: 'POST' }).then(function (result) {
+      collectBusy = false; updateActions(); showCollection(result);
     });
   });
-
   $('makeShare').addEventListener('click', function () {
     var button = $('makeShare');
     var objectId = Number($('s-object').value);
@@ -1899,7 +1903,8 @@ export function renderIndexPage(locale: Locale = 'en'): string {
       return;
     }
 
-    button.disabled = true;
+    if (shareBusy || !selectedShareFile || selectedShareFile.id !== objectId) return;
+    shareBusy = true; updateActions();
     var payload = { objectId: objectId, seconds: Number($('s-seconds').value) };
     // Omitted entirely when blank, so "no password" and "empty password" stay different requests. An empty
     // one is refused by the server, which is right: a share that only looks protected is worse than an open
@@ -1907,45 +1912,25 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     if (password) payload.password = password;
 
     api('/api/shares', { method: 'POST', body: JSON.stringify(payload) }).then(function (r) {
-      button.disabled = false;
+      shareBusy = false; updateActions();
       if (!r.ok) {
         clear($('shareResult'));
         $('shareResult').appendChild(node('p', 'hint error', r.body.error || t('shares.failed')));
         return;
       }
-      $('s-password').value = '';
+      $('s-password').value = ''; updateActions();
       renderShareResult(r.body.share, password);
       loadShares();
     });
   });
 
-  $('uploadFiles').addEventListener('click', function () {
-    var button = $('uploadFiles');
-    var files = Array.prototype.slice.call($('f-upload').files || []);
-    if (!files.length) return;
-    button.disabled = true;
-    clear($('uploadResult'));
-    // Sequential uploads share capacity/publication ordering and report each result independently.
-    var chain = Promise.resolve();
-    files.forEach(function (file) {
-      chain = chain.then(function () {
-        return api('/api/files/upload?name=' + encodeURIComponent(file.name), {
-          method: 'POST', body: file, headers: { 'content-type': 'application/octet-stream' }
-        }).then(function (r) {
-          $('uploadResult').appendChild(node('p', r.ok ? 'hint' : 'hint error', file.name + ': ' + (r.ok ? t('files.uploadDone') : (r.body.error || t('shares.failed')))));
-          (r.body.mergeIssues || []).forEach(function (issue) { $('uploadResult').appendChild(node('p', 'hint error', (issue.path || '') + ': ' + issue.reason)); });
-        });
-      });
-    });
-    chain.then(function () { button.disabled = false; $('f-upload').value = ''; loadObjects(); loadUsage(); loadMerges(); });
-  });
-
+  $('uploadFiles').addEventListener('click', function () { uploadSelected(false); });
   $('profilePreset').addEventListener('click', function () {
     $('m-name').value = 'merged-all.yaml';
     $('m-combination').value = 'proxy-profile';
     $('m-patterns').value = ['bytevirt.yaml', 'dartnode.yaml', 'rabisu.yaml', '56idc.yaml', 'yinyun.yaml',
       'racknerd.23.254.219.147.yaml', 'racknerd.192.119.78.227.yaml', 'racknerd.107.172.99.23.yaml'].map(function (name) { return '/' + name; }).join('\\n');
-    $('m-patterns').focus();
+    mergeEdited(); checkPresetSources(); $('m-patterns').focus();
   });
 
   $('previewMerge').addEventListener('click', function () {
@@ -1960,10 +1945,15 @@ export function renderIndexPage(locale: Locale = 'en'): string {
       return;
     }
 
-    button.disabled = true;
+    if ($('mergePreview').getAttribute('aria-busy') === 'true') return;
+    var snapshot = JSON.stringify(definition);
+    $('mergePreview').setAttribute('aria-busy', 'true'); updateActions();
     // The UNSAVED definition is previewed, which is what makes this useful before committing to a rule.
     api('/api/derived/preview', { method: 'POST', body: JSON.stringify(definition) }).then(function (r) {
-      button.disabled = false;
+      $('mergePreview').setAttribute('aria-busy', 'false');
+      if (snapshot !== JSON.stringify(mergeDefinition())) { updateActions(); return; }
+      verifiedMerge = r.ok && r.body.preview && r.body.preview.ok ? snapshot : null;
+      updateActions();
       if (!r.ok) {
         clear($('mergePreview'));
         $('mergePreview').appendChild(node('p', 'hint error', r.body.error || t('merges.failed')));
@@ -1976,6 +1966,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
   $('saveMerge').addEventListener('click', function () {
     var button = $('saveMerge');
     var definition = mergeDefinition();
+    if (verifiedMerge !== JSON.stringify(definition) || button.getAttribute('aria-busy') === 'true') return;
 
     if (!definition.outputName) {
       clear($('mergePreview'));
@@ -1988,9 +1979,9 @@ export function renderIndexPage(locale: Locale = 'en'): string {
       return;
     }
 
-    button.disabled = true;
+    button.setAttribute('aria-busy', 'true'); updateActions();
     api('/api/derived', { method: 'POST', body: JSON.stringify(definition) }).then(function (r) {
-      button.disabled = false;
+      button.setAttribute('aria-busy', 'false'); updateActions();
       if (!r.ok) {
         clear($('mergePreview'));
         // A refused rule says why, and the cycle refusal is the one worth reading closely: it names the rules
@@ -1998,21 +1989,21 @@ export function renderIndexPage(locale: Locale = 'en'): string {
         $('mergePreview').appendChild(node('p', 'hint error', r.body.error || t('merges.failed')));
         return;
       }
-      clear($('mergePreview'));
+      feedback('mergePreview', t('ui.mergeSaved'), false);
       loadMerges();
     });
   });
 
   $('addToggle').addEventListener('click', function () {
     var form = $('hostform');
-    form.hidden = !form.hidden;
+    hostFormOpen = !hostFormOpen; selectView('hosts');
     if (!form.hidden) $('f-label').focus();
   });
 
-  $('cancelHost').addEventListener('click', function () { $('hostform').hidden = true; });
+  $('cancelHost').addEventListener('click', function () { hostFormOpen = false; $('hostform').hidden = true; });
 
   /** Which credential the form is currently offering. */
-  function authMode() { return $('m-key').checked ? 'key' : 'password'; }
+  function credentialMode() { return $('m-key').checked ? 'key' : 'password'; }
 
   function setAuthMode(mode) {
     var isKey = mode === 'key';
@@ -2042,7 +2033,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
 
     var address = $('f-address').value.trim();
     var username = $('f-username').value.trim();
-    var mode = authMode();
+    var mode = credentialMode();
 
     // Checked here so the answer lands directly under the button. The server validates the same
     // things, but its message goes to the result panel further down the page, which is what made a
@@ -3105,6 +3096,7 @@ function translationsLiteral(): string {
 			'theme.dark': 'ダーク',
 		},
 	};
+	for (const code of Object.keys(table) as Locale[]) Object.assign(table[code], WORKFLOW_COPY[code]);
 	return JSON.stringify(table);
 }
 
@@ -3563,7 +3555,7 @@ button.danger:hover:not(:disabled) { border-color: var(--err); color: var(--err)
    The three classes below were used by the merge panel before any rule defined them, which is the
    failure mode this project has already been bitten by once: an undefined class does not error, it
    silently renders with no styling, so the panel looks like a layout mistake rather than a missing rule.
-   The .merges class itself deliberately has no rule - it is a .glass section and takes the shared padding.
+   Section padding is shared explicitly with every management panel.
 
    No backticks in these comments either: the whole document is one outer template literal, so a backtick
    anywhere - styles included - ends it early. The guard that checks for this used to look only at the
@@ -3643,4 +3635,5 @@ pre.raw {
   .stage { grid-template-columns: 1fr auto 40px; gap: 8px; }
   h3 { font-size: 18px; }
 }
+${WORKFLOW_STYLES}
 `;

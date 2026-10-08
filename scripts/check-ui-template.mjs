@@ -20,6 +20,7 @@
 
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { WORKFLOW_SCRIPT, WORKFLOW_STYLES, WORKFLOW_COPY } from '../src/ui-workflows.ts';
 
 const file = new URL('../src/ui.ts', import.meta.url);
 const source = readFileSync(file, 'utf8');
@@ -303,7 +304,8 @@ const translationProblems = [];
 {
 	// Keys the script asks for, from `t('key')` and `data-i18n="key"`.
 	const used = new Set();
-	for (const match of source.matchAll(/\bt\(\s*'([a-zA-Z][\w.]*)'/g)) used.add(match[1]);
+	const clientSource = source + WORKFLOW_SCRIPT + WORKFLOW_STYLES;
+	for (const match of clientSource.matchAll(/\bt\(\s*'([a-zA-Z][\w.]*)'\s*[,)]/g)) used.add(match[1]);
 	for (const match of source.matchAll(/data-i18n="([^"]+)"/g)) used.add(match[1]);
 
 	// Each locale block. Three details were all wrong on the first three attempts at this line, each found by
@@ -325,6 +327,7 @@ const translationProblems = [];
 			const block = source.slice(start, end);
 			const defined = new Set();
 			for (const match of block.matchAll(/^\t{3}'([^']+)':/gm)) defined.add(match[1]);
+			for (const key of Object.keys(WORKFLOW_COPY[localeStarts[i].code] || {})) defined.add(key);
 			for (const key of defined) union.add(key);
 
 			// Reported per locale, because "missing from Japanese" is the case nobody reviewing in English sees.
@@ -408,7 +411,7 @@ if (newlineInString.length) {
 	// replaced `\` + any character with that character, which turns `\n` into the LETTER n — so `split('\n')`
 	// became `split('n')`, which parses perfectly. The check could not fail on the very defect it was written for,
 	// and it reported success on a source that broke the live page. `\n` must become a NEWLINE.
-	const emitted = withPlaceholders.replace(/\\\$\{/g, '${').replace(/\\([\s\S])/g, (_m, ch) => {
+	let emitted = withPlaceholders.replace(/\\\$\{/g, '${').replace(/\\([\s\S])/g, (_m, ch) => {
 		switch (ch) {
 			case 'n':
 				return '\n';
@@ -432,6 +435,11 @@ if (newlineInString.length) {
 				return ch;
 		}
 	});
+	// The imported workflow is already emitted text; applying template escapes a second time would corrupt it.
+	const workflowLine = body.slice(0, body.indexOf('${WORKFLOW_SCRIPT}')).split('\n').length - 1;
+	const emittedLines = emitted.split('\n');
+	if (body.includes('${WORKFLOW_SCRIPT}')) emittedLines[workflowLine] = WORKFLOW_SCRIPT;
+	emitted = emittedLines.join('\n');
 
 	try {
 		new vm.Script(emitted, { filename: 'emitted-ui-script.js' });

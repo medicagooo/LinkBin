@@ -181,7 +181,7 @@ describe('the storage panel', () => {
 		// Both halves are needed: a loader without a renderer fetches and discards, and a renderer without a
 		// loader draws nothing. Asserting only the panel's existence would pass with either missing.
 		const html = await page();
-		expect(html, 'the loader calls the route').toContain("api('/api/usage')");
+		expect(html, 'the section loader calls the route').toContain("loadSection('usage', '/api/usage'");
 		expect(html, 'the renderer exists').toMatch(/function renderUsage\(/);
 
 		// The CALL, not merely the name. An earlier version of this assertion matched /loadUsage\(\)/ anywhere in
