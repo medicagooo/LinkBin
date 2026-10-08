@@ -1,0 +1,29 @@
+{
+  "task": "1008-r2-file-manager",
+  "purpose": "Implement bounded TypeScript merged-all processing and R2 file management",
+  "requirements": [
+    "Match existing local merged-all.yaml configuration structure and names",
+    "Manage R2 files and expose direct download links",
+    "Share links must let recipients confirm a password before downloading"
+  ],
+  "constraints": [
+    "Preserve unrelated root BRANCHES.md edit",
+    "No deployment or direct cloud/database writes",
+    "Offline simulated D1/R2 validation",
+    "Preserve backward-compatible existing share and merge APIs",
+    "Only SSH_MASTER_KEY; no arbitrary uploaded code execution"
+  ],
+  "acceptance": [
+    "Real eight-file semantic comparison against target",
+    "Regression coverage for direct/password downloads, management authorization and safe replacement",
+    "Full offline tests and build guards pass"
+  ],
+  "status": "active",
+  "integration": "unmerged",
+  "evidence": [
+    "Base main verified 0417fe785f459ac3378acc0e5f512dd1ded44ca4"
+  ],
+  "next": "Create registered worktree and implement",
+  "created_at": "2026-10-08T13:26:55.8290357+08:00",
+  "updated_at": "2026-10-08T13:26:55.8290357+08:00"
+}

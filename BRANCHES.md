@@ -30,17 +30,25 @@
       "purpose": "Review the complete current implementation, repair reproducible bugs, validate offline and push verified repairs to origin/main",
       "status": "active",
       "integration": "unmerged"
+    },
+    {
+      "task": "1008-r2-file-manager",
+      "state": ".branch-records/1008-r2-file-manager/state.json",
+      "events": ".branch-records/1008-r2-file-manager/events.jsonl",
+      "purpose": "TypeScript target-profile processing and R2 file management with direct/password links",
+      "status": "active",
+      "integration": "unmerged"
     }
   ],
   "active": [
     "vps-file-hub",
     "ssh-probe",
-    "1008-review-bug-repair"
+    "1008-review-bug-repair",
+    "1008-r2-file-manager"
   ],
   "pending": [
     "vps-file-hub-e038: push main to origin to deploy the UI authentication fix (predeclared; awaiting execution)",
-    "1008-review-bug-repair-e009: integrate second-review repairs into main preserving user delta (predeclared)",
-    "1008-review-bug-repair-e010: push verified second-review main to origin (predeclared)"
+    "1008-r2-file-manager-e002: create isolated dated feature worktree (predeclared)"
   ],
   "remote": {
     "origin": "git@github.com:medicagooo/LinkBin.git",
@@ -173,21 +181,21 @@
       ],
       "domain": "structured YAML merge / source naming",
       "request": "1008-review-bug-repair-e007",
-      "status": "implemented and verified offline; new main integration/push pending; live deployment unverified",
+      "status": "implemented, verified offline and integrated/pushed at 0417fe7; deployment unverified",
       "deployment_date": null,
       "after": "Names are assigned per source before union, machine/path identity qualifies equal basenames, and static group members, routing action tokens, sub-rule policies and dialers follow their rename map. Ambiguous/dangling references refuse publication; structured comparison preserves __proto__ and distinguishes generated number tags from user mappings.",
       "requirement_date": "2026-10-08",
       "before": "Source-qualified proxy-group names do not update group member or rule target references; naming diagnostics include out-of-scope node names",
       "implementation_date": "2026-10-08",
       "rules": "Existing node names outside naming scope remain unchanged. No custom27group template or user-supplied scripts. Proxy configuration handling is bounded, not a complete dynamic-provider schema validator.",
-      "main_integration_date": null,
+      "main_integration_date": "2026-10-08",
       "id": "C-007"
     },
     {
       "request": "1008-review-bug-repair-e007",
       "requirement_date": "2026-10-08",
       "before": "Saved ordering was ignored, some missing/empty inputs produced partial replacement, invalid naming options were silently accepted/dropped, and cross-source terminal rules shadowed later specifics. Preview omitted entry/duplicate statistics.",
-      "status": "implemented and verified offline; integration/push pending; live deployment unverified",
+      "status": "implemented, verified offline and integrated/pushed at 0417fe7; deployment unverified",
       "domain": "derived processing / input completeness / rule precedence",
       "evidence": [
         "src/derived.ts: engineRule,engineSources,missingSourceProblem,mergeSignature,parseStoredRule",
@@ -201,8 +209,43 @@
       "id": "C-008",
       "after": "Configured order controls concatenation and scalar conflicts. Every source pattern/input is required. Specific routing rules retain priority before one source-precedence MATCH; terminal conflicts are reported. Disjoint sub-rules merge and incompatible definitions refuse. Naming/stored-rule validation, per-source entry/dedup notes and transform-v2 signatures prevent silent stale or invalid results.",
       "deployment_date": null,
-      "main_integration_date": null,
+      "main_integration_date": "2026-10-08",
       "rules": "Failed runs preserve prior D1/R2 output. Invalid saved rules record merge_failed without blocking other refreshes. Existing8MiB aggregate text bound and single-secret/no-transaction architecture remain."
+    },
+    {
+      "id": "C-009",
+      "domain": "derived proxy configuration",
+      "request": "1008-r2-file-manager-e001",
+      "requirement_date": "2026-10-08",
+      "implementation_date": null,
+      "main_integration_date": null,
+      "deployment_date": null,
+      "before": "Generic YAML union creates 24 source groups and does not reproduce the existing merged-all profile",
+      "after": "Bounded TypeScript processor targets the existing settings, node names, provider/global group structure and routing",
+      "rules": "No uploaded script execution or committed node credentials; failed processing preserves previous output",
+      "status": "planned",
+      "evidence": [
+        "src/merge.ts",
+        "src/derived.ts"
+      ]
+    },
+    {
+      "id": "C-010",
+      "domain": "R2 file management / download links",
+      "request": "1008-r2-file-manager-e001",
+      "requirement_date": "2026-10-08",
+      "implementation_date": null,
+      "main_integration_date": null,
+      "deployment_date": null,
+      "before": "Stored-file browser and optional-password expiring share API lack upload, direct links and browser password confirmation",
+      "after": "Manage stored files, download directly and create/revoke direct or password-confirmed sharing links",
+      "rules": "Authenticated management; bearer direct links; password checked before streaming; preserve existing share API",
+      "status": "planned",
+      "evidence": [
+        "src/index.ts",
+        "src/ui.ts",
+        "src/share.ts"
+      ]
     }
   ],
   "notes": "C-001/C-002 describe historical deployment and security cleanup before authentication and probe removal; their before/after statements are not current architecture. C-003 records the host form change. Collection, downloads and derived routes now exist; C-004/C-005/C-006 record the 2026-10-08 full-code repairs with offline verification, separately from unverified live deployment. See the latest checkpoint in .scratch/vps-file-hub/STATE.md."
