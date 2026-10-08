@@ -38,17 +38,28 @@
       "purpose": "TypeScript target-profile processing and R2 file management with direct/password links",
       "status": "active",
       "integration": "unmerged"
+    },
+    {
+      "task": "1008-ui-layout-repair",
+      "state": ".branch-records/1008-ui-layout-repair/state.json",
+      "events": ".branch-records/1008-ui-layout-repair/events.jsonl",
+      "purpose": "Repair the five reported panel layouts and complete the agreed file-management interactions; review and push main",
+      "status": "active",
+      "integration": "unmerged"
     }
   ],
   "active": [
     "vps-file-hub",
     "ssh-probe",
-    "1008-r2-file-manager"
+    "1008-r2-file-manager",
+    "1008-ui-layout-repair"
   ],
   "pending": [
     "vps-file-hub-e038: push main to origin to deploy the UI authentication fix (predeclared; awaiting execution)",
     "1008-r2-file-manager-e005: integrate reviewed feature into main preserving user delta (predeclared)",
-    "1008-r2-file-manager-e006: push verified feature main to origin (predeclared)"
+    "1008-r2-file-manager-e006: push verified feature main to origin (predeclared)",
+    "1008-ui-layout-repair-e002: refresh origin/main (predeclared)",
+    "1008-ui-layout-repair-e003: create isolated UI repair worktree (predeclared)"
   ],
   "remote": {
     "origin": "git@github.com:medicagooo/LinkBin.git",
@@ -254,6 +265,22 @@
         "src/file-links.ts",
         "src/share-page.ts",
         "test/files-routes.test.ts"
+      ]
+    },
+    {
+      "id": "C-011",
+      "domain": "management UI / file workflows",
+      "request": "1008-ui-layout-repair-e001",
+      "requirement_date": "2026-10-08",
+      "implementation_date": null,
+      "main_integration_date": null,
+      "deployment_date": null,
+      "before": "Five panels lack padding; fixed-width controls clip labels; empty/failed operations and collection result handling are incomplete",
+      "after": "Planned responsive sections, file-based sharing, upload queue, merge completeness and accurate collection feedback",
+      "rules": "Existing APIs and storage/authentication limits preserved",
+      "status": "planned",
+      "evidence": [
+        ".scratch/ui-layout-repair/spec.md"
       ]
     }
   ],

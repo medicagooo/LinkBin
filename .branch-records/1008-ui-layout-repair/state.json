@@ -1,0 +1,30 @@
+{
+  "task": "1008-ui-layout-repair",
+  "purpose": "Repair the five reported panel layouts and complete the agreed file-management interactions; review and push main",
+  "requirements": [
+    "Responsive card spacing and readable controls in four languages and both themes",
+    "Navigation for files, links, merges, collection and host/rule settings",
+    "Upload queue with size checks, per-file outcomes and failed-item retry",
+    "File-based password share selection and truthful clipboard feedback",
+    "Merge preview/source completeness and separate save/run results",
+    "Actual collection results, refreshed data and visible list-load failures"
+  ],
+  "constraints": [
+    "Preserve root-owned BRANCHES.md pending-clear delta",
+    "No deployment, migration or direct cloud/database writes",
+    "Keep existing authenticated APIs, single secret, capacity and protection rules"
+  ],
+  "acceptance": [
+    "375/560/828/1280px layouts without page overflow or clipped controls",
+    "Offline UI behavior regressions, full Workers tests, guards and dry-run pass",
+    "Separate Standards and Spec reviews repaired before non-force main push"
+  ],
+  "status": "active",
+  "integration": "unmerged",
+  "evidence": [
+    "Local and GitHub main verified 6282b5129dabe6c11b7c27d3cdfa894cf410b806; five live panels have zero padding at828px"
+  ],
+  "next": "Implement in D:/proj/LinkBin-ui-1008; review and verify, then predeclare integration/push",
+  "created_at": "2026-10-08T15:53:57.1900217+08:00",
+  "updated_at": "2026-10-08T15:53:57.1900217+08:00"
+}
