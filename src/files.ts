@@ -7,6 +7,7 @@
 import { newShareToken } from './share';
 import { MAX_FILE_BYTES, measureStorage, publishVersion, reclaimVersion, withStorageWriter } from './storage';
 import { storeStream } from './store';
+import { revokeFileLinks } from './file-links';
 
 export class FileProblem extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -73,7 +74,8 @@ export async function manageFiles(env: FileEnv, request: Request): Promise<Respo
       if (declaredSize !== undefined && (!Number.isSafeInteger(declaredSize) || declaredSize < 0)) throw new FileProblem(400, 'invalid content length');
       const key = `uploads/${crypto.randomUUID()}/${name}`;
       const outcome = await storeStream(request.body!, env.BUCKET, key, { partSize: 8 * 1024 * 1024,
-        multipartThreshold: 8 * 1024 * 1024, maxBytes: Math.min(MAX_FILE_BYTES, usage.remainingBytes), declaredSize });
+        multipartThreshold: 8 * 1024 * 1024, maxBytes: Math.min(MAX_FILE_BYTES, usage.remainingBytes), declaredSize,
+        deadline: Date.now() + 120_000 });
       if (!outcome.ok) throw new FileProblem(413, outcome.problem ?? 'file could not be stored');
       const at = new Date().toISOString();
       try {
@@ -99,6 +101,7 @@ export async function manageFiles(env: FileEnv, request: Request): Promise<Respo
         AND output.deleted_at IS NULL AND output.superseded_by IS NULL LIMIT 1`).bind(row.host_id, row.path).first();
       if (dependency) throw new FileProblem(409, 'this file is used by a live combined file; delete the combined file first');
       const at = new Date().toISOString();
+      await revokeFileLinks(env.DB, row.host_id, row.path, at);
       await reclaimVersion(env.DB, env.BUCKET, row.id, at);
       await env.DB.prepare('UPDATE objects SET deleted_at = ? WHERE id = ?').bind(at, row.id).run();
       return json({ ok: true, deleted: row.id });

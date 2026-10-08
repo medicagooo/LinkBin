@@ -305,7 +305,9 @@ describe('what is not collected', () => {
 
 		const { results } = await env.DB.prepare('SELECT COUNT(*) AS n FROM objects').all<{ n: number }>();
 		expect(Number(results![0].n)).toBe(120);
-	});
+    // 120 independently published versions perform hundreds of simulated D1/R2 round trips.
+    // This is a completeness assertion, not a five-second throughput requirement.
+	}, 15_000);
 });
 
 describe('a machine that is not well', () => {

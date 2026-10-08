@@ -215,7 +215,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
             <option value="43200" data-i18n="shares.12h">12 hours</option>
             <option value="86400" data-i18n="shares.24h">24 hours</option>
           </select></label>
-          <label class="f"><span data-i18n="files.sharePassword">Sharing password (at least 8 characters)</span><input id="s-password" type="password" autocomplete="new-password" spellcheck="false" minlength="8"></label>
+          <label class="f"><span data-i18n="files.sharePassword">Sharing password (8–1024 characters)</span><input id="s-password" type="password" autocomplete="new-password" spellcheck="false" minlength="8" maxlength="1024"></label>
         </div>
         <div class="actions"><button class="quiet" id="makeShare" data-i18n="shares.create">Create link</button></div>
         <div id="shareResult"></div>
@@ -1885,7 +1885,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     var objectId = Number($('s-object').value);
     var password = $('s-password').value;
 
-    if (!password || password.length < 8) {
+    if (!password || password.length < 8 || password.length > 1024) {
       clear($('shareResult'));
       $('shareResult').appendChild(node('p', 'hint error', t('files.needPassword')));
       return;
@@ -2172,8 +2172,8 @@ function translationsLiteral(): string {
 			'files.directHint': 'Anyone with a direct link can download the latest version. Revoke it here to stop access.',
 			'files.delete': 'Delete file',
 			'files.deleteConfirm': 'Delete {path} from R2? Its downloads and shares will stop working.',
-			'files.sharePassword': 'Sharing password (at least 8 characters)',
-			'files.needPassword': 'Enter a sharing password of at least 8 characters.',
+			'files.sharePassword': 'Sharing password (8–1024 characters)',
+			'files.needPassword': 'Enter a sharing password of 8–1024 characters.',
 			'files.profile': 'merged-all.yaml profile (8 providers)',
 			'files.profilePreset': 'Use merged-all preset',
 			'skip': 'Skip to content',
@@ -2411,8 +2411,8 @@ function translationsLiteral(): string {
 			'files.directHint': '持有直链即可下载文件的最新版本；取消链接后停止访问。',
 			'files.delete': '删除文件',
 			'files.deleteConfirm': '从 R2 删除 {path}？该文件的下载和分享将失效。',
-			'files.sharePassword': '分享密码（至少 8 位）',
-			'files.needPassword': '请输入至少 8 位的分享密码。',
+			'files.sharePassword': '分享密码（8–1024 位）',
+			'files.needPassword': '请输入 8–1024 位的分享密码。',
 			'files.profile': 'merged-all.yaml 配置（8 个来源）',
 			'files.profilePreset': '使用 merged-all 预设',
 			'skip': '跳到主要内容',
@@ -2646,8 +2646,8 @@ function translationsLiteral(): string {
 			'files.directHint': '持有直連即可下載最新版本；取消連結後停止存取。',
 			'files.delete': '刪除檔案',
 			'files.deleteConfirm': '從 R2 刪除 {path}？下載及分享將失效。',
-			'files.sharePassword': '分享密碼（至少 8 位）',
-			'files.needPassword': '請輸入至少 8 位的分享密碼。',
+			'files.sharePassword': '分享密碼（8–1024 位）',
+			'files.needPassword': '請輸入 8–1024 位的分享密碼。',
 			'files.profile': 'merged-all.yaml 設定（8 個來源）',
 			'files.profilePreset': '使用 merged-all 預設',
 			'merges.title': '合併檔案',
@@ -2880,8 +2880,8 @@ function translationsLiteral(): string {
 			'files.directHint': 'リンクを持つ人は最新のファイルをダウンロードできます。取り消すとアクセスできなくなります。',
 			'files.delete': 'ファイルを削除',
 			'files.deleteConfirm': 'R2 から {path} を削除しますか？ダウンロードと共有は無効になります。',
-			'files.sharePassword': '共有パスワード（8 文字以上）',
-			'files.needPassword': '8 文字以上の共有パスワードを入力してください。',
+			'files.sharePassword': '共有パスワード（8–1024 文字）',
+			'files.needPassword': '8–1024 文字の共有パスワードを入力してください。',
 			'files.profile': 'merged-all.yaml 設定（8 ソース）',
 			'files.profilePreset': 'merged-all プリセットを使用',
 			'skip': '本文へ移動',

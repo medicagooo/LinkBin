@@ -28,8 +28,8 @@
       "state": ".branch-records/1008-review-bug-repair/state.json",
       "events": ".branch-records/1008-review-bug-repair/events.jsonl",
       "purpose": "Review the complete current implementation, repair reproducible bugs, validate offline and push verified repairs to origin/main",
-      "status": "active",
-      "integration": "unmerged"
+      "status": "complete",
+      "integration": "verified"
     },
     {
       "task": "1008-r2-file-manager",
@@ -43,11 +43,12 @@
   "active": [
     "vps-file-hub",
     "ssh-probe",
-    "1008-review-bug-repair",
     "1008-r2-file-manager"
   ],
   "pending": [
-    "vps-file-hub-e038: push main to origin to deploy the UI authentication fix (predeclared; awaiting execution)"
+    "vps-file-hub-e038: push main to origin to deploy the UI authentication fix (predeclared; awaiting execution)",
+    "1008-r2-file-manager-e005: integrate reviewed feature into main preserving user delta (predeclared)",
+    "1008-r2-file-manager-e006: push verified feature main to origin (predeclared)"
   ],
   "remote": {
     "origin": "git@github.com:medicagooo/LinkBin.git",
@@ -222,12 +223,13 @@
       "before": "Generic YAML union creates 24 source groups and does not reproduce the existing merged-all profile",
       "after": "Bounded TypeScript proxy-profile reproduces the confirmed settings, source-prefixed node names,27groups and routing; eight real inputs compare semantically identical to target",
       "rules": "No uploaded script execution or committed node credentials; failed processing preserves previous output",
-      "status": "implemented; focused offline tests passed, full validation/review pending",
+      "status": "implemented and verified offline; main integration/push predeclared; live migration/deployment unverified",
       "evidence": [
         "src/merge.ts",
         "src/derived.ts",
         "1008-r2-file-manager-e003",
-        "src/proxy-profile.ts:buildProxyProfile"
+        "src/proxy-profile.ts:buildProxyProfile",
+        "1008-r2-file-manager-e004"
       ]
     },
     {
@@ -240,13 +242,18 @@
       "deployment_date": null,
       "before": "Stored-file browser and optional-password expiring share API lack upload, direct links and browser password confirmation",
       "after": "Manage stored files, download directly and create/revoke direct or password-confirmed sharing links",
-      "rules": "Authenticated management; bearer direct links; password checked before streaming; preserve existing share API",
-      "status": "implemented; focused offline tests passed, full validation/review pending",
+      "rules": "Authenticated management. Stable bearer direct links follow contiguous updates and are permanently revoked on explicit deletion/capacity reclaim. Password shares pin a version and expire≤24h; newUI8–1024characters, legacyAPIcompatible. Uploaddeadline120s,100MiB/file10GiBtotal; no cloud writes in this task.",
+      "status": "implemented and verified offline; main integration/push predeclared; live migration/deployment unverified",
       "evidence": [
         "src/index.ts",
         "src/ui.ts",
         "src/share.ts",
-        "1008-r2-file-manager-e003"
+        "1008-r2-file-manager-e003",
+        "1008-r2-file-manager-e004",
+        "src/files.ts",
+        "src/file-links.ts",
+        "src/share-page.ts",
+        "test/files-routes.test.ts"
       ]
     }
   ],

@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:test';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index';
 import { TEST_BASE_URL, TEST_MASTER_KEY } from './fixtures';
 import { PROFILE_SOURCES } from '../src/proxy-profile';
@@ -79,6 +79,40 @@ describe('R2 file management and direct links', () => {
     expect((await call(new URL(direct.url).pathname)).status).toBe(410);
     expect((await call(new URL(share.share.url).pathname, { headers: { 'x-share-password': 'password123' } })).status).toBe(410);
     expect((await (await call('/api/usage', { headers: { cookie } })).json() as any).usage.totalBytes).toBe(0);
+    const replacement = await uploaded('test.yaml', 'new private contents');
+    expect((await call(new URL(direct.url).pathname)).status).toBe(410);
+    expect((await link(replacement)).url).not.toBe(direct.url);
+  });
+  it('permanently revokes a current file link when capacity reclaims it', async () => {
+    const id = await uploaded();
+    const direct = await link(id);
+    // Simulate a budget-filling managed object without allocating ten GiB in an offline test.
+    await env.DB.prepare('UPDATE objects SET size_bytes = ? WHERE id = ?').bind(10 * 1024 * 1024 * 1024, id).run();
+    const response = await post('/api/usage/reclaim', { sizeBytes: 1 });
+    expect(response.status, await response.clone().text()).toBe(200);
+    await uploaded('test.yaml', 'new private contents');
+    expect((await call(new URL(direct.url).pathname)).status).toBe(410);
+  });
+  it('stops an upload at its server deadline and releases the shared writer lease', async () => {
+    let clock = Date.now();
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    let canceled = false;
+    const source = new ReadableStream<Uint8Array>({ start(value) { controller = value; }, cancel() { canceled = true; } });
+    const request = new Request(TEST_BASE_URL + '/api/files/upload?name=stalled.bin', { method: 'POST', headers: { cookie }, body: source });
+    try {
+      const pending = worker.fetch(request, { ...(env as object), SSH_MASTER_KEY: TEST_MASTER_KEY } as never, {} as never);
+      for (let attempt = 0; attempt < 200 && !request.body!.locked; attempt++) await new Promise(resolve => setTimeout(resolve, 2));
+      expect(request.body!.locked).toBe(true);
+      clock += 120_001;
+      controller.enqueue(new Uint8Array([1]));
+      const response = await pending;
+      expect(response.status).toBe(413);
+      expect(await response.text()).toMatch(/time budget/);
+      expect(canceled).toBe(true);
+      expect(await env.DB.prepare("SELECT id FROM multipart_sessions WHERE id = '@storage-writer'").first()).toBeNull();
+    } finally { now.mockRestore(); }
+    expect((await upload('after-timeout.txt')).status).toBe(200);
   });
   it.each(['../bad.yaml', 'folder/file.yaml', 'x\\bad.yaml', 'x\nyaml', ''])('refuses unsafe upload names: %j', async name => {
     expect((await upload(name)).status).toBe(400);
@@ -142,10 +176,20 @@ describe('password-confirmed recipient downloads', () => {
     const share = (await (await post('/api/shares', { objectId: id, password: 'password123' })).json() as any).share;
     const path = new URL(share.url).pathname;
     expect((await call(path, { method: 'DELETE' })).status).toBe(405);
-    for (const [type, body] of [['application/json', '{"password":"password123"}'], ['application/x-www-form-urlencoded', 'password=password123&padding=' + 'x'.repeat(9000)]]) {
+    for (const [type, body] of [['application/json', '{"password":"password123"}'], ['application/x-www-form-urlencoded', 'password=password123&padding=' + 'x'.repeat(70000)]]) {
       expect((await call(path, { method: 'POST', headers: { 'content-type': type }, body })).headers.get('content-type')).toContain('text/html');
     }
     await uploaded('test.yaml', 'replacement');
     expect((await call(path, { headers: { 'x-share-password': 'password123' } })).status).toBe(410);
+  });
+  it.each(['x'.repeat(1025), '密'.repeat(1024)])('accepts long legacy or form-encoded Unicode passwords', async password => {
+    const id = await uploaded();
+    const created = await post('/api/shares', { objectId: id, password });
+    expect(created.status).toBe(200);
+    const share = (await created.json() as any).share;
+    const response = await call(new URL(share.url).pathname, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ password }).toString() });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('file contents');
   });
 });

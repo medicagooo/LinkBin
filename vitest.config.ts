@@ -18,5 +18,8 @@ export default defineConfig({
 	],
 	test: {
 		include: ['test/**/*.test.ts'],
+    // Many isolated Workers run PBKDF2 and 100-MiB streaming cases. Unbounded file parallelism
+    // starves their five-second deadlines on this Windows host; two workers keep normal test runs stable.
+    maxWorkers: 2,
 	},
 });

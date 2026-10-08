@@ -6,6 +6,7 @@
  */
 import { planAdmission, type BudgetObject } from './budget';
 import { makeRoomFor, type EvictionOutcome } from './evict';
+import { revokeFileLinks } from './file-links';
 export const MAX_FILE_BYTES = 100 * 1024 * 1024;
 export const STORAGE_BUDGET_BYTES = 10 * 1024 * 1024 * 1024;
 
@@ -187,12 +188,16 @@ export async function reclaimFor(db: D1Database, bucket: R2Bucket, size: number,
 			async objectKey(id) {
                 const orphan = objects.find(object => object.id === id)?.orphanKey;
                 if (orphan) return orphan;
-				const row = await db.prepare('SELECT object_key FROM objects WHERE id = ?').bind(id).first<{ object_key: string }>();
+				const row = await db.prepare('SELECT object_key, host_id, path, deleted_at, superseded_by FROM objects WHERE id = ?').bind(id)
+          .first<{ object_key: string; host_id: string; path: string; deleted_at: string | null; superseded_by: number | null }>();
 				if (!row) return null;
                 // Legacy versions may share a key. Never delete bytes another live row still owns.
                 const owner = await db.prepare('SELECT id FROM objects WHERE object_key = ? AND id != ? AND deleted_at IS NULL AND superseded_by IS NULL')
                     .bind(row.object_key, id).first();
-                return owner ? null : row.object_key;
+                if (owner) return null;
+                // Retiring a current logical file ends its links; reclaiming a replaced version does not.
+                if (row.deleted_at === null && row.superseded_by === null) await revokeFileLinks(db, row.host_id, row.path, at);
+                return row.object_key;
 			},
 			async deleteBytes(key) {
 				await bucket.delete(key);

@@ -2,14 +2,13 @@
 
 ## 最新执行检查点：TypeScript 模板处理与 R2 文件管理（2026-10-08）
 
-- **阶段/授权**：第 5 步 implement。用户确认采用 TypeScript，并以现有 merged-all.yaml 结构/命名为目标，增加文件管理、直链及确认密码下载分享；此前 review bug repair push main 的发布要求持续适用。不执行直接云写入、线上迁移或手工部署。
-- **仓库事实**：第二轮修复已推送并核验 main 为 0417fe785f459ac3378acc0e5f512dd1ded44ca4。新任务注册提交 e82a36c；工作区 D:/proj/LinkBin-files-1008，分支 1008-r2-file-manager。原工作区 D:/proj/LinkBin 的另一会话 BRANCHES.md pending-clear 差异保持原位，不纳入提交。本检查点优先于下方历史记录。
-- **产物**：src/proxy-profile.ts 的内置纯 TS 算子，src/files.ts 的登录后上传/下载/删除及可撤销直链，src/share-page.ts 的密码 POST 下载表单，UI 控件、0005_file_links.sql 可重复迁移。docs/r2-file-management.md 记录使用及调用关系/兼容边界。
-- **已验证**：只读处理八个本地真实来源，与现有目标做递归语义比较：40 节点、27 组、0 差异；不覆盖本地文件，不提交节点凭据。初次22项聚焦测试通过；模板/迁移守卫与离线 dry-run 通过，5迁移/37语句。全量测试和最终独立审查仍在进行，不等于发布完成。
-- **锁定与假设**：直链采用可撤销的长期固定地址、跟随 host/path 的最新版本；密码分享固定旧版本、最多24小时，替换/删除后失效。新UI密码必填，原API允许无密码以保留兼容。不执行用户上传脚本、不新增部署密钥，沿用100MiB/文件10GiB总容量及8MiB派生输入限额。
-- **剩余项**：先处理全量测试/审查发现，再显式提交任务文件；发布前记录准确整合和push操作、保护原工作区差异并核验远端SHA。上线前需要新Worker和0005迁移，两者当前未执行，必须按云操作政策分别获得精确确认。
-- **下一条准确动作**：在 D:/proj/LinkBin-files-1008 检查 .scratch/files-full-test.log，完成必要修复和复核；随后检查Git差异和登记JSON/JSONL，仅提交本任务文件。
-
+- **阶段/授权**：第5步 implement、修复和离线验收完成。用户确认 TypeScript及merged-all目标结构/命名，增加R2文件管理、直链和确认密码下载分享；此前明确的review bug repair push main要求持续适用。不执行直接云写入、线上迁移或手工部署。
+- **仓库事实**：第二轮修复已推送并核验main=0417fe785f459ac3378acc0e5f512dd1ded44ca4；当前本地main=e82a36c登记提交，GitHub main仍0417fe7。新特性工作区D:/proj/LinkBin-files-1008，分支1008-r2-file-manager，实现提交d40f459及本次最终修复/预声明提交。原工作区D:/proj/LinkBin的另一会话BRANCHES.md旧e038pending-clear差异保持原位，不纳入提交。本文是发布前检查点，e005/e006仍待实时核验，不能将预期当作结果。
+- **产物**：src/proxy-profile.ts内置纯TS算子、src/files.ts登录后上传/下载/删除/直链、src/file-links.ts永久撤销删除/回收的直链、src/share-page.ts密码POST下载表单；四语言UI、0005_file_links.sql可重复迁移。docs/r2-file-management.md记录使用及调用关系/兼容边界。
+- **验证**：八个真实本地来源只读生成后与目标递归语义比较：40节点27组0差异；无本地覆盖/凭据提交/R2写入。最终46文件744/744测试通过，比717基线新增27项。模板/迁移守卫和Worker离线dry-run通过：5迁移37语句。初次默认大量并行有6项5秒超时，降至2worker后740通过；最终两个120文件/多轮完整性测试需15秒模拟I/O预算，断言未改，744全绿。Standards3项和Spec2项问题均修复，两项最终聚焦复核无剩余阻断。
+- **锁定**：直链可撤销、永久地址随连续host/path更新；删除/容量回收永久取消旧token，同名重新上传不恢复。密码分享固定版本最多24h，新UI8–1024位，旧API密码/header/query兼容。上传120秒服务端截止并释放锁。不执行上传代码、不增加密钥，保持100MiB文件/10GiB容量/8MiB派生输入。管理的是应用登记的R2对象。
+- **剩余与发布边界**：代码验收已就绪。e005整合后验证原差异，e006非强推并用GitHub API/HTTPS验证SHA。上线后0005新表/索引须应用；目前仅只读确认旧线上/api/status schema.ready=true，未修改数据库。迁移需要精确确认目标linkbin-db与POST https://linkbin.cyc-xiaochen.workers.dev/api/admin/apply-schema（重新执行幂等0001–0005，仅新增file_links/idx_file_links_active，保留已有数据）。没有该确认不得执行。
+- **下一条准确动作**：在D:/proj/LinkBin-files-1008显式提交最终任务代码、测试、STATE及登记；重查D:/proj/LinkBin main=e82a36c且只剩原账本差异，按e005恢复干净任务路径、暂存精确目标账本blob、compare-and-swap快进main，再按e006推送并核验远端SHA。
 ## 最新执行检查点：第二轮代码审查修复（2026-10-08）
 
 - **已核验阶段/授权**：第 5 步 implement 的第二轮完整代码审查与修复已离线完成。前一轮 main 已推送 `ef44b77bc7db41c094369d780e0eae213399fcc5`；本轮用户明确要求 review bug repair push main（请求 e007），允许修复、测试、提交、合入、推送；没有直接部署/迁移/线上数据管理授权。

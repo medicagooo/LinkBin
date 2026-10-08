@@ -26,9 +26,13 @@
     "Isolated worktree at e82a36c; original ledger edit remains untouched",
     "Real-file semantic comparison:40nodes27groups0differences",
     "22 focused tests passed; final full validation and review pending",
-    "Guards and dry-run passed with five migrations/37statements"
+    "Guards and dry-run passed with five migrations/37statements",
+    "Final744/744 tests in46files passed;27featuretests added",
+    "Standards3findings and Spec2findings repaired; both final focused reviews clear",
+    "Five migrations37statements and offline dry-run passed",
+    "Explicit delete/reclaim permanently revoke direct links;120sserveruploaddeadline; legacylong/Unicodepasswordsverified"
   ],
-  "next": "Complete full offline tests, review feature diff, fix findings and publish per existing push-main request",
+  "next": "Execute predeclared e005 then e006, verify local/remote SHA. Cloud migration0005 remains unapplied and requires explicit target-specific confirmation.",
   "created_at": "2026-10-08T13:26:55.8290357+08:00",
-  "updated_at": "2026-10-08T13:41:10.1578116+08:00"
+  "updated_at": "2026-10-08T13:54:28.9323769+08:00"
 }

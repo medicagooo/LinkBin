@@ -167,7 +167,8 @@ describe('resuming from a cursor', () => {
 			expect(m.reads(), `a cursor of ${JSON.stringify(bad)} must not skip anything`).toBe(FILES);
 			expect(body.totals.stored).toBe(FILES);
 		}
-	});
+    // Four complete collection runs share this case; allow their simulated I/O to finish under load.
+	}, 15_000);
 
 	it('does not fall over when the cursor is further ahead than the machine has files', async () => {
 		// A file removed upstream since the cursor was written. Nothing is left to do, and that is not an error.
