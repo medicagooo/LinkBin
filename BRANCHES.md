@@ -47,8 +47,7 @@
     "1008-r2-file-manager"
   ],
   "pending": [
-    "vps-file-hub-e038: push main to origin to deploy the UI authentication fix (predeclared; awaiting execution)",
-    "1008-r2-file-manager-e002: create isolated dated feature worktree (predeclared)"
+    "vps-file-hub-e038: push main to origin to deploy the UI authentication fix (predeclared; awaiting execution)"
   ],
   "remote": {
     "origin": "git@github.com:medicagooo/LinkBin.git",
@@ -217,16 +216,18 @@
       "domain": "derived proxy configuration",
       "request": "1008-r2-file-manager-e001",
       "requirement_date": "2026-10-08",
-      "implementation_date": null,
+      "implementation_date": "2026-10-08",
       "main_integration_date": null,
       "deployment_date": null,
       "before": "Generic YAML union creates 24 source groups and does not reproduce the existing merged-all profile",
-      "after": "Bounded TypeScript processor targets the existing settings, node names, provider/global group structure and routing",
+      "after": "Bounded TypeScript proxy-profile reproduces the confirmed settings, source-prefixed node names,27groups and routing; eight real inputs compare semantically identical to target",
       "rules": "No uploaded script execution or committed node credentials; failed processing preserves previous output",
-      "status": "planned",
+      "status": "implemented; focused offline tests passed, full validation/review pending",
       "evidence": [
         "src/merge.ts",
-        "src/derived.ts"
+        "src/derived.ts",
+        "1008-r2-file-manager-e003",
+        "src/proxy-profile.ts:buildProxyProfile"
       ]
     },
     {
@@ -234,17 +235,18 @@
       "domain": "R2 file management / download links",
       "request": "1008-r2-file-manager-e001",
       "requirement_date": "2026-10-08",
-      "implementation_date": null,
+      "implementation_date": "2026-10-08",
       "main_integration_date": null,
       "deployment_date": null,
       "before": "Stored-file browser and optional-password expiring share API lack upload, direct links and browser password confirmation",
       "after": "Manage stored files, download directly and create/revoke direct or password-confirmed sharing links",
       "rules": "Authenticated management; bearer direct links; password checked before streaming; preserve existing share API",
-      "status": "planned",
+      "status": "implemented; focused offline tests passed, full validation/review pending",
       "evidence": [
         "src/index.ts",
         "src/ui.ts",
-        "src/share.ts"
+        "src/share.ts",
+        "1008-r2-file-manager-e003"
       ]
     }
   ],

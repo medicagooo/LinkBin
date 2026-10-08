@@ -17,6 +17,7 @@ import initSchemaSql from '../migrations/0001_init.sql';
 import usageIndexSql from '../migrations/0002_usage_index.sql';
 import receiptsSql from '../migrations/0003_receipts_importance_and_sources.sql';
 import derivedRulesSql from '../migrations/0004_derived_rules.sql';
+import fileLinksSql from '../migrations/0005_file_links.sql';
 
 export interface Migration {
 	name: string;
@@ -35,6 +36,7 @@ export const SCHEMA_MIGRATIONS: Migration[] = [
 	{ name: '0002_usage_index', sql: usageIndexSql },
 	{ name: '0003_receipts_importance_and_sources', sql: receiptsSql },
 	{ name: '0004_derived_rules', sql: derivedRulesSql },
+  { name: '0005_file_links', sql: fileLinksSql },
 ];
 
 /**
@@ -76,6 +78,8 @@ export const REQUIRED_SCHEMA = [
 	'auth_attempts',
 	// Sharing.
 	'shares',
+  'file_links',
+  'idx_file_links_active',
 ] as const;
 
 /**

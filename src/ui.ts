@@ -184,7 +184,13 @@ export function renderIndexPage(locale: Locale = 'en'): string {
           <label class="f narrow toggle"><input id="b-history" type="checkbox"><span data-i18n="browse.history">Include replaced versions</span></label>
         </div>
         <div id="browseCount" class="browse-count"></div>
+        <div class="fields"><label class="f"><span data-i18n="files.upload">Upload files to R2</span><input id="f-upload" type="file" multiple></label></div>
+        <div class="actions"><button class="quiet" id="uploadFiles" data-i18n="files.uploadAction">Upload selected files</button></div>
+        <div id="uploadResult" role="status"></div>
         <div id="objectlist"></div>
+        <h3 data-i18n="files.directTitle">Direct download links</h3>
+        <p class="hint" data-i18n="files.directHint">Anyone with a direct link can download the latest version. Revoke it here to stop access.</p>
+        <div id="directLinks"></div>
       </section>
 
       <section class="glass storage" aria-labelledby="storage-h">
@@ -209,7 +215,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
             <option value="43200" data-i18n="shares.12h">12 hours</option>
             <option value="86400" data-i18n="shares.24h">24 hours</option>
           </select></label>
-          <label class="f"><span data-i18n="shares.password">Password (optional)</span><input id="s-password" type="text" autocomplete="off" spellcheck="false"></label>
+          <label class="f"><span data-i18n="files.sharePassword">Sharing password (at least 8 characters)</span><input id="s-password" type="password" autocomplete="new-password" spellcheck="false" minlength="8"></label>
         </div>
         <div class="actions"><button class="quiet" id="makeShare" data-i18n="shares.create">Create link</button></div>
         <div id="shareResult"></div>
@@ -224,6 +230,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
           <label class="f narrow"><span data-i18n="merges.combination">How to combine</span><select id="m-combination">
             <option value="yaml-list-union" selected data-i18n="merges.union">Merge their lists into one document</option>
             <option value="concat" data-i18n="merges.concat">Join them end to end</option>
+            <option value="proxy-profile" data-i18n="files.profile">merged-all.yaml profile (8 providers)</option>
           </select></label>
         </div>
         <div class="fields">
@@ -232,6 +239,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
         <div class="actions">
           <button class="ghost" id="previewMerge" data-i18n="merges.preview">Preview</button>
           <button class="quiet" id="saveMerge" data-i18n="merges.save">Save rule</button>
+          <button class="ghost" id="profilePreset" data-i18n="files.profilePreset">Use merged-all preset</button>
         </div>
         <!-- Preview output sits above the list so the thing just asked for is visible without scrolling. -->
         <div id="mergePreview"></div>
@@ -464,12 +472,12 @@ export function renderIndexPage(locale: Locale = 'en'): string {
 
   function api(path, options) {
     var opts = options || {};
-    opts.headers = { 'content-type': 'application/json' };
+    opts.headers = Object.assign({ 'content-type': 'application/json' }, opts.headers || {});
     var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
     var timer = null;
     if (controller) {
       opts.signal = controller.signal;
-      timer = setTimeout(function () { controller.abort(); }, REQUEST_TIMEOUT_MS);
+      timer = setTimeout(function () { controller.abort(); }, path.indexOf('/api/files/upload') === 0 ? 120000 : REQUEST_TIMEOUT_MS);
     }
     function stopTimer() { if (timer) { clearTimeout(timer); timer = null; } }
     return fetch(path, opts).then(function (res) {
@@ -1021,6 +1029,38 @@ export function renderIndexPage(locale: Locale = 'en'): string {
       // offering a link to it would promise a download that cannot happen. And a file whose bytes the server
       // has confirmed are gone is not shareable either, for the same reason.
       if (o.live && o.bytesPresent !== false) {
+        var download = node('a', 'ghost small', t('files.download'));
+        download.href = '/api/files/download?id=' + o.id;
+        tail.appendChild(download);
+        var direct = node('button', 'ghost small', t('files.direct'));
+        direct.type = 'button';
+        direct.addEventListener('click', function () {
+          direct.disabled = true;
+          api('/api/file-links', { method: 'POST', body: JSON.stringify({ objectId: o.id }) }).then(function (r) {
+            direct.disabled = false;
+            if (!r.ok) { alert(r.body.error || t('shares.failed')); return; }
+            var link = node('input', 'share-link');
+            link.readOnly = true;
+            link.value = r.body.link.url;
+            link.setAttribute('aria-label', t('files.direct'));
+            li.appendChild(link);
+            copyText(r.body.link.url, direct, t('files.direct'), t('browse.copied'));
+            loadDirectLinks();
+          });
+        });
+        tail.appendChild(direct);
+        var remove = node('button', 'ghost small', t('files.delete'));
+        remove.type = 'button';
+        remove.addEventListener('click', function () {
+          if (!confirm(t('files.deleteConfirm').replace('{path}', o.path))) return;
+          remove.disabled = true;
+          api('/api/files/delete', { method: 'POST', body: JSON.stringify({ id: o.id }) }).then(function (r) {
+            remove.disabled = false;
+            if (!r.ok) { alert(r.body.error || t('shares.failed')); return; }
+            loadObjects(); loadUsage(); loadDirectLinks(); loadShares();
+          });
+        });
+        tail.appendChild(remove);
         var share = node('button', 'ghost small', t('browse.share'));
         share.type = 'button';
         share.addEventListener('click', function () {
@@ -1105,6 +1145,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
 
   /** Fills the machine filter from the machines that exist, so it cannot offer one that does not. */
   function fillHostFilter(hosts) {
+    hosts = hosts.concat([{ id: '@uploads', label: t('files.uploaded') }, { id: '@derived', label: t('merges.title') }]);
     var select = $('b-host');
     var current = select.value;
     clear(select);
@@ -1272,6 +1313,36 @@ export function renderIndexPage(locale: Locale = 'en'): string {
   function loadShares() {
     return api('/api/shares').then(function (r) {
       if (r.ok) renderShares(r.body.shares || []);
+    });
+  }
+
+  function loadDirectLinks() {
+    return api('/api/file-links').then(function (r) {
+      if (!r.ok) return;
+      var host = $('directLinks'); clear(host);
+      (r.body.links || []).forEach(function (link) {
+        var row = node('div', 'share-made');
+        row.appendChild(node('code', 'pattern', link.host_id + ':' + link.path));
+        if (link.revoked_at) { row.appendChild(chip(t('shares.revoked'), 'warn')); }
+        else {
+          var input = node('input', 'share-link'); input.readOnly = true; input.value = link.url;
+          input.setAttribute('aria-label', t('files.direct'));
+          row.appendChild(input);
+          var copy = node('button', 'ghost small', t('shares.copy')); copy.type = 'button';
+          copy.addEventListener('click', function () { copyText(link.url, copy, t('shares.copy'), t('browse.copied')); });
+          row.appendChild(copy);
+          var revoke = node('button', 'ghost small', t('shares.revoke')); revoke.type = 'button';
+          revoke.addEventListener('click', function () {
+            revoke.disabled = true;
+            api('/api/file-links/revoke', { method: 'POST', body: JSON.stringify({ token: link.token }) }).then(function (result) {
+              if (!result.ok) { revoke.disabled = false; alert(result.body.error || t('shares.failed')); return; }
+              loadDirectLinks();
+            });
+          });
+          row.appendChild(revoke);
+        }
+        host.appendChild(row);
+      });
     });
   }
 
@@ -1738,6 +1809,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     loadHosts();
     loadRules();
     loadShares();
+    loadDirectLinks();
     loadObjects();
     loadRuns();
     loadFreshness();
@@ -1813,6 +1885,12 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     var objectId = Number($('s-object').value);
     var password = $('s-password').value;
 
+    if (!password || password.length < 8) {
+      clear($('shareResult'));
+      $('shareResult').appendChild(node('p', 'hint error', t('files.needPassword')));
+      return;
+    }
+
     if (!objectId) {
       renderShareResult(null);
       var hint = $('shareResult');
@@ -1839,6 +1917,35 @@ export function renderIndexPage(locale: Locale = 'en'): string {
       renderShareResult(r.body.share, password);
       loadShares();
     });
+  });
+
+  $('uploadFiles').addEventListener('click', function () {
+    var button = $('uploadFiles');
+    var files = Array.prototype.slice.call($('f-upload').files || []);
+    if (!files.length) return;
+    button.disabled = true;
+    clear($('uploadResult'));
+    // Sequential uploads share capacity/publication ordering and report each result independently.
+    var chain = Promise.resolve();
+    files.forEach(function (file) {
+      chain = chain.then(function () {
+        return api('/api/files/upload?name=' + encodeURIComponent(file.name), {
+          method: 'POST', body: file, headers: { 'content-type': 'application/octet-stream' }
+        }).then(function (r) {
+          $('uploadResult').appendChild(node('p', r.ok ? 'hint' : 'hint error', file.name + ': ' + (r.ok ? t('files.uploadDone') : (r.body.error || t('shares.failed')))));
+          (r.body.mergeIssues || []).forEach(function (issue) { $('uploadResult').appendChild(node('p', 'hint error', (issue.path || '') + ': ' + issue.reason)); });
+        });
+      });
+    });
+    chain.then(function () { button.disabled = false; $('f-upload').value = ''; loadObjects(); loadUsage(); loadMerges(); });
+  });
+
+  $('profilePreset').addEventListener('click', function () {
+    $('m-name').value = 'merged-all.yaml';
+    $('m-combination').value = 'proxy-profile';
+    $('m-patterns').value = ['bytevirt.yaml', 'dartnode.yaml', 'rabisu.yaml', '56idc.yaml', 'yinyun.yaml',
+      'racknerd.23.254.219.147.yaml', 'racknerd.192.119.78.227.yaml', 'racknerd.107.172.99.23.yaml'].map(function (name) { return '/' + name; }).join('\\n');
+    $('m-patterns').focus();
   });
 
   $('previewMerge').addEventListener('click', function () {
@@ -2055,6 +2162,20 @@ export function renderIndexPage(locale: Locale = 'en'): string {
 function translationsLiteral(): string {
 	const table: Record<Locale, Record<string, string>> = {
 		en: {
+			'files.upload': 'Upload files to R2',
+			'files.uploadAction': 'Upload selected files',
+			'files.uploadDone': 'Uploaded',
+			'files.uploaded': 'Uploaded files',
+			'files.download': 'Download',
+			'files.direct': 'Get direct link',
+			'files.directTitle': 'Direct download links',
+			'files.directHint': 'Anyone with a direct link can download the latest version. Revoke it here to stop access.',
+			'files.delete': 'Delete file',
+			'files.deleteConfirm': 'Delete {path} from R2? Its downloads and shares will stop working.',
+			'files.sharePassword': 'Sharing password (at least 8 characters)',
+			'files.needPassword': 'Enter a sharing password of at least 8 characters.',
+			'files.profile': 'merged-all.yaml profile (8 providers)',
+			'files.profilePreset': 'Use merged-all preset',
 			'skip': 'Skip to content',
 			'status.key': 'signing key',
 			'status.schema': 'tables',
@@ -2280,6 +2401,20 @@ function translationsLiteral(): string {
 			'theme.dark': 'Dark',
 		},
 		'zh-CN': {
+			'files.upload': '上传文件到 R2',
+			'files.uploadAction': '上传所选文件',
+			'files.uploadDone': '已上传',
+			'files.uploaded': '上传文件',
+			'files.download': '下载',
+			'files.direct': '获取直链',
+			'files.directTitle': '文件下载直链',
+			'files.directHint': '持有直链即可下载文件的最新版本；取消链接后停止访问。',
+			'files.delete': '删除文件',
+			'files.deleteConfirm': '从 R2 删除 {path}？该文件的下载和分享将失效。',
+			'files.sharePassword': '分享密码（至少 8 位）',
+			'files.needPassword': '请输入至少 8 位的分享密码。',
+			'files.profile': 'merged-all.yaml 配置（8 个来源）',
+			'files.profilePreset': '使用 merged-all 预设',
 			'skip': '跳到主要内容',
 			'status.key': '签名密钥',
 			'status.schema': '数据表',
@@ -2501,6 +2636,20 @@ function translationsLiteral(): string {
 			'theme.dark': '深色',
 		},
 		'zh-TW': {
+			'files.upload': '上傳檔案到 R2',
+			'files.uploadAction': '上傳所選檔案',
+			'files.uploadDone': '已上傳',
+			'files.uploaded': '上傳檔案',
+			'files.download': '下載',
+			'files.direct': '取得直連',
+			'files.directTitle': '檔案下載直連',
+			'files.directHint': '持有直連即可下載最新版本；取消連結後停止存取。',
+			'files.delete': '刪除檔案',
+			'files.deleteConfirm': '從 R2 刪除 {path}？下載及分享將失效。',
+			'files.sharePassword': '分享密碼（至少 8 位）',
+			'files.needPassword': '請輸入至少 8 位的分享密碼。',
+			'files.profile': 'merged-all.yaml 設定（8 個來源）',
+			'files.profilePreset': '使用 merged-all 預設',
 			'merges.title': '合併檔案',
 			'merges.lede': '把多個已存檔案合成一個。合併是一條規則而非一次性操作：結果會連同它的來源一起記錄下來，因此可以判斷它是否仍然是最新的。',
 			'merges.outputName': '結果叫什麼',
@@ -2721,6 +2870,20 @@ function translationsLiteral(): string {
 			'theme.dark': '深色',
 		},
 		ja: {
+			'files.upload': 'R2 にファイルをアップロード',
+			'files.uploadAction': '選択したファイルをアップロード',
+			'files.uploadDone': 'アップロード済み',
+			'files.uploaded': 'アップロードしたファイル',
+			'files.download': 'ダウンロード',
+			'files.direct': '直接リンクを取得',
+			'files.directTitle': '直接ダウンロードリンク',
+			'files.directHint': 'リンクを持つ人は最新のファイルをダウンロードできます。取り消すとアクセスできなくなります。',
+			'files.delete': 'ファイルを削除',
+			'files.deleteConfirm': 'R2 から {path} を削除しますか？ダウンロードと共有は無効になります。',
+			'files.sharePassword': '共有パスワード（8 文字以上）',
+			'files.needPassword': '8 文字以上の共有パスワードを入力してください。',
+			'files.profile': 'merged-all.yaml 設定（8 ソース）',
+			'files.profilePreset': 'merged-all プリセットを使用',
 			'skip': '本文へ移動',
 			'status.key': '署名鍵',
 			'status.schema': 'テーブル',

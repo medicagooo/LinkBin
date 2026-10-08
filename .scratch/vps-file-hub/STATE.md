@@ -1,5 +1,15 @@
 # STATE: vps-file-hub
 
+## 最新执行检查点：TypeScript 模板处理与 R2 文件管理（2026-10-08）
+
+- **阶段/授权**：第 5 步 implement。用户确认采用 TypeScript，并以现有 merged-all.yaml 结构/命名为目标，增加文件管理、直链及确认密码下载分享；此前 review bug repair push main 的发布要求持续适用。不执行直接云写入、线上迁移或手工部署。
+- **仓库事实**：第二轮修复已推送并核验 main 为 0417fe785f459ac3378acc0e5f512dd1ded44ca4。新任务注册提交 e82a36c；工作区 D:/proj/LinkBin-files-1008，分支 1008-r2-file-manager。原工作区 D:/proj/LinkBin 的另一会话 BRANCHES.md pending-clear 差异保持原位，不纳入提交。本检查点优先于下方历史记录。
+- **产物**：src/proxy-profile.ts 的内置纯 TS 算子，src/files.ts 的登录后上传/下载/删除及可撤销直链，src/share-page.ts 的密码 POST 下载表单，UI 控件、0005_file_links.sql 可重复迁移。docs/r2-file-management.md 记录使用及调用关系/兼容边界。
+- **已验证**：只读处理八个本地真实来源，与现有目标做递归语义比较：40 节点、27 组、0 差异；不覆盖本地文件，不提交节点凭据。初次22项聚焦测试通过；模板/迁移守卫与离线 dry-run 通过，5迁移/37语句。全量测试和最终独立审查仍在进行，不等于发布完成。
+- **锁定与假设**：直链采用可撤销的长期固定地址、跟随 host/path 的最新版本；密码分享固定旧版本、最多24小时，替换/删除后失效。新UI密码必填，原API允许无密码以保留兼容。不执行用户上传脚本、不新增部署密钥，沿用100MiB/文件10GiB总容量及8MiB派生输入限额。
+- **剩余项**：先处理全量测试/审查发现，再显式提交任务文件；发布前记录准确整合和push操作、保护原工作区差异并核验远端SHA。上线前需要新Worker和0005迁移，两者当前未执行，必须按云操作政策分别获得精确确认。
+- **下一条准确动作**：在 D:/proj/LinkBin-files-1008 检查 .scratch/files-full-test.log，完成必要修复和复核；随后检查Git差异和登记JSON/JSONL，仅提交本任务文件。
+
 ## 最新执行检查点：第二轮代码审查修复（2026-10-08）
 
 - **已核验阶段/授权**：第 5 步 implement 的第二轮完整代码审查与修复已离线完成。前一轮 main 已推送 `ef44b77bc7db41c094369d780e0eae213399fcc5`；本轮用户明确要求 review bug repair push main（请求 e007），允许修复、测试、提交、合入、推送；没有直接部署/迁移/线上数据管理授权。

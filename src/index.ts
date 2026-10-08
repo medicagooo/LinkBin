@@ -37,6 +37,8 @@ import { closeRun, collectionPorts, cursorFor, openRun } from './collect-store';
 import { abandonStaleSessions } from './multipart';
 import { buildObjectQuery, type BrowseFilter, type BrowseSort, type ObjectRow } from './browse';
 import { issuesForHost, runDetail, summarizeRuns, toIssueDetail, type IssueRow, type RunRow } from './receipts';
+import { downloadFile, FileProblem, manageFiles, serveDirectLink } from './files';
+import { readSharePassword, sharePasswordPage } from './share-page';
 import { parseCursor, planRun, freshness } from './schedule';
 import {
 	mergeSignature,
@@ -788,6 +790,7 @@ async function createShare(env: Env, request: Request, baseUrl: string): Promise
  * storage directly, and a refusal that happens after the first bytes have been sent is not a refusal.
  */
 async function serveShare(env: Env, request: Request, token: string, baseUrl: string): Promise<Response> {
+	if (!['GET', 'HEAD', 'POST'].includes(request.method)) return new Response(null, { status: 405, headers: { allow: 'GET, HEAD, POST' } });
 	const row = await shareByToken(env.DB, token);
     if (row && ((row as any).deleted_at || (row as any).superseded_by)) return json({ ok: false, error: 'this file is no longer stored' }, 410);
 	if (!row) {
@@ -799,7 +802,9 @@ async function serveShare(env: Env, request: Request, token: string, baseUrl: st
 	// A password may arrive as a query parameter or an explicit header. The header is preferred so the
 	// password does not end up in a URL that gets logged or shared; the query form exists because a plain
 	// browser download cannot set a header.
-	const supplied = request.headers.get('x-share-password') ?? new URL(request.url).searchParams.get('password');
+	const supplied = request.method === 'POST' ? await readSharePassword(request)
+    : request.headers.get('x-share-password') ?? new URL(request.url).searchParams.get('password');
+  const browser = request.headers.get('accept')?.includes('text/html') || request.method === 'POST';
 
 	// Guessing is limited on this path too, and the absence of that was an adversarial finding: the route
 	// verifies with a 100,000-iteration PBKDF2 — the runtime ceiling, see `PBKDF2_ITERATIONS` — and had no counter,
@@ -825,36 +830,21 @@ async function serveShare(env: Env, request: Request, token: string, baseUrl: st
 		// `needsPassword` is not a failure — the recipient is being asked for one thing, not told no — so it
 		// is answered with the metadata they need to decide, and no content.
 		const status = decision.needsPassword ? 401 : 410;
+    if (decision.needsPassword && browser && request.method !== 'HEAD') {
+      return sharePasswordPage(token, filenameOf(row.path), decision.reason === 'password_incorrect');
+    }
 		return json({ ok: false, error: decision.message, reason: decision.reason, file: publicShareView(row) }, status);
 	}
 
-	const object = await env.BUCKET.get(row.object_key);
-	if (!object) {
-		// The record says the file should exist and the bucket disagrees. That is a real fault worth naming
-		// rather than dressing up as a missing share.
-		return json({ ok: false, error: 'the stored file is missing', reason: 'gone' }, 410);
-	}
+	const download = await downloadFile(env.BUCKET, row.object_key, row.path, request.method === 'HEAD');
+  if (!download.ok) return download;
 
 	// Bookkeeping only: a lost update here costs a count, not correctness, so it needs no atomicity.
-	await env.DB.prepare('UPDATE shares SET use_count = use_count + 1, last_used_at = ? WHERE token = ?')
+	if (request.method !== 'HEAD') await env.DB.prepare('UPDATE shares SET use_count = use_count + 1, last_used_at = ? WHERE token = ?')
 		.bind(new Date().toISOString(), row.token)
 		.run();
 
-	const filename = filenameOf(row.path);
-
-	// Streamed, not buffered: the per-file limit is far larger than this runtime's memory, so reading the
-	// object into a variable here would defeat the entire streaming pipeline that stored it.
-	return new Response(object.body, {
-		status: 200,
-		headers: {
-			'content-type': 'application/octet-stream',
-			'content-length': String(object.size),
-			// The size is stated before the download starts, and the filename is quoted so a name with a space
-			// or a semicolon cannot break the header.
-			'content-disposition': `attachment; filename="${filename.replace(/["\\]/g, '_')}"`,
-			'cache-control': 'no-store',
-		},
-	});
+	return download;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -926,7 +916,7 @@ async function upsertHost(env: Env, body: Record<string, unknown>): Promise<Resp
 	// The host ceiling applies to CREATING a host, not to updating one. Checking the total on every
 	// write would make the 50th host uneditable — the operator could no longer rotate its password.
 	if (!existing) {
-		const countRow = await env.DB.prepare("SELECT COUNT(*) AS n FROM hosts WHERE id != '@derived'").first<{ n: number }>();
+		const countRow = await env.DB.prepare("SELECT COUNT(*) AS n FROM hosts WHERE id NOT IN ('@derived', '@uploads')").first<{ n: number }>();
 		const count = Number(countRow?.n ?? 0);
 		if (count >= MAX_HOSTS) {
 			throw new HttpError(400, `this deployment is designed for at most ${MAX_HOSTS} hosts and already has ${count}; delete one first`);
@@ -1255,6 +1245,11 @@ export default {
 			// A share link is deliberately reachable without signing in: the recipient has no account and must
 			// not need one. This is the one place where an unauthenticated request can obtain file bytes, and
 			// what bounds it is that a token grants exactly one file and is checked here rather than at storage.
+      if (path.startsWith('/d/')) {
+        const token = path.slice(3);
+        if (!/^[A-Za-z0-9_-]{32}$/.test(token)) return json({ ok: false, error: 'this link is not valid' }, 404);
+        return await serveDirectLink(env, request, token);
+      }
 			if (path.startsWith(PUBLIC_SHARE_PREFIX)) {
 				// A token that does not survive decoding is treated as a wrong token rather than as a fault.
 				// `decodeURIComponent` throws on a malformed escape — `/s/%` reached the error handler and
@@ -1493,6 +1488,19 @@ export default {
 				}
 			}
 
+      // Upload publication releases its writer lease before dependent merges acquire theirs.
+      if (path.startsWith('/api/files/') || path.startsWith('/api/file-links')) {
+        const response = await manageFiles(env, request);
+        if (response) {
+          if (path === '/api/files/upload' && response.ok) {
+            const mergeIssues: { path: string | null; reason: string }[] = [];
+            await refreshDerivedObjects(env, async issue => { mergeIssues.push({ path: issue.path, reason: issue.reason }); });
+            return json({ ...await response.json() as object, mergeIssues });
+          }
+          return response;
+        }
+      }
+
 			if (path === '/' && method === 'GET') {
 				// The server picks the initial locale from Accept-Language so the first paint is already
 				// in the reader's language; the client can then switch instantly without a reload.
@@ -1516,7 +1524,7 @@ if (path === '/api/status' && method === 'GET') {
 				const schema = await schemaStatus(env).catch((err) => ({ ready: false, missing: [`error: ${(err as Error).message}`] }));
 				// Host count is included because the ceiling is only useful if it is visible: an
 				// operator who cannot see "49 of 50" discovers the limit by being refused.
-				const hosts = await env.DB.prepare('SELECT COUNT(*) AS n FROM hosts')
+				const hosts = await env.DB.prepare("SELECT COUNT(*) AS n FROM hosts WHERE id NOT IN ('@derived', '@uploads')")
 					.first<{ n: number }>()
 					.catch(() => null);
 				return json({
@@ -1721,7 +1729,7 @@ if (path === '/api/status' && method === 'GET') {
 					        MAX(CASE WHEN r.state = 'finished' THEN r.finished_at END) AS last_succeeded_at
 					 FROM hosts h
 					 LEFT JOIN collection_runs r ON r.host_id = h.id
-					 WHERE h.id != '@derived'
+					 WHERE h.id NOT IN ('@derived', '@uploads')
 					 GROUP BY h.id
 					 ORDER BY h.id`,
 				).all<{ id: string; last_succeeded_at: string | null }>();
@@ -2364,7 +2372,7 @@ async function storeDerivedObject(
 			return json({ error: 'not found', path, routes: ['/', '/api/status', '/api/hosts', '/api/rules', '/api/usage', '/api/admin/apply-schema'] }, 404);
 		} catch (err) {
 			const e = err as Error;
-			const status = e instanceof HttpError ? e.status : 500;
+			const status = e instanceof HttpError || e instanceof FileProblem ? e.status : 500;
 
 			// Errors reach the operator, but never carry decrypted material: messages that could are built only
 			// from the host id and the field name.

@@ -4,7 +4,8 @@
   "requirements": [
     "Match existing local merged-all.yaml configuration structure and names",
     "Manage R2 files and expose direct download links",
-    "Share links must let recipients confirm a password before downloading"
+    "Share links must let recipients confirm a password before downloading",
+    "Direct links default to stable revocable addresses resolving the latest version; password shares pin one version"
   ],
   "constraints": [
     "Preserve unrelated root BRANCHES.md edit",
@@ -21,9 +22,13 @@
   "status": "active",
   "integration": "unmerged",
   "evidence": [
-    "Base main verified 0417fe785f459ac3378acc0e5f512dd1ded44ca4"
+    "Base main verified 0417fe785f459ac3378acc0e5f512dd1ded44ca4",
+    "Isolated worktree at e82a36c; original ledger edit remains untouched",
+    "Real-file semantic comparison:40nodes27groups0differences",
+    "22 focused tests passed; final full validation and review pending",
+    "Guards and dry-run passed with five migrations/37statements"
   ],
-  "next": "Create registered worktree and implement",
+  "next": "Complete full offline tests, review feature diff, fix findings and publish per existing push-main request",
   "created_at": "2026-10-08T13:26:55.8290357+08:00",
-  "updated_at": "2026-10-08T13:26:55.8290357+08:00"
+  "updated_at": "2026-10-08T13:41:10.1578116+08:00"
 }

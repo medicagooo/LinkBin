@@ -28,6 +28,7 @@
  */
 
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { buildProxyProfile } from './proxy-profile';
 
 export interface MergeSource {
 	/** Where the content came from, as shown to the operator. */
@@ -44,7 +45,9 @@ export type Combination =
 	/** Join the sources in order, separated by a blank line. */
 	| 'concat'
 	/** Parse every source as a document and union the list-valued top-level keys, removing duplicates. */
-	| 'yaml-list-union';
+	| 'yaml-list-union'
+  /** The confirmed eight-provider merged-all profile, implemented in TypeScript. */
+  | 'proxy-profile';
 
 /**
  * A field to rewrite using where an entry came from.
@@ -196,6 +199,7 @@ export function mergeText(rule: MergeRule, sources: MergeSource[], options: { ex
 	const notes: string[] = [];
 	const ordered = orderSources(sources, rule.order);
 	if (rule.nameFromSource !== undefined) {
+    if (rule.combination === 'proxy-profile') return { ok: false, sourceCount: ordered.length, sourceBytes: 0, notes, problem: 'the merged-all profile defines its own naming; nameFromSource cannot be applied' };
 		const problem = nameFromSourceProblem(rule.nameFromSource);
 		if (problem) return { ok: false, sourceCount: ordered.length, sourceBytes: 0, notes, problem };
 	}
@@ -238,9 +242,11 @@ export function mergeText(rule: MergeRule, sources: MergeSource[], options: { ex
 	const usable = normalized.filter((s) => s.content.trim().length > 0);
 
 	let content: string;
-	if (rule.combination === 'yaml-list-union') {
+	if (rule.combination === 'yaml-list-union' || rule.combination === 'proxy-profile') {
 		try {
-			const structured = unionDocuments(usable, rule.nameFromSource);
+			const structured = rule.combination === 'proxy-profile'
+        ? { ok: true as const, ...buildProxyProfile(usable) }
+        : unionDocuments(usable, rule.nameFromSource);
 			if (!structured.ok) {
 				return { ok: false, sourceCount: normalized.length, sourceBytes, notes, problem: structured.problem };
 			}

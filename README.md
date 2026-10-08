@@ -1,5 +1,7 @@
 # LinkBin
 
+R2 文件上传、下载、直链、密码分享和 TypeScript `merged-all.yaml` 处理的使用说明见 [文件管理说明](docs/r2-file-management.md)。
+
 Collect designated files from multiple remote hosts into Cloudflare R2, keep their metadata in D1,
 and let other devices download them by association.
 

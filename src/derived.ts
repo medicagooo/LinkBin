@@ -80,7 +80,7 @@ export function ruleDefinitionProblem(
 	if (name.length > MAX_OUTPUT_NAME) return `the output name must be at most ${MAX_OUTPUT_NAME} characters`;
 	if (name.startsWith('/')) return 'the output name is what the result is called, not a path; a leading slash is not needed';
 
-	if (definition.combination !== 'concat' && definition.combination !== 'yaml-list-union') {
+	if (definition.combination !== 'concat' && definition.combination !== 'yaml-list-union' && definition.combination !== 'proxy-profile') {
 		return `"${String(definition.combination)}" is not a combination this can perform`;
 	}
 
@@ -95,6 +95,7 @@ export function ruleDefinitionProblem(
 	}
 	if (definition.order !== undefined && (!Array.isArray(definition.order) || !definition.order.every(path => typeof path === 'string' && path.trim()))) return 'source order must be a list of non-empty paths';
 	if (definition.nameFromSource !== undefined) {
+    if (definition.combination === 'proxy-profile') return 'the merged-all profile defines its own node and group names; nameFromSource is not used';
 		const problem = nameFromSourceProblem(definition.nameFromSource);
 		if (problem) return problem;
 	}

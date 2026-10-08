@@ -24,8 +24,8 @@
     "Full offline tests and guards/build pass, with pre-existing failures identified",
     "GitHub main SHA verified after push"
   ],
-  "status": "active",
-  "integration": "unmerged",
+  "status": "complete",
+  "integration": "verified",
   "evidence": [
     "Review source: b851c02e49746a53fac1f720e308af418a3b3dca",
     "GitHub API main verified equal to review source",
@@ -39,9 +39,10 @@
     "Read-only real-file reproduction: rename yields 16 unresolved group references and 1 unresolved rule target",
     "Second review:717/717 offline tests,31 new cases,guards and dry-run passed",
     "Eight real files:40nodes24uniquegroups0danglingrefs1MATCHlast; no local files/R2 changed",
-    "Final focused Standards/Spec reviews found no remaining blockers; see e008"
+    "Final focused Standards/Spec reviews found no remaining blockers; see e008",
+    "Second repair local/GitHub main verified 0417fe785f459ac3378acc0e5f512dd1ded44ca4; no deployment"
   ],
-  "next": "Execute predeclared e009 fast-forward after source/index/user-delta checks, then e010 non-force main push; verify GitHub API/HTTPS main SHA",
+  "next": "Second review/repair completed and pushed to main; custom profile now handled in1008-r2-file-manager",
   "created_at": "2026-10-08T01:45:56.4799298+08:00",
-  "updated_at": "2026-10-08T03:06:11.0735115+08:00"
+  "updated_at": "2026-10-08T13:41:10.1578116+08:00"
 }
