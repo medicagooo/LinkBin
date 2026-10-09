@@ -16,7 +16,7 @@
 
 直链没有自动到期；文件删除、被容量回收或链接取消后永久取消旧地址，同名文件重新出现也不会恢复旧链接。密码分享绑定创建时的版本，文件被替换后分享失效；直链跟随连续更新的最新版本，两者用途不同。取消直链不会取消独立创建的密码分享。
 
-“合并文件”中的“使用 merged-all 预设”填写输出名称 `merged-all.yaml` 和八个上传文件的路径。若来源来自 VPS，请把路径改成其实际已存路径。预览核对成功后保存规则并运行。来源更新后的成功收集或上传都会尝试自动刷新已保存规则；失败保留上次结果并报告原因。
+“合并文件”中的“使用 merged-all 预设”填写输出名称 `merged-all.yaml` 和八个上传文件的路径。若来源来自 VPS，请把路径改成其实际已存路径。预览核对成功后保存规则，再显式点击生成文件。来源更新或上传不会自动重建已有结果，避免未经再次预览就生成新的内容；需要更新时重新预览并生成，失败保留上次结果并报告原因。
 
 ## 目标配置
 
@@ -40,8 +40,8 @@
 
 ## 实现关系与兼容
 
-- `src/merge.ts:mergeText` 调用纯函数 `buildProxyProfile`；`src/derived.ts` 接受 `proxy-profile`，原有 concat/YAML union 保持兼容。预览、手动运行、自动刷新使用相同引擎与现有 8 MiB 总输入上限。
-- `src/files.ts:manageFiles` 仅在 `src/index.ts` 完成会话检查后调用。上传走 `storeStream`、`withStorageWriter`、`publishVersion`；服务端 120 秒截止时间也取消停滞读取。使用现有 100 MiB/文件、10 GiB 总容量预算，拒绝超额，不主动回收其他文件。上传完成释放锁后才刷新依赖结果。
+- `src/merge.ts:mergeText` 调用纯函数 `buildProxyProfile`；`src/derived.ts` 接受 `proxy-profile`，原有 concat/YAML union 保持兼容。预览和显式生成使用相同引擎与现有 8 MiB 总输入上限。
+- `src/files.ts:manageFiles` 仅在 `src/index.ts` 完成会话检查后调用。上传走 `storeStream`、`withStorageWriter`、`publishVersion`；服务端 120 秒截止时间也取消停滞读取。使用现有 100 MiB/文件、10 GiB 总容量预算，拒绝超额，不主动回收其他文件。上传完成后只刷新列表、容量和状态，已有合并结果需再次预览并显式生成。
 - `@uploads` 是禁用的内部归属行；`src/db.ts:listHosts` 和主机配额排除它与 `@derived`。文件过滤器仍可选择这两个来源。
 - 迁移 `0005_file_links.sql` 只创建表/索引。`file_links` 存储随机 token、来源、路径和撤销时间；唯一索引约束每个身份只有一个未撤销直链。`serveDirectLink` 每次查询当前有效对象，随后用 `downloadFile` 流式输出。管理接口为 `/api/files/upload|download|delete`、`/api/file-links` 和 `/api/file-links/revoke`。
 - `src/file-links.ts:revokeFileLinks` 在显式删除及容量回收当前逻辑文件前撤销该身份的直链；版本替换不撤销。字节删除失败仍可能先取消链接，这是防止公开权限复活的保守部分成功状态。存储原语兼容尚未创建新表的旧测试/SDK数据环境，但其他数据库失败不会被吞掉。

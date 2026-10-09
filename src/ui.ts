@@ -1825,6 +1825,26 @@ export function renderIndexPage(locale: Locale = 'en'): string {
           toggleMergeActions();
         }
       });
+      var edit = node('button', 'ghost small', t('merges.edit'));
+      edit.type = 'button';
+      edit.addEventListener('click', function () {
+        edit.disabled = true;
+        api('/api/derived').then(function (r) {
+          edit.disabled = false;
+          if (!r.ok) { feedback('mergePreview', r.body.error || t('merges.failed'), true); return; }
+          var rule = (r.body.rules || []).find(function (candidate) { return String(candidate.id) === String(m.ruleId); });
+          if (!rule || !rule.stored) { feedback('mergePreview', t('merges.failed'), true); return; }
+          $('m-name').value = rule.outputName || '';
+          $('m-combination').value = rule.combination || 'yaml-list-union';
+          $('m-patterns').value = (rule.sources || []).map(function (source) {
+            return (source.hostId ? source.hostId + ':' : '') + source.pattern;
+          }).join('\\n');
+          mergeEdited();
+          selectView('merges');
+          $('m-name').focus();
+        });
+      });
+      tail.appendChild(edit);
       if (m.objectId) {
         var download = node('a', 'ghost small', t('files.download'));
         download.href = '/api/files/download?id=' + m.objectId;
@@ -2422,6 +2442,7 @@ function translationsLiteral(): string {
 			'merges.preview': 'Preview',
 			'merges.save': 'Save rule',
 			'merges.build': 'Generate file',
+			'merges.edit': 'Open rule',
 			'merges.run': 'Build now',
 			'merges.forget': 'Forget rule',
 			'merges.empty': 'No combined files yet.',
@@ -2660,6 +2681,7 @@ function translationsLiteral(): string {
 			'merges.preview': '预览',
 			'merges.save': '保存规则',
 			'merges.build': '生成文件',
+			'merges.edit': '打开规则',
 			'merges.run': '立即生成',
 			'merges.forget': '删除规则',
 			'merges.empty': '还没有合并文件。',
@@ -2703,6 +2725,7 @@ function translationsLiteral(): string {
 			'merges.preview': '預覽',
 			'merges.save': '儲存規則',
 			'merges.build': '產生檔案',
+			'merges.edit': '開啟規則',
 			'merges.run': '立即產生',
 			'merges.forget': '刪除規則',
 			'merges.empty': '還沒有合併檔案。',
@@ -3135,6 +3158,7 @@ function translationsLiteral(): string {
 			'merges.preview': 'プレビュー',
 			'merges.save': 'ルールを保存',
 			'merges.build': 'ファイルを生成',
+			'merges.edit': 'ルールを開く',
 			'merges.run': '今すぐ作成',
 			'merges.forget': 'ルールを削除',
 			'merges.empty': '結合ファイルはまだありません。',

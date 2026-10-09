@@ -11,7 +11,7 @@
   "constraints": [
     "Preserve existing authenticated APIs and direct-link/share semantics.",
     "Do not execute user code in the Worker or add deployment secrets.",
-    "Keep the existing derived-object automatic refresh disabled for script-defined previews until an explicit product decision covers persistence.",
+    "Keep automatic derived-object refresh disabled for all saved rules until an explicit product decision changes the preview-then-generate workflow.",
     "Preserve the pre-existing unstaged BRANCHES.md pending-clear edit in the original checkout; continue recording later task operations in the ledger."
   ],
   "acceptance": [

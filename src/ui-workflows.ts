@@ -162,7 +162,6 @@ export const WORKFLOW_SCRIPT = `
           entry.status = result.ok && result.body.ok !== false ? 'done' : 'failed';
           entry.error = entry.status === 'failed' ? result.body.error || t('shares.failed') : '';
           if (entry.status === 'done') entry.file = null;
-          (result.body.mergeIssues || []).forEach(function (issue) { $('uploadResult').appendChild(node('p', 'hint error', (issue.path || '') + ': ' + issue.reason)); });
           renderUploadQueue();
         });
       });

@@ -161,7 +161,7 @@ test('merged-all preset checks each of its eight required sources', async () => 
 });
 
 test('merge results hide actions and source paths until the result is opened', async () => {
-  const p = await page({ '/api/derived/status': { rules: [{ ruleId: 'fixture', outputName: 'merged.yaml', current: true, objectId: 3, sources: [{ hostId: 'demo', path: '/secret.yaml' }] }] } });
+  const p = await page({ '/api/derived/status': { rules: [{ ruleId: 'fixture', outputName: 'merged.yaml', current: true, objectId: 3, sources: [{ hostId: 'demo', path: '/secret.yaml' }] }] }, '/api/derived': { rules: [{ id: 'fixture', stored: true, outputName: 'merged.yaml', combination: 'concat', sources: [{ hostId: 'demo', pattern: '/secret.yaml' }] }] } });
   const result = p.get('mergelist').querySelector('.merge-head');
   assert.equal(p.get('mergelist').querySelector('.rule-tail').hidden, true);
   assert.doesNotMatch(p.get('mergelist').textContent, /secret\.yaml/);
@@ -169,6 +169,10 @@ test('merge results hide actions and source paths until the result is opened', a
   await result.dispatch('click');
   assert.equal(p.get('mergelist').querySelector('.rule-tail').hidden, false);
   assert.equal(p.get('mergelist').querySelector('a').href, '/api/files/download?id=3');
+  await p.get('mergelist').querySelectorAll('button').find(b => b.textContent === 'Open rule').dispatch('click'); await p.flush();
+  assert.equal(p.get('m-name').value, 'merged.yaml');
+  assert.equal(p.get('m-combination').value, 'concat');
+  assert.equal(p.get('m-patterns').value, 'demo:/secret.yaml');
 });
 
 test('late search replies cannot replace the latest file results', async () => {
