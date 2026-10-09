@@ -85,11 +85,24 @@ test('unavailable and replaced versions cannot be selected for sharing', async (
 test('file-row sharing opens links and selects a file outside the picker first page', async () => {
   const selected = { ...file, id: 201, path: '/outside-first-page.yaml' };
   const p = await page({ '/api/objects': path => path.includes('limit=50') ? { objects: [selected], total: 1 } : { objects: [file], total: 201 } });
+  await p.get('objectlist').querySelector('.file-target').dispatch('click');
   const share = p.get('objectlist').querySelectorAll('button').find(b => b.textContent === 'Share');
   await share.dispatch('click'); await p.flush();
   assert.equal(p.get('app').getAttribute('data-view'), 'links');
   assert.equal(p.get('s-object').value, '201');
   assert.match(p.get('shareSelected').textContent, /outside-first-page/);
+});
+
+test('file rows keep direct link controls but hide download and id-copy actions', async () => {
+  const p = await page({ '/api/file-links': { links: [{ host_id: file.hostId, path: file.path, url: 'http://localhost/d/fixture', token: 'fixture' }] } });
+  const target = p.get('objectlist').querySelector('.file-target');
+  const tail = p.get('objectlist').querySelector('.rule-tail');
+  assert.equal(tail.hidden, true);
+  assert.doesNotMatch(tail.textContent, /Download|Copy id/);
+  await target.dispatch('click');
+  assert.equal(tail.hidden, false);
+  assert.match(tail.textContent, /Copy direct link/);
+  assert.match(tail.textContent, /Cancel link/);
 });
 
 test('clipboard rejection shows manual copy and never claims success', async () => {
@@ -123,15 +136,19 @@ test('unreachable and stopped collection receipts preserve their actual outcomes
 });
 
 test('preview must succeed for the current definition before saving a merge', async () => {
-  const p = await page({ '/api/derived/preview': { preview: { ok: true, sources: ['demo:/configs/a.yaml'], perPattern: [{ pattern: '/configs/*.yaml', matched: 1 }], sourceCount: 1, sourceBytes: 42, bytes: 42 } } });
+  const p = await page({ '/api/derived/preview': { preview: { ok: true, sources: ['demo:/configs/a.yaml'], perPattern: [{ pattern: '/configs/*.yaml', matched: 1 }], sourceCount: 1, sourceBytes: 42, bytes: 42 } }, '/api/derived': { id: 'fixture' }, '/api/derived/run': { ok: true, bytes: 42 } });
   p.get('m-name').value = 'merged.yaml'; p.get('m-patterns').value = '/configs/*.yaml';
   await p.get('m-name').dispatch('input');
   assert.equal(p.get('saveMerge').disabled, true);
   await p.click('previewMerge'); assert.equal(p.get('saveMerge').disabled, false);
   await p.click('saveMerge'); assert.match(p.get('mergePreview').textContent, /Rule saved/);
+  assert.equal(p.get('buildMerge').disabled, false);
   assert.equal(p.calls.filter(c => c.path === '/api/derived/run').length, 0);
+  await p.click('buildMerge'); assert.match(p.get('mergePreview').textContent, /42/);
+  assert.equal(p.calls.filter(c => c.path === '/api/derived/run').length, 1);
   p.get('m-patterns').value = '/other.yaml'; await p.get('m-patterns').dispatch('input');
   assert.equal(p.get('saveMerge').disabled, true);
+  assert.equal(p.get('buildMerge').disabled, true);
 });
 
 test('merged-all preset checks each of its eight required sources', async () => {
@@ -143,12 +160,14 @@ test('merged-all preset checks each of its eight required sources', async () => 
   assert.equal(p.get('saveMerge').disabled, true);
 });
 
-test('manual merge run reports success and offers the built file download', async () => {
-  const p = await page({ '/api/derived/status': { rules: [{ ruleId: 'fixture', outputName: 'merged.yaml', current: true, objectId: 3, sources: [] }] }, '/api/derived/run': { ok: true, bytes: 42 } });
-  const run = p.get('mergelist').querySelectorAll('button').find(b => b.textContent === 'Build now');
-  assert.ok(run);
-  await run.dispatch('click'); await p.flush();
-  assert.match(p.get('mergePreview').textContent, /42/);
+test('merge results hide actions and source paths until the result is opened', async () => {
+  const p = await page({ '/api/derived/status': { rules: [{ ruleId: 'fixture', outputName: 'merged.yaml', current: true, objectId: 3, sources: [{ hostId: 'demo', path: '/secret.yaml' }] }] } });
+  const result = p.get('mergelist').querySelector('.merge-head');
+  assert.equal(p.get('mergelist').querySelector('.rule-tail').hidden, true);
+  assert.doesNotMatch(p.get('mergelist').textContent, /secret\.yaml/);
+  assert.equal(p.get('mergelist').querySelectorAll('button').some(b => b.textContent === 'Build now'), false);
+  await result.dispatch('click');
+  assert.equal(p.get('mergelist').querySelector('.rule-tail').hidden, false);
   assert.equal(p.get('mergelist').querySelector('a').href, '/api/files/download?id=3');
 });
 
@@ -205,7 +224,7 @@ test('navigation and new workflow copy work in all four locales', async () => {
   for (const locale of ['en','zh-CN','zh-TW','ja']) {
     const p = await page({}, { locale });
     const nav = p.document.querySelectorAll('[data-view-button]');
-    assert.equal(nav.length, 5);
+    assert.equal(nav.length, 4);
     assert.ok(nav.every(b => !b.textContent.startsWith('ui.')));
     await nav.find(b => b.getAttribute('data-view-button') === 'merges').dispatch('click');
     assert.equal(p.get('merges-panel').hidden, false);

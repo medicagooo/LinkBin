@@ -122,7 +122,6 @@ export function renderIndexPage(locale: Locale = 'en'): string {
   <div class="workspace" id="workspace" hidden>
     <nav class="glass workspace-nav" aria-label="LinkBin">
       <button type="button" class="ghost" data-view-button="files" data-i18n="ui.nav.files" aria-controls="files-panel">Files</button>
-      <button type="button" class="ghost" data-view-button="links" data-i18n="ui.nav.links" aria-controls="links-panel">Download links</button>
       <button type="button" class="ghost" data-view-button="merges" data-i18n="ui.nav.merges" aria-controls="merges-panel">Combined files</button>
       <button type="button" class="ghost" data-view-button="runs" data-i18n="ui.nav.runs" aria-controls="runs-panel">Collection</button>
       <button type="button" class="ghost" data-view-button="hosts" data-i18n="ui.nav.hosts" aria-controls="hosts-panel">Hosts and rules</button>
@@ -259,6 +258,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
         <div class="actions">
           <button class="ghost" id="previewMerge" data-i18n="merges.preview">Preview</button>
           <button class="quiet" id="saveMerge" data-i18n="merges.save">Save rule</button>
+          <button class="quiet" id="buildMerge" data-i18n="merges.build" disabled>Generate file</button>
           <button class="ghost" id="profilePreset" data-i18n="files.profilePreset">Use merged-all preset</button>
         </div>
         <!-- Preview output sits above the list so the thing just asked for is visible without scrolling. -->
@@ -959,6 +959,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
    * has typed something else cannot repaint the list with results for a query that is no longer on screen.
    */
   var browseState = { search: '', host: '', sort: 'newest', history: false, limit: 50, skipped: 0 };
+  var directLinkBySource = Object.create(null);
 
   /**
    * The stored-file list.
@@ -1018,7 +1019,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     objects.forEach(function (o) {
       var li = node('li', 'rule');
 
-      var target = node('div', 'share-target');
+      var target = node('div', 'share-target file-target');
       target.appendChild(node('code', 'pattern', o.path));
       target.appendChild(node('span', 'share-size', bytes(o.sizeBytes)));
       li.appendChild(target);
@@ -1043,6 +1044,22 @@ export function renderIndexPage(locale: Locale = 'en'): string {
       if (seen) li.appendChild(chip(t('browse.seenAgo').replace('{v}', seen), 'quiet'));
 
       var tail = node('div', 'rule-tail');
+      tail.hidden = true;
+      target.setAttribute('role', 'button');
+      target.tabIndex = 0;
+      target.setAttribute('aria-expanded', 'false');
+      target.setAttribute('aria-label', t('browse.showActions'));
+      target.addEventListener('click', function () {
+        tail.hidden = !tail.hidden;
+        target.setAttribute('aria-expanded', String(!tail.hidden));
+      });
+      target.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          tail.hidden = !tail.hidden;
+          target.setAttribute('aria-expanded', String(!tail.hidden));
+        }
+      });
 
       // The path is long, machine-specific and easy to mistype, which is exactly the kind of value worth a
       // button. Offered for every row, including one whose bytes are gone: the record of where a file lived
@@ -1054,39 +1071,44 @@ export function renderIndexPage(locale: Locale = 'en'): string {
       });
       tail.appendChild(copyPath);
 
-      // The id is what the share panel and the merge sources are configured by, so copying it beats reading it
-      // off the screen and retyping it.
-      var copyId = node('button', 'ghost small', t('browse.copyId'));
-      copyId.type = 'button';
-      copyId.addEventListener('click', function () {
-        copyText(String(o.id), copyId, t('browse.copyId'), t('browse.copied'));
-      });
-      tail.appendChild(copyId);
-
       // Only a live file can be shared: a replaced version may already have had its bytes reclaimed, so
       // offering a link to it would promise a download that cannot happen. And a file whose bytes the server
       // has confirmed are gone is not shareable either, for the same reason.
       if (o.live && o.bytesPresent !== false) {
-        var download = node('a', 'ghost small', t('files.download'));
-        download.href = '/api/files/download?id=' + o.id;
-        tail.appendChild(download);
-        var direct = node('button', 'ghost small', t('files.direct'));
-        direct.type = 'button';
-        direct.addEventListener('click', function () {
-          direct.disabled = true;
-          api('/api/file-links', { method: 'POST', body: JSON.stringify({ objectId: o.id }) }).then(function (r) {
-            direct.disabled = false;
-            if (!r.ok) { alert(r.body.error || t('shares.failed')); return; }
-            var link = node('input', 'share-link');
-            link.readOnly = true;
-            link.value = r.body.link.url;
-            link.setAttribute('aria-label', t('files.direct'));
-            li.appendChild(link);
-            copyText(r.body.link.url, direct, t('files.direct'), t('browse.copied'));
-            loadDirectLinks();
+        var activeDirect = directLinkBySource[o.hostId + '\u0000' + o.path];
+        if (activeDirect) {
+          var direct = node('button', 'ghost small', t('files.copyDirect'));
+          direct.type = 'button';
+          direct.textContent = t('files.copyDirect');
+          direct.addEventListener('click', function () {
+            copyText(activeDirect.url, direct, t('files.copyDirect'), t('browse.copied'));
           });
-        });
-        tail.appendChild(direct);
+          tail.appendChild(direct);
+          var revokeDirect = node('button', 'ghost small', t('shares.revoke'));
+          revokeDirect.type = 'button';
+          revokeDirect.addEventListener('click', function () {
+            mutate(revokeDirect, '/api/file-links/revoke', { token: activeDirect.token }, function () {
+              delete directLinkBySource[o.hostId + '\u0000' + o.path];
+              loadObjects(); loadDirectLinks();
+            }, li);
+          });
+          tail.appendChild(revokeDirect);
+        } else {
+          var direct = node('button', 'ghost small', t('files.direct'));
+          direct.type = 'button';
+          direct.addEventListener('click', function () {
+            direct.disabled = true;
+            api('/api/file-links', { method: 'POST', body: JSON.stringify({ objectId: o.id }) }).then(function (r) {
+              direct.disabled = false;
+              if (!r.ok) { alert(r.body.error || t('shares.failed')); return; }
+              directLinkBySource[o.hostId + '\u0000' + o.path] = r.body.link;
+              copyText(r.body.link.url, direct, t('files.direct'), t('browse.copied'));
+              loadDirectLinks();
+              loadObjects();
+            });
+          });
+          tail.appendChild(direct);
+        }
         var remove = node('button', 'ghost small', t('files.delete'));
         remove.type = 'button';
         remove.addEventListener('click', function () {
@@ -1354,6 +1376,10 @@ export function renderIndexPage(locale: Locale = 'en'): string {
   function loadDirectLinks() {
     return loadSection('directLinks', '/api/file-links', function (body) {
       var host = $('directLinks'); clear(host);
+      directLinkBySource = Object.create(null);
+      (body.links || []).forEach(function (link) {
+        if (!link.revoked_at) directLinkBySource[link.host_id + '\u0000' + link.path] = link;
+      });
       if (!(body.links || []).length) host.appendChild(node('p', 'hint', t('ui.linksEmpty')));
       (body.links || []).forEach(function (link) {
         var row = node('div', 'share-made');
@@ -1378,6 +1404,7 @@ export function renderIndexPage(locale: Locale = 'en'): string {
         }
         host.appendChild(row);
       });
+      loadObjects();
     }, loadDirectLinks);
   }
 
@@ -1763,13 +1790,16 @@ export function renderIndexPage(locale: Locale = 'en'): string {
     rules.forEach(function (m) {
       var li = node('li', 'rule');
 
-      var head = node('div', 'merge-head');
+      var head = node('div', 'merge-head file-target');
       head.appendChild(node('code', 'pattern', m.outputName));
+      head.setAttribute('role', 'button');
+      head.tabIndex = 0;
+      head.setAttribute('aria-expanded', 'false');
+      head.setAttribute('aria-label', t('browse.showActions'));
       li.appendChild(head);
 
-      // Three states, and the distinction is the useful part: never built means "run it", stale means "run it
-      // again", current means "leave it". Collapsing them would make the panel tell the operator to act when
-      // there is nothing to do, or to relax when there is.
+      // Three states, and the distinction is the useful part: never built and stale both need an explicit build,
+      // while current means the stored result already matches its rule.
       if (m.current === null) {
         li.appendChild(chip(t('merges.notBuilt'), 'quiet'));
       } else if (m.current === true) {
@@ -1782,28 +1812,19 @@ export function renderIndexPage(locale: Locale = 'en'): string {
       if (m.sourceCount !== undefined) li.appendChild(chip(t('merges.sources').replace('{n}', m.sourceCount), 'quiet'));
       if (m.sizeBytes) li.appendChild(chip(bytes(m.sizeBytes), 'quiet'));
 
-      if (m.sources && m.sources.length) {
-        // Shown as a hint rather than a list: the question "what is this built from" is asked occasionally, and
-        // the question "is it current" every time.
-        li.appendChild(node('p', 'hint', m.sources.map(function (s) { return s.hostId + ':' + s.path; }).join(', ')));
-      }
-
       var tail = node('div', 'rule-tail');
-      var run = node('button', 'ghost small', t('merges.run'));
-      run.type = 'button';
-      run.addEventListener('click', function () {
-        run.disabled = true;
-        api('/api/derived/run', { method: 'POST', body: JSON.stringify({ id: m.ruleId }) }).then(function (r) {
-          run.disabled = false;
-          if (!r.ok || !r.body.ok) {
-            feedback('mergePreview', r.body.error || t('merges.failed'), true);
-          } else {
-            feedback('mergePreview', t('merges.built').replace('{bytes}', bytes(r.body.bytes)), false);
-          }
-          loadMerges(); loadObjects(); loadUsage(); loadShareFiles();
-        });
+      tail.hidden = true;
+      function toggleMergeActions() {
+        tail.hidden = !tail.hidden;
+        head.setAttribute('aria-expanded', String(!tail.hidden));
+      }
+      head.addEventListener('click', toggleMergeActions);
+      head.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          toggleMergeActions();
+        }
       });
-      tail.appendChild(run);
       if (m.objectId) {
         var download = node('a', 'ghost small', t('files.download'));
         download.href = '/api/files/download?id=' + m.objectId;
@@ -1995,8 +2016,26 @@ export function renderIndexPage(locale: Locale = 'en'): string {
         $('mergePreview').appendChild(node('p', 'hint error', r.body.error || t('merges.failed')));
         return;
       }
+      savedMergeId = r.body.id || null;
+      updateActions();
       feedback('mergePreview', t('ui.mergeSaved'), false);
       loadMerges();
+    });
+  });
+
+  $('buildMerge').addEventListener('click', function () {
+    var button = $('buildMerge');
+    var definition = mergeDefinition();
+    if (!savedMergeId || verifiedMerge !== JSON.stringify(definition) || button.getAttribute('aria-busy') === 'true') return;
+    button.setAttribute('aria-busy', 'true'); updateActions();
+    api('/api/derived/run', { method: 'POST', body: JSON.stringify({ id: savedMergeId }) }).then(function (r) {
+      button.setAttribute('aria-busy', 'false'); updateActions();
+      if (!r.ok || !r.body.ok) {
+        feedback('mergePreview', r.body.error || t('merges.failed'), true);
+        return;
+      }
+      feedback('mergePreview', t('merges.built').replace('{bytes}', bytes(r.body.bytes)), false);
+      loadMerges(); loadObjects(); loadUsage(); loadShareFiles(); loadDirectLinks();
     });
   });
 
@@ -2165,6 +2204,7 @@ function translationsLiteral(): string {
 			'files.uploaded': 'Uploaded files',
 			'files.download': 'Download',
 			'files.direct': 'Get direct link',
+			'files.copyDirect': 'Copy direct link',
 			'files.directTitle': 'Direct download links',
 			'files.directHint': 'Anyone with a direct link can download the latest version. Revoke it here to stop access.',
 			'files.delete': 'Delete file',
@@ -2315,6 +2355,7 @@ function translationsLiteral(): string {
 			'browse.share': 'Share',
 			'browse.loadMore': 'Show more',
 			'browse.copyPath': 'Copy path',
+			'browse.showActions': 'Show file actions',
 			'browse.copyId': 'Copy id',
 			'browse.copied': 'Copied',
 			'browse.gone': 'no longer stored',			'browse.storedAgo': 'stored {v}',
@@ -2380,6 +2421,7 @@ function translationsLiteral(): string {
 			'merges.patterns': 'Which stored files (one pattern per line)',
 			'merges.preview': 'Preview',
 			'merges.save': 'Save rule',
+			'merges.build': 'Generate file',
 			'merges.run': 'Build now',
 			'merges.forget': 'Forget rule',
 			'merges.empty': 'No combined files yet.',
@@ -2404,6 +2446,7 @@ function translationsLiteral(): string {
 			'files.uploaded': '上传文件',
 			'files.download': '下载',
 			'files.direct': '获取直链',
+			'files.copyDirect': '复制直链',
 			'files.directTitle': '文件下载直链',
 			'files.directHint': '持有直链即可下载文件的最新版本；取消链接后停止访问。',
 			'files.delete': '删除文件',
@@ -2554,6 +2597,7 @@ function translationsLiteral(): string {
 			'browse.share': '分享',
 			'browse.loadMore': '显示更多',
 			'browse.copyPath': '复制路径',
+			'browse.showActions': '展开文件操作',
 			'browse.copyId': '复制编号',
 			'browse.copied': '已复制',
 			'browse.gone': '已不再存储',			'browse.storedAgo': '{v}存入',
@@ -2615,6 +2659,7 @@ function translationsLiteral(): string {
 			'merges.patterns': '取哪些已存文件（每行一个匹配式）',
 			'merges.preview': '预览',
 			'merges.save': '保存规则',
+			'merges.build': '生成文件',
 			'merges.run': '立即生成',
 			'merges.forget': '删除规则',
 			'merges.empty': '还没有合并文件。',
@@ -2639,6 +2684,7 @@ function translationsLiteral(): string {
 			'files.uploaded': '上傳檔案',
 			'files.download': '下載',
 			'files.direct': '取得直連',
+			'files.copyDirect': '複製直連',
 			'files.directTitle': '檔案下載直連',
 			'files.directHint': '持有直連即可下載最新版本；取消連結後停止存取。',
 			'files.delete': '刪除檔案',
@@ -2656,6 +2702,7 @@ function translationsLiteral(): string {
 			'merges.patterns': '取哪些已存檔案（每行一個匹配式）',
 			'merges.preview': '預覽',
 			'merges.save': '儲存規則',
+			'merges.build': '產生檔案',
 			'merges.run': '立即產生',
 			'merges.forget': '刪除規則',
 			'merges.empty': '還沒有合併檔案。',
@@ -2673,6 +2720,7 @@ function translationsLiteral(): string {
 			'merges.built': '已產生 {bytes}。結果與其它檔案一樣被儲存，可以瀏覽和分享。',
 			'browse.loadMore': '顯示更多',
 			'browse.copyPath': '複製路徑',
+			'browse.showActions': '展開檔案操作',
 			'browse.copyId': '複製編號',
 			'browse.copied': '已複製',
 			'browse.gone': '已不再儲存',			'browse.storedAgo': '{v}存入',
@@ -2873,6 +2921,7 @@ function translationsLiteral(): string {
 			'files.uploaded': 'アップロードしたファイル',
 			'files.download': 'ダウンロード',
 			'files.direct': '直接リンクを取得',
+			'files.copyDirect': '直接リンクをコピー',
 			'files.directTitle': '直接ダウンロードリンク',
 			'files.directHint': 'リンクを持つ人は最新のファイルをダウンロードできます。取り消すとアクセスできなくなります。',
 			'files.delete': 'ファイルを削除',
@@ -3023,6 +3072,7 @@ function translationsLiteral(): string {
 			'browse.share': '共有',
 			'browse.loadMore': 'さらに表示',
 			'browse.copyPath': 'パスをコピー',
+			'browse.showActions': 'ファイル操作を表示',
 			'browse.copyId': 'ID をコピー',
 			'browse.copied': 'コピーしました',
 			'browse.gone': '保存されていません',			'browse.storedAgo': '{v}に保存',
@@ -3084,6 +3134,7 @@ function translationsLiteral(): string {
 			'merges.patterns': '対象の保存済みファイル（1 行に 1 パターン）',
 			'merges.preview': 'プレビュー',
 			'merges.save': 'ルールを保存',
+			'merges.build': 'ファイルを生成',
 			'merges.run': '今すぐ作成',
 			'merges.forget': 'ルールを削除',
 			'merges.empty': '結合ファイルはまだありません。',
@@ -3363,6 +3414,9 @@ body {
 .share-link { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
 .share-made-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .share-target { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.file-target { cursor: pointer; border-radius: 8px; padding: 3px 5px; margin: -3px -5px; }
+.file-target:hover { background: var(--code-bg); }
+.file-target[role="button"]:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 22%, transparent); }
 .share-size { font-size: 12px; color: var(--muted); }
 
 /* ---------- headings ---------- */
@@ -3555,7 +3609,7 @@ button.danger:hover:not(:disabled) { border-color: var(--err); color: var(--err)
   padding: 10px 2px; border-bottom: 1px solid var(--glass-edge);
 }
 .rule:last-child { border-bottom: 0; }
-.rule-tail { margin-left: auto; }
+.rule-tail { margin-left: auto; display: flex; gap: 7px; flex-wrap: wrap; justify-content: flex-end; }
 
 /* --- combined files -------------------------------------------------------------------------
    The three classes below were used by the merge panel before any rule defined them, which is the

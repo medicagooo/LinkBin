@@ -32,7 +32,7 @@ import { REQUIRED_SCHEMA, SCHEMA_MIGRATIONS } from './migrations';
 import { resolveRules, type RemoteHost } from './remote';
 import { connectRemote } from './ssh-remote';
 import { MAX_FILE_BYTES, STORAGE_BUDGET_BYTES, measureStorage, checkFileBudget, reclaimFor, reclaimVersion, publishVersion, withStorageWriter } from './storage';
-import { collectFrom, type CollectionPorts } from './collect';
+import { collectFrom } from './collect';
 import { closeRun, collectionPorts, cursorFor, openRun } from './collect-store';
 import { abandonStaleSessions } from './multipart';
 import { buildObjectQuery, type BrowseFilter, type BrowseSort, type ObjectRow } from './browse';
@@ -1451,8 +1451,6 @@ export default {
 					await close();
 				}
 
-                await refreshDerivedObjects(env, api.recordIssue);
-
 				return json({
 					ok: true,
 					accepted: true,
@@ -1492,11 +1490,6 @@ export default {
       if (path.startsWith('/api/files/') || path.startsWith('/api/file-links')) {
         const response = await manageFiles(env, request);
         if (response) {
-          if (path === '/api/files/upload' && response.ok) {
-            const mergeIssues: { path: string | null; reason: string }[] = [];
-            await refreshDerivedObjects(env, async issue => { mergeIssues.push({ path: issue.path, reason: issue.reason }); });
-            return json({ ...await response.json() as object, mergeIssues });
-          }
           return response;
         }
       }
@@ -2023,45 +2016,6 @@ if (path === '/api/status' && method === 'GET') {
                 };
                 return path === '/api/derived/run' ? await withStorageWriter(env, execute) : await execute();
 			}
-
-/**
- * Collection calls this after committing changed sources. Saved rules run in dependency order and only
- * when their built signature differs; scheduler credentials stay confined to collection. A failed merge
- * preserves its last result and records a run issue. No user scripts or production fake remote are involved.
- */
-async function refreshDerivedObjects(env: Env, recordIssue: CollectionPorts['recordIssue']): Promise<void> {
-    const rows = await env.DB.prepare('SELECT id, rule_json, signature, created_at, updated_at FROM derived_rules ORDER BY id').all<any>();
-    const pending: ReturnType<typeof parseStoredRule>[] = [];
-    for (const row of rows.results ?? []) {
-        try { pending.push(parseStoredRule(row)); }
-        catch (error) { await recordIssue({ path: null, kind: 'merge_failed', reason: (error as Error).message, size: null }); }
-    }
-    while (pending.length) {
-        const index = pending.findIndex(rule => !pending.some(other => other.id !== rule.id && rule.sources.some(source =>
-            specMatches(source, { id: 0, hostId: derivedHostId(), path: `/${other.outputName}`, objectKey: '', sizeBytes: 0, contentHash: '' }))));
-        if (index < 0) {
-            await recordIssue({ path: null, kind: 'merge_failed', reason: 'saved merge rules contain a dependency cycle', size: null });
-            return;
-        }
-        const [rule] = pending.splice(index, 1);
-        try {
-            await withStorageWriter(env, async () => {
-                const selection = await loadMergeSelection(env, rule);
-                const signature = mergeSignature(rule, selection.objects);
-                const previous = await env.DB.prepare(`SELECT d.rule_signature FROM derived_objects d JOIN objects o ON o.id = d.object_id
-                    WHERE d.rule_id = ? AND o.deleted_at IS NULL AND o.superseded_by IS NULL`).bind(rule.id).first<{rule_signature: string}>();
-                if (previous?.rule_signature === signature) return;
-                const read = await readMergeContents(env, selection.objects);
-                if (read.problem) throw new Error(read.problem);
-                const outcome = runDerived(rule, selection.objects, read.contents);
-                if (!outcome.ok || outcome.content === undefined) throw new Error(outcome.problem ?? 'merge failed');
-                await storeDerivedObject(env, rule, outcome, selection, rule.id);
-            });
-        } catch (error) {
-            await recordIssue({ path: `/${rule.outputName}`, kind: 'merge_failed', reason: (error as Error).message, size: null });
-        }
-    }
-}
 
 /**
  * The machine id a derived object is filed under.

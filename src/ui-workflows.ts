@@ -16,6 +16,7 @@ export const WORKFLOW_SCRIPT = `
   var uploadQueue = [];
   var usageCache = null;
   var verifiedMerge = null;
+  var savedMergeId = null;
   var presetRequest = 0;
 
   function selectView(view) {
@@ -93,6 +94,7 @@ export const WORKFLOW_SCRIPT = `
     var definition = mergeDefinition();
     $('previewMerge').disabled = !definition.outputName || !definition.sources.length || $('mergePreview').getAttribute('aria-busy') === 'true';
     $('saveMerge').disabled = !verifiedMerge || verifiedMerge !== JSON.stringify(definition) || $('saveMerge').getAttribute('aria-busy') === 'true';
+    $('buildMerge').disabled = !savedMergeId || !verifiedMerge || verifiedMerge !== JSON.stringify(definition) || $('buildMerge').getAttribute('aria-busy') === 'true';
     $('collectHint').textContent = !hostsLoaded ? t('ui.loading') : hostCache.some(function (h) { return !!h.enabled; }) ? '' : t('ui.needHost');
   }
 
@@ -192,7 +194,7 @@ export const WORKFLOW_SCRIPT = `
   }
 
   function mergeEdited() {
-    verifiedMerge = null; presetRequest += 1;
+    verifiedMerge = null; savedMergeId = null; presetRequest += 1;
     clear($('presetStatus')); clear($('mergePreview'));
     updateActions();
   }

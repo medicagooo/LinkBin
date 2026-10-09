@@ -125,7 +125,7 @@ describe('R2 file management and direct links', () => {
     expect(response.status).toBe(413);
     expect(await (await call(new URL(direct.url).pathname)).text()).toBe('file contents');
   });
-  it('runs the profile from uploaded files and automatically refreshes a stable output link on source upload', async () => {
+  it('keeps derived outputs stable until an explicit rebuild after source upload', async () => {
     for (const [name, label] of PROFILE_SOURCES) await uploaded(name, stringify({ proxies: [{ name: label + '-vless', type: 'vless', server: 'node.invalid' }] }));
     const definition = { outputName: 'merged-all.yaml', combination: 'proxy-profile', sources: PROFILE_SOURCES.map(([name]) => ({ pattern: '/' + name })) };
     const saved = await (await post('/api/derived', definition)).json() as any;
@@ -140,10 +140,12 @@ describe('R2 file management and direct links', () => {
     expect(first).toContain('ByteVirt-vless');
     const invalid = await upload('bytevirt.yaml', 'proxies: []');
     expect(invalid.status).toBe(200);
-    expect((await invalid.json() as any).mergeIssues).toHaveLength(1);
+    expect((await invalid.json() as any).mergeIssues).toBeUndefined();
     expect(await (await call(new URL(direct.url).pathname)).text()).toBe(first);
     const update = await upload('bytevirt.yaml', stringify({ proxies: [{ name: 'ByteVirt-updated', type: 'vless', server: 'node.invalid' }] }));
-    expect((await update.json() as any).mergeIssues).toEqual([]);
+    expect((await update.json() as any).mergeIssues).toBeUndefined();
+    expect(await (await call(new URL(direct.url).pathname)).text()).toBe(first);
+    expect((await post('/api/derived/run', { id: saved.id })).status).toBe(200);
     expect(await (await call(new URL(direct.url).pathname)).text()).toContain('ByteVirt-updated');
     const source = (await (await call('/api/objects', { headers: { cookie } })).json() as any).objects.find((object: any) => object.path === '/bytevirt.yaml');
     expect((await post('/api/files/delete', { id: source.id })).status).toBe(409);

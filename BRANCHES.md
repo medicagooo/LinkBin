@@ -51,7 +51,7 @@
       "task": "1010-file-actions-scripts",
       "state": ".branch-records/1010-file-actions-scripts/state.json",
       "events": ".branch-records/1010-file-actions-scripts/events.jsonl",
-      "purpose": "Remove the Download links navigation entry, keep file-scoped direct/share/revoke actions, and add browser-local script processing for merge previews.",
+      "purpose": "Remove the Download links navigation entry, keep file-scoped direct/share/revoke actions, and make merge generation explicit after preview and save.",
       "status": "active",
       "integration": "unmerged",
       "branch": "1010-file-actions-scripts"
@@ -68,8 +68,7 @@
     "1008-r2-file-manager-e005: integrate reviewed feature into main preserving user delta (predeclared)",
     "1008-r2-file-manager-e006: push verified feature main to origin (predeclared)",
     "1008-ui-layout-repair-e005: integrate reviewed UI into main preserving original ledger delta (predeclared)",
-    "1008-ui-layout-repair-e006: push reviewed main to GitHub (predeclared)",
-    "1010-file-actions-scripts-e002: create isolated worktree for browser-local file actions and script preview (predeclared)"
+    "1008-ui-layout-repair-e006: push reviewed main to GitHub (predeclared)"
   ],
   "remote": {
     "origin": "git@github.com:medicagooo/LinkBin.git",
@@ -81,6 +80,26 @@
   },
   "read": [],
   "changes": [
+    {
+      "id": "C-012",
+      "domain": "management UI / explicit merge generation",
+      "request": "1010-file-actions-scripts-e001",
+      "requirement_date": "2026-10-10",
+      "implementation_date": "2026-10-10",
+      "main_integration_date": null,
+      "deployment_date": null,
+      "before": "The management navigation exposed a separate Download links entry, stored-file rows showed every action including download and copy-id, and collection/upload automatically rebuilt saved merge rules.",
+      "after": "The navigation starts from Files, Combined files, Collection and Hosts/rules. Stored-file rows expand on click or keyboard focus to expose path copy, direct-link creation/copy/revoke, delete, share and protection actions. Merge results also expand for download/delete, while a new result is generated only after the current definition is previewed, saved and explicitly generated.",
+      "rules": "Direct links and password shares remain authenticated file-scoped workflows. Browser-local arbitrary TypeScript/Python execution is deferred by ADR-0003; no SSH credentials reach script code and no Worker code-execution path is added.",
+      "status": "implemented and verified offline; isolated branch unmerged and deployment unverified",
+      "evidence": [
+        "src/ui.ts",
+        "src/ui-workflows.ts",
+        "src/index.ts",
+        "docs/ui-workflows.md",
+        "1010-file-actions-scripts-e003"
+      ]
+    },
     {
       "id": "C-001",
       "requirement_date": "2026-10-07",
@@ -299,5 +318,5 @@
       ]
     }
   ],
-  "notes": "C-001/C-002 describe historical deployment and security cleanup before authentication and probe removal; their before/after statements are not current architecture. C-003 records the host form change. Collection, downloads and derived routes now exist; C-004/C-005/C-006 record the 2026-10-08 full-code repairs with offline verification, separately from unverified live deployment. See the latest checkpoint in .scratch/vps-file-hub/STATE.md. C-011 records UI layout/workflow repair; latest checkpoint is .scratch/ui-layout-repair/STATE.md."
+  "notes": "C-001/C-002 describe historical deployment and security cleanup before authentication and probe removal; their before/after statements are not current architecture. C-003 records the host form change. Collection, downloads and derived routes now exist; C-004/C-005/C-006 record the 2026-10-08 full-code repairs with offline verification, separately from unverified live deployment. See the latest checkpoint in .scratch/vps-file-hub/STATE.md. C-011 records UI layout/workflow repair; C-012 records the explicit merge generation and file-action disclosure change; latest checkpoint is .branch-records/1010-file-actions-scripts/state.json."
 }

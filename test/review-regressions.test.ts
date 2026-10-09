@@ -43,17 +43,17 @@ beforeEach(async () => {
 	cookie = /(linkbin_session=[^;]+)/.exec(login.headers.get('set-cookie') ?? '')![1];
 });
 describe('review regressions through real storage and HTTP', () => {
-	it('a corrupt saved rule does not stop other automatic derived refreshes', async () => {
-		await post('/api/derived', { outputName: 'valid.txt', combination: 'concat', sources: [{ hostId: 'h1', pattern: '/data/*.txt' }] });
+	it('a corrupt saved rule does not affect an explicit build of another rule', async () => {
+		const valid = await (await post('/api/derived', { outputName: 'valid.txt', combination: 'concat', sources: [{ hostId: 'h1', pattern: '/data/*.txt' }] })).json() as any;
 		await env.DB.prepare("INSERT INTO derived_rules (id,output_name,rule_json,signature,created_at,updated_at) VALUES ('aaa-corrupt','corrupt.txt','null','old','2020-01-01','2020-01-01')").run();
 		await env.DB.prepare("INSERT INTO source_rules (pattern,is_exclude,enabled,created_at) VALUES ('/data/*.txt',0,1,'2020-01-01')").run();
 		const result = await post('/api/collect', {}, { TEST_REMOTE: machine(1) });
 		expect(result.status).toBe(200);
+		expect(await post('/api/derived/run', { id: valid.id })).toMatchObject({ status: 200 });
 		const output = await env.DB.prepare("SELECT object_key FROM objects WHERE host_id='@derived' AND path='/valid.txt' AND deleted_at IS NULL").first<{object_key: string}>();
 		expect(output).not.toBeNull();
 		expect(await (await env.BUCKET.get(output!.object_key))!.text()).toBe('x\n');
-		const issue = await env.DB.prepare("SELECT reason FROM collection_issues WHERE kind='merge_failed'").first<{reason: string}>();
-		expect(issue?.reason).toContain('aaa-corrupt');
+		expect(await env.DB.prepare("SELECT reason FROM collection_issues WHERE kind='merge_failed'").first()).toBeNull();
 	});
 	it('recovers an interrupted publication and restores the protected predecessor', async () => {
         const ports = collectionPorts(env, 'h1', await openRun(env.DB, 'h1', null));
@@ -140,6 +140,11 @@ describe('review regressions through real storage and HTTP', () => {
         await post('/api/derived', { outputName: 'b.txt', combination: 'concat', sources: [{ hostId: '@derived', pattern: '/a.txt' }] });
         await env.DB.prepare("INSERT INTO source_rules (pattern,is_exclude,enabled,created_at) VALUES ('/data/*.txt',0,1,'2020-01-01')").run();
         await post('/api/collect', {}, { TEST_REMOTE: machine(1) });
+        const a = await (await call('/api/derived/status', { headers: { cookie } })).json() as any;
+        const aRule = a.rules.find((rule: any) => rule.outputName === 'a.txt');
+        const bRule = a.rules.find((rule: any) => rule.outputName === 'b.txt');
+        expect(await post('/api/derived/run', { id: aRule.ruleId })).toMatchObject({ status: 200 });
+        expect(await post('/api/derived/run', { id: bRule.ruleId })).toMatchObject({ status: 200 });
         const key = await env.DB.prepare("SELECT object_key FROM objects WHERE host_id='@derived' AND path='/b.txt' AND deleted_at IS NULL").first<string>('object_key');
         expect(key).toBeTruthy();
         expect(await (await env.BUCKET.get(key!))!.text()).toBe('x\n');
@@ -233,7 +238,10 @@ describe('review regressions through real storage and HTTP', () => {
 		const issues = await env.DB.prepare('SELECT reason FROM collection_issues').all();
 		expect(issues.results).toEqual([]);
 		const output = await env.DB.prepare("SELECT object_key FROM objects WHERE host_id = '@derived' AND deleted_at IS NULL").first<string>('object_key');
-		expect(await (await env.BUCKET.get(output!))!.text()).toBe('x\n');
+        expect(await (await env.BUCKET.get(output!))!.text()).toBe('old\n');
+        expect(await post('/api/derived/run', { id: rule.id })).toMatchObject({ status: 200 });
+        const rebuilt = await env.DB.prepare("SELECT object_key FROM objects WHERE host_id = '@derived' AND deleted_at IS NULL").first<string>('object_key');
+        expect(await (await env.BUCKET.get(rebuilt!))!.text()).toBe('x\n');
 	});
 });
 describe('collection completion boundaries', () => {
