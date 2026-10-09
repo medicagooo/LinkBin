@@ -46,20 +46,30 @@
       "purpose": "Repair the five reported panel layouts and complete the agreed file-management interactions; review and push main",
       "status": "active",
       "integration": "unmerged"
+    },
+    {
+      "task": "1010-file-actions-scripts",
+      "state": ".branch-records/1010-file-actions-scripts/state.json",
+      "events": ".branch-records/1010-file-actions-scripts/events.jsonl",
+      "purpose": "Remove the Download links navigation entry, keep file-scoped direct/share/revoke actions, and add browser-local script processing for merge previews.",
+      "status": "active",
+      "integration": "unmerged",
+      "branch": "1010-file-actions-scripts"
     }
   ],
   "active": [
     "vps-file-hub",
     "ssh-probe",
     "1008-r2-file-manager",
-    "1008-ui-layout-repair"
+    "1008-ui-layout-repair",
+    "1010-file-actions-scripts"
   ],
   "pending": [
-    "vps-file-hub-e038: push main to origin to deploy the UI authentication fix (predeclared; awaiting execution)",
     "1008-r2-file-manager-e005: integrate reviewed feature into main preserving user delta (predeclared)",
     "1008-r2-file-manager-e006: push verified feature main to origin (predeclared)",
     "1008-ui-layout-repair-e005: integrate reviewed UI into main preserving original ledger delta (predeclared)",
-    "1008-ui-layout-repair-e006: push reviewed main to GitHub (predeclared)"
+    "1008-ui-layout-repair-e006: push reviewed main to GitHub (predeclared)",
+    "1010-file-actions-scripts-e002: create isolated worktree for browser-local file actions and script preview (predeclared)"
   ],
   "remote": {
     "origin": "git@github.com:medicagooo/LinkBin.git",

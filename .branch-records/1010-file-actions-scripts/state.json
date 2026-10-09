@@ -1,0 +1,35 @@
+{
+  "task": "1010-file-actions-scripts",
+  "purpose": "Remove the Download links navigation entry, keep file-scoped direct/share/revoke actions, and add browser-local script processing for merge previews.",
+  "requirements": [
+    "Remove the Download links navigation entry and its standalone panel entry point.",
+    "Keep direct-link creation, sharing, and revocation available from stored-file rows.",
+    "Hide row actions until the stored file is expanded, with keyboard-accessible disclosure.",
+    "Only a fresh preview may produce a merge result; edits or source changes invalidate the preview.",
+    "Prefer browser-local processing for TypeScript/Python merge helpers and never expose SSH credentials to script code."
+  ],
+  "constraints": [
+    "Preserve existing authenticated APIs and direct-link/share semantics.",
+    "Do not execute user code in the Worker or add deployment secrets.",
+    "Keep the existing derived-object automatic refresh disabled for script-defined previews until an explicit product decision covers persistence.",
+    "Preserve the pre-existing unstaged BRANCHES.md pending-clear edit in the original checkout."
+  ],
+  "acceptance": [
+    "The sidebar has no Download links control and the files view remains the path to direct links and shares.",
+    "Stored-file actions are hidden by default and expand/collapse without losing focus or state.",
+    "Direct link revoke and password share actions work from the file row.",
+    "A merge result cannot be generated from an edited or unpreviewed definition.",
+    "Browser-local script processing is bounded, cancellation-safe, and covered by offline UI tests."
+  ],
+  "status": "active",
+  "integration": "unmerged",
+  "evidence": [
+    "user confirmation on 2026-10-10",
+    "src/ui.ts",
+    "src/ui-workflows.ts",
+    "docs/adr/0003-derived-objects-are-configured-not-scripted.md"
+  ],
+  "next": "Implement in the isolated worktree, then run UI guards and offline tests.",
+  "created_at": "2026-10-10T00:00:00+08:00",
+  "updated_at": "2026-10-10T00:00:00+08:00"
+}
