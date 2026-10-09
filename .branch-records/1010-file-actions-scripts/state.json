@@ -30,9 +30,10 @@
     "docs/adr/0003-derived-objects-are-configured-not-scripted.md",
     "Registry commit 373735f and worktree verified before implementation",
     "UI 23/23; Workers 744/744 across 46 files; template and migration guards passed; Wrangler dry-run passed",
-    "1010-file-actions-scripts-e004 records the BRANCHES.md clarification"
+    "1010-file-actions-scripts-e004 records the BRANCHES.md clarification",
+    "1010-file-actions-scripts-e005 records post-review verification"
   ],
-  "next": "Commit the reviewed implementation and registry updates; keep BRANCHES.md task records synchronized for later integration.",
+  "next": "Keep the isolated branch unmerged; if integration or push is requested, predeclare and verify that operation while preserving the root BRANCHES.md delta.",
   "created_at": "2026-10-10T00:00:00+08:00",
-  "updated_at": "2026-10-10T01:12:00+08:00"
+  "updated_at": "2026-10-10T01:36:00+08:00"
 }
