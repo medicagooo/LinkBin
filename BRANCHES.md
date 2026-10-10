@@ -65,6 +65,9 @@
     "1010-file-actions-scripts"
   ],
   "pending": [
+    "vps-file-hub-e038: push main to origin to deploy the UI authentication fix (predeclared; awaiting execution)",
+    "1010-file-actions-scripts-e008: integrate reviewed task into main preserving the original ledger delta (predeclared)",
+    "1010-file-actions-scripts-e009: push verified main to GitHub (predeclared)",
     "1008-r2-file-manager-e005: integrate reviewed feature into main preserving user delta (predeclared)",
     "1008-r2-file-manager-e006: push verified feature main to origin (predeclared)",
     "1008-ui-layout-repair-e005: integrate reviewed UI into main preserving original ledger delta (predeclared)",

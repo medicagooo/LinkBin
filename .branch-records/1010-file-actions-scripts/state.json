@@ -31,9 +31,10 @@
     "Registry commit 373735f and worktree verified before implementation",
     "UI 23/23; Workers 744/744 across 46 files; template and migration guards passed; Wrangler dry-run passed",
     "1010-file-actions-scripts-e004 records the BRANCHES.md clarification",
-    "1010-file-actions-scripts-e005 records post-review verification"
+    "1010-file-actions-scripts-e005 records post-review verification",
+    "1010-file-actions-scripts-e006 records explicit authorization to integrate and push main"
   ],
-  "next": "Keep the isolated branch unmerged; if integration or push is requested, predeclare and verify that operation while preserving the root BRANCHES.md delta.",
-  "created_at": "2026-10-10T00:00:00+08:00",
-  "updated_at": "2026-10-10T01:36:00+08:00"
+  "next": "Execute 1010-file-actions-scripts-e008 using C:/Users/medic/AppData/Local/Temp/linkbin-push-main-1010.ps1 -Phase Integrate, then 1010-file-actions-scripts-e009 using -Phase Push; verify GitHub main. No manual deployment or migration is authorized.",
+  "created_at": "2026-10-09T12:00:00-04:00",
+  "updated_at": "2026-10-11T04:24:45+08:00"
 }

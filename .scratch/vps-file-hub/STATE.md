@@ -1,10 +1,12 @@
-# 最新执行检查点：文件操作与显式合并生成（2026-10-10）
+# 最新执行检查点：文件操作修复准备推送 main（2026-10-10）
 
-- **阶段/授权**：第5步 implement 的文件操作修复已完成并提交；本轮未推送、未部署、未执行线上迁移或云数据写入。任务分支 `1010-file-actions-scripts` 的最新提交为 `56e8cf9`（实现提交 `3b2af82`），隔离工作区为 `D:/proj/LinkBin-file-actions-1010`。
-- **修复产物**：移除“下载链接”导航入口；文件行默认隐藏操作，点击或键盘展开后保留路径复制、直链创建/复制/撤销、删除、分享和重要标记；合并结果点击后展开下载/删除；合并生成必须经过当前定义预览、保存和显式生成，上传或采集不会自动重建旧结果。`docs/ui-workflows.md` 已同步调用关系和边界。
-- **安全边界**：继续遵守 `docs/adr/0003-derived-objects-are-configured-not-scripted.md`，本轮没有加入 Worker 或浏览器任意 TS/Python 执行，也不向脚本暴露 SSH 凭据。浏览器本地脚本方案保留为需要单独设计和批准的后续事项。
-- **验证**：UI 行为测试 23/23；Workers 模拟 D1/R2 测试 46 文件、744/744；模板守卫、迁移守卫（5 文件/37 条语句）及 Wrangler 离线 dry-run 全通过。真实浏览器、生产 Worker、D1/R2 与部署状态未验证。
-- **登记与下一步**：`BRANCHES.md` 已记录 C-012，`.branch-records/1010-file-actions-scripts/` 已记录 e003 验证事件；原工作区 `D:/proj/LinkBin` 的用户自有 `BRANCHES.md` 未提交差异保持原位。后续若用户要求整合或推送，必须先重新核对并预登记对应操作。
+- 目标与阶段：第5步 implement 的文件操作修复和离线验收已完成。用户明确要求 push 到 main，允许合入、提交和非强制推送；没有手工部署、迁移或直接云数据写入授权。
+- 仓库事实：任务工作区 D:/proj/LinkBin-file-actions-1010，分支 1010-file-actions-scripts；实现提交 3b2af82、复核修复 56e8cf9、发布前检查点 0b42f9b。主工作区 D:/proj/LinkBin 的 main 与 GitHub main 在操作前均为 a3487ae1c1846d2e3fdabee069520225bdfb6ea7。最新任务提交用 git rev-parse 1010-file-actions-scripts 查询。
+- 产物：移除“下载链接”入口；文件操作默认折叠，展开后保留路径复制、直链创建/复制/撤销、删除、分享和重要标记。合并结果展开操作；已存规则可重新打开，预览、保存后显式生成，采集和上传不会自动重建结果。调用关系见 docs/ui-workflows.md。浏览器任意 TS/Python 执行尚未实现，仍是独立后续需求。
+- 验证：UI 行为测试 23/23；Workers 模拟 D1/R2 测试 46 文件、744/744；模板守卫、迁移守卫及 Wrangler 离线 dry-run 通过。此次仅修改登记和检查点，功能代码与已验证提交一致。真实浏览器与生产部署未验证。
+- 原有改动：主工作区仅有 BRANCHES.md 删除旧 e038 pending 指针的用户自有差异。提交版本恢复该指针，整合后继续把它的删除保留为未暂存差异，不纳入推送。
+- 待执行：1010-file-actions-scripts-e008 合入本地 main，随后 1010-file-actions-scripts-e009 推送 GitHub main。两项先登记并提交，再检查祖先关系、目标引用、索引和用户差异。成功以实时 Git/GitHub SHA 为准，预声明不证明发布成功。
+- 下一条准确动作：在干净的任务工作区提交本检查点与登记后，运行 pwsh -NoProfile -File C:/Users/medic/AppData/Local/Temp/linkbin-push-main-1010.ps1 -Phase Integrate，再运行同脚本 -Phase Push 和 -Phase Verify。验证 main 与任务树一致、远端 SHA 相同，主工作区只剩原用户差异。禁止由此推断线上已部署。
 
 # STATE: vps-file-hub
 
