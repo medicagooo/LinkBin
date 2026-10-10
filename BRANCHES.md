@@ -52,8 +52,8 @@
       "state": ".branch-records/1010-author-rewrite/state.json",
       "events": ".branch-records/1010-author-rewrite/events.jsonl",
       "purpose": "Rewrite main and remote prototype/ssh-probe commit identities to the medicagooo account email",
-      "status": "active",
-      "integration": "unknown",
+      "status": "complete",
+      "integration": "verified",
       "branch": "1010-author-rewrite"
     },    {
       "task": "1010-file-actions-scripts",
@@ -70,11 +70,9 @@
     "ssh-probe",
     "1008-r2-file-manager",
     "1008-ui-layout-repair",
-    "1010-file-actions-scripts",
-    "1010-author-rewrite"
+    "1010-file-actions-scripts"
   ],
   "pending": [
-    "1010-author-rewrite-e004: force-with-lease push rewritten main and prototype/ssh-probe (predeclared)",
     "vps-file-hub-e038: push main to origin to deploy the UI authentication fix (predeclared; awaiting execution)",
     "1010-file-actions-scripts-e008: integrate reviewed task into main preserving the original ledger delta (predeclared)",
     "1010-file-actions-scripts-e009: push verified main to GitHub (predeclared)",
@@ -88,8 +86,8 @@
     "url": "https://github.com/medicagooo/LinkBin",
     "visibility": "PUBLIC",
     "default_branch": "main",
-    "last_verified_main": "6282b5129dabe6c11b7c27d3cdfa894cf410b806",
-    "verified_at": "2026-10-08T16:33:59+08:00"
+    "last_verified_main": "804226b920904e3dab315ce3f0232c11a5cb90b2",
+    "verified_at": "2026-10-10T21:09:38Z"
   },
   "read": [],
   "changes": [
