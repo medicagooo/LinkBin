@@ -6,10 +6,9 @@
  * be exercised without a machine, which matters because the real remote cannot be reached from a local
  * test — local development refuses outbound connections to private addresses.
  *
- * This is **not** a production interface with a second implementation. Production has exactly one
- * implementation, the SSH one. A fake exists only in tests, injected through the environment, so no
- * fake can reach production code paths (see the ticket-01 note in STATE.md: promoting it to a
- * production interface would be a departure from that decision).
+ * Production implementations include SSH and HTTPS WebDAV sources. A fake exists only in tests, injected
+ * through the environment, so no fake can reach production code paths (see the ticket-01 note in
+ * STATE.md: promoting it to a production interface would be a departure from that decision).
  */
 
 export interface RemoteEntry {
@@ -33,6 +32,14 @@ export interface RemoteHost {
 	 * 128 MB isolate. Anything implementing this must not buffer.
 	 */
 	read(path: string): Promise<ReadableStream<Uint8Array>>;
+	/** Writes a file when the source protocol supports write-back. */
+	write?(path: string, body: ReadableStream<Uint8Array>, expectedVersion?: string): Promise<void>;
+	/** Removes a file or directory when the source protocol supports write-back. */
+	remove?(path: string, expectedVersion?: string): Promise<void>;
+	/** Renames a source path while preserving an optional version precondition. */
+	move?(from: string, to: string, expectedVersion?: string): Promise<void>;
+	/** Copies a source path while preserving an optional version precondition. */
+	copy?(from: string, to: string, expectedVersion?: string): Promise<void>;
 	/**
 	 * Runs a read-only identifying command and returns its output.
 	 *

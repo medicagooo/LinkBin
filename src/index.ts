@@ -31,6 +31,8 @@ import { statementsOf } from './sql';
 import { REQUIRED_SCHEMA, SCHEMA_MIGRATIONS } from './migrations';
 import { resolveRules, type RemoteHost } from './remote';
 import { connectRemote } from './ssh-remote';
+import { WebDavRemote } from './webdav-remote';
+import { handleR2WebDav, handleRemoteWebDav, WebDavError } from './webdav';
 import { MAX_FILE_BYTES, STORAGE_BUDGET_BYTES, measureStorage, checkFileBudget, reclaimFor, reclaimVersion, publishVersion, withStorageWriter } from './storage';
 import { collectFrom } from './collect';
 import { closeRun, collectionPorts, cursorFor, openRun } from './collect-store';
@@ -357,6 +359,34 @@ async function authRow(env: Env): Promise<AuthRow | null> {
 	} catch {
 		return null;
 	}
+}
+
+/** Basic authentication for WebDAV reuses the operator password; no second credential is stored. */
+async function isWebDavAuthenticated(env: Env, request: Request): Promise<boolean> {
+	const header = request.headers.get('authorization');
+	if (!header || !/^Basic\s+/i.test(header)) return false;
+	const remote = callerAddress(request);
+	const refusal = await refusalFor(env, remote);
+	if (refusal) throw new HttpError(429, refusal);
+	let decoded: string;
+	try { decoded = new TextDecoder().decode(Uint8Array.from(atob(header.replace(/^Basic\s+/i, '').trim()), (ch) => ch.charCodeAt(0))); } catch { return false; }
+	const separator = decoded.indexOf(':');
+	if (separator < 0) return false;
+	const row = await authRow(env);
+	if (!row) return false;
+	const candidate = decoded.slice(separator + 1);
+	const hash = await hashPassword(candidate, row.salt, Number(row.iterations));
+	const ok = timingSafeEqual(hash, row.hash);
+	await recordAttempt(env, ok, remote);
+	if (!ok) {
+		const late = await refusalFor(env, remote);
+		if (late) throw new HttpError(429, late);
+	}
+	return ok;
+}
+
+function webDavUnauthorized(): Response {
+	return new Response(null, { status: 401, headers: { 'www-authenticate': 'Basic realm="LinkBin WebDAV", charset="UTF-8"', 'cache-control': 'no-store' } });
 }
 
 /** Reads a timestamp as epoch milliseconds; 0 when absent, so a missing floor blocks nothing. */
@@ -1019,6 +1049,78 @@ async function connectOptionsFor(env: Env, row: HostRow) {
 	};
 }
 
+interface SourceProfileRow {
+	host_id: string;
+	protocol: 'webdav';
+	endpoint: string;
+	root_path: string;
+	capabilities_json: string;
+	created_at: string;
+	updated_at: string;
+}
+
+async function sourceProfile(env: Env, hostId: string): Promise<SourceProfileRow | null> {
+	return await env.DB.prepare('SELECT host_id, protocol, endpoint, root_path, capabilities_json, created_at, updated_at FROM source_profiles WHERE host_id = ?').bind(hostId).first<SourceProfileRow>();
+}
+
+async function connectSource(env: Env, row: HostRow): Promise<{ remote: RemoteHost; close: () => Promise<void> }> {
+	const profile = await sourceProfile(env, row.id);
+	if (!profile) {
+		const options = await connectOptionsFor(env, row);
+		return await connectRemote(options);
+	}
+	if (profile.protocol !== 'webdav') throw new HttpError(501, 'this Worker has no SMB source adapter; configure WebDAV or SSH');
+	const masterKey = requireMasterKey(env);
+	if (!row.password_enc) throw new HttpError(400, `source ${row.id} has no stored WebDAV password`);
+	const password = await decryptField(masterKey, row.id, 'password', row.password_enc);
+	return { remote: new WebDavRemote({ baseUrl: profile.endpoint, rootPath: profile.root_path, username: row.username, password }), close: async () => {} };
+}
+
+async function upsertSourceProfile(env: Env, body: Record<string, unknown>): Promise<Response> {
+	const endpointText = String(body.endpoint ?? '').trim();
+	let endpoint: URL;
+	try { endpoint = new URL(endpointText); } catch { throw new HttpError(400, 'endpoint must be an absolute HTTPS URL'); }
+	if (endpoint.protocol !== 'https:') throw new HttpError(400, 'endpoint must use HTTPS');
+	if (endpoint.username || endpoint.password) throw new HttpError(400, 'endpoint must not embed credentials');
+	if (endpoint.search || endpoint.hash) throw new HttpError(400, 'endpoint must not include a query or fragment');
+	const rawRootPath = String(body.rootPath ?? '/').trim() || '/';
+	let rootPath: string;
+	try { rootPath = decodeURIComponent(rawRootPath).replace(/\\/g, '/'); } catch { throw new HttpError(400, 'rootPath has invalid URL encoding'); }
+	if (!rootPath.startsWith('/') || rootPath.includes('..') || rootPath.includes('\0')) throw new HttpError(400, 'rootPath must stay within the WebDAV root');
+	rootPath = `/${rootPath.split('/').filter(Boolean).join('/')}`;
+	const protocol = String(body.protocol ?? 'webdav').toLowerCase();
+	if (protocol !== 'webdav') throw new HttpError(501, 'SMB source configuration is unavailable in this Worker; use WebDAV');
+	const username = String(body.username ?? '').trim();
+	const password = String(body.password ?? '');
+	if (!username || !password) throw new HttpError(400, 'username and password are required for a WebDAV source');
+	const label = String(body.label ?? endpoint.hostname).trim() || endpoint.hostname;
+	const id = slugify(String(body.id ?? label));
+	if (!id) throw new HttpError(400, 'could not derive a usable source id');
+	const previous = await getHost(env.DB, id);
+	await upsertHost(env, { id, label, address: endpoint.hostname, port: endpoint.port ? Number(endpoint.port) : 443, username, password, enabled: body.enabled !== false });
+	const now = nowIso();
+	try {
+		await env.DB.prepare(`INSERT INTO source_profiles (host_id, protocol, endpoint, root_path, capabilities_json, created_at, updated_at)
+			VALUES (?, 'webdav', ?, ?, '{}', ?, ?) ON CONFLICT(host_id) DO UPDATE SET protocol = excluded.protocol, endpoint = excluded.endpoint, root_path = excluded.root_path, updated_at = excluded.updated_at`)
+			.bind(id, endpoint.toString(), rootPath, now, now).run();
+	} catch (error) {
+		// D1 has no transaction. Restore the host row if the profile statement failed so the source cannot
+		// silently fall back to SSH with the newly supplied WebDAV credential.
+		try {
+			if (previous) {
+				await env.DB.prepare(`UPDATE hosts SET label = ?, address = ?, port = ?, username = ?, password_enc = ?, private_key_enc = ?, private_key_pass_enc = ?, host_key_fingerprint = ?, enabled = ?, created_at = ?, updated_at = ? WHERE id = ?`)
+					.bind(previous.label, previous.address, previous.port, previous.username, previous.password_enc, previous.private_key_enc, previous.private_key_pass_enc, previous.host_key_fingerprint, previous.enabled, previous.created_at, previous.updated_at, previous.id).run();
+			} else {
+				await env.DB.prepare('DELETE FROM hosts WHERE id = ?').bind(id).run();
+			}
+		} catch {
+			throw new HttpError(503, 'source profile write failed and host recovery is required');
+		}
+		throw error;
+	}
+	return json({ ok: true, source: { id, protocol: 'webdav', endpoint: endpoint.toString(), rootPath } });
+}
+
 /**
  * A machine's self-identification, degrading gracefully when the remote cannot run commands.
  *
@@ -1090,8 +1192,7 @@ async function testHost(env: Env, id: string): Promise<Response> {
 
 	// Decryption happens before the timer starts: the measured stage should be the connection, not the
 	// fast local key work, and this keeps the plaintext alive for the shortest span possible.
-	const options = await connectOptionsFor(env, row);
-	const { remote, close } = await timed('ssh connect + auth', () => connectRemote(options));
+	const { remote, close } = await timed('source connect + auth', () => connectSource(env, row));
 
 	try {
 		const facts = await timed('identify', () => identifyRemote(remote, row));
@@ -1265,6 +1366,23 @@ export default {
 				return await serveShare(env, request, token, new URL(request.url).origin);
 			}
 
+			if (path === '/dav' || path.startsWith('/dav/')) {
+				const state = await schemaReady(env);
+				if (!state.ready) return json({ ok: false, error: 'the database schema is not ready', missing: state.missing }, 503);
+				if (!(await isWebDavAuthenticated(env, request))) return webDavUnauthorized();
+				if (path.startsWith('/dav/sources/')) {
+					const raw = path.slice('/dav/sources/'.length).split('/')[0];
+					let sourceId: string;
+					try { sourceId = slugify(decodeURIComponent(raw)); } catch { throw new WebDavError(400, 'invalid source id'); }
+					if (!sourceId) throw new WebDavError(404, 'WebDAV source was not found');
+					const host = await getHost(env.DB, sourceId);
+					if (!host) throw new WebDavError(404, 'WebDAV source was not found');
+					const connected = await connectSource(env, host);
+					try { return await handleRemoteWebDav(sourceId, connected.remote, request); } finally { await connected.close(); }
+				}
+				return await handleR2WebDav(env, request);
+			}
+
 			if (path === '/api/collect' && method === 'POST') {
 				// Two ways in, and they are deliberately different credentials. The scheduler has no session and
 				// presents a derived token; the operator has a session and asks from the interface. Accepting
@@ -1373,8 +1491,7 @@ export default {
 
 				if (!remote) {
 					try {
-						const options = await connectOptionsFor(env, hostRow);
-						const connected = await connectRemote(options);
+						const connected = await connectSource(env, hostRow);
 						remote = connected.remote;
 						close = connected.close;
 					} catch (err) {
@@ -1860,6 +1977,15 @@ if (path === '/api/status' && method === 'GET') {
 				return await upsertHost(env, (await request.json()) as Record<string, unknown>);
 			}
 
+			if (path === '/api/source-profiles' && method === 'GET') {
+				const { results } = await env.DB.prepare('SELECT host_id, protocol, endpoint, root_path, capabilities_json, created_at, updated_at FROM source_profiles ORDER BY host_id LIMIT 200').all<SourceProfileRow>();
+				return json({ ok: true, sources: results ?? [] });
+			}
+
+			if (path === '/api/source-profiles' && method === 'POST') {
+				return await upsertSourceProfile(env, (await request.json()) as Record<string, unknown>);
+			}
+
 			if (path === '/api/hosts/delete' && method === 'POST') {
 				const body = (await request.json()) as { id?: string };
 				const id = slugify(String(body.id ?? ''));
@@ -2326,7 +2452,7 @@ async function storeDerivedObject(
 			return json({ error: 'not found', path, routes: ['/', '/api/status', '/api/hosts', '/api/rules', '/api/usage', '/api/admin/apply-schema'] }, 404);
 		} catch (err) {
 			const e = err as Error;
-			const status = e instanceof HttpError || e instanceof FileProblem ? e.status : 500;
+			const status = e instanceof HttpError || e instanceof FileProblem || e instanceof WebDavError ? e.status : 500;
 
 			// Errors reach the operator, but never carry decrypted material: messages that could are built only
 			// from the host id and the field name.
