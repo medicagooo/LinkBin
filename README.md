@@ -81,8 +81,12 @@ Connecting the repository is a **dashboard step and cannot be done by CLI or API
 4. **Create the tables.** Open the Worker's URL and press **Apply schema** in the setup panel, or
    `POST /api/admin/apply-schema`. This route exists because a Workers-Builds deployment has no CLI
    attached to it. It is idempotent — every statement is `CREATE ... IF NOT EXISTS` — so it is safe to
-   run again. It applies `migrations/0001_init.sql`, the same file the CLI uses, imported into the
-   Worker as a string, so the schema has exactly one source of truth.
+   run again. It applies the ordered `migrations/*.sql` imports in `src/migrations.ts`.
+   On later releases, the first page visit, guarded API request or WebDAV request automatically
+   applies missing additive objects when the core and authentication tables are intact. Existing
+   rows and R2 files are preserved. Failed upgrades remain blocked and retry on the next request.
+   A fresh database or missing core/authentication table still requires explicit schema repair;
+   `/api/status` only reports readiness and never applies migrations.
 
 5. **Add a host** in the UI: label, address, port, username, and a password or private key. Up to 50.
 

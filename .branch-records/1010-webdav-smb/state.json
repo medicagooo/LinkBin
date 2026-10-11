@@ -31,9 +31,10 @@
     "offline verification: 47 Vitest files / 748 tests, UI behavior 23 tests, migration/template guards and Wrangler dry-run passed",
     "review repairs: virtual uploads root, serialized budget measurement, HTTPS-only source endpoints, D1 host compensation, source COPY/MOVE preconditions, bounded remote writes, DAV class-1 capability declaration, UTF-8 Basic auth and WebDAV root listing",
     "local main integration verified: 339648e and c5e96bb transferred as c7da7e8 and 1d9ca1b; original BRANCHES.md user delta remains unstaged",
-    "2026-10-11 live incident repaired through existing schema endpoint; missing source_profiles became ready; 7 hosts remain; existing password remains configured"
+    "2026-10-11 live incident repaired through existing schema endpoint; missing source_profiles became ready; 7 hosts remain; existing password remains configured",
+    "2026-10-11: 48 test files/756 Workers tests, 23 UI tests, 38-statement migration guard, template guard and Wrangler dry-run passed; regression suite initially failed 5 upgrade cases; strengthened 9-case suite passed after review, including partial success recovery and independent concurrent bindings; Standards and Spec reviews found no blocking defects"
   ],
-  "next": "Merge verified main checkpoint, add upgrade regression tests, implement and validate automatic compatible migration, then integrate and push under existing authorization.",
-  "created_at": "2026-10-10T10:00:00-04:00",
-  "updated_at": "2026-10-11T18:05:35+08:00"
+  "next": "Execute linkbin-auto-schema-publish.ps1 -Phase Integrate, then -Phase Push and -Phase Verify. Live incident is resolved. Future automatic upgrade code deployment remains unverified; no manual deploy authorization.",
+  "created_at": "2026-10-10T22:00:00+08:00",
+  "updated_at": "2026-10-11T18:14:03+08:00"
 }

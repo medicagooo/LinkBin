@@ -8,8 +8,8 @@
  *      redeploy, and this deployment's only secret is `SSH_MASTER_KEY`.
  *   2. A **schema bootstrap** route. Deployment happens through Workers Builds from GitHub, so there
  *      is no CLI attached to a release: the Worker has to be able to create its own tables. The
- *      schema is the same `migrations/0001_init.sql` the CLI would use, imported as a string, so
- *      there is exactly one source of truth.
+ *      schema comes from the ordered SQL imports in `src/migrations.ts`. Initialized deployments
+ *      also apply missing additive objects automatically before serving the UI or guarded routes.
  *
  * The collection channel is SSH from this Worker out to the host. Nothing is installed on the hosts:
  * the Worker connects with `cloudflare:sockets` using a Workers-native SSH stack. `ssh2` cannot be
@@ -250,16 +250,37 @@ async function schemaStatus(env: Env): Promise<{ ready: boolean; missing: string
 	return { ready: missing.length === 0, missing };
 }
 
+// Losing a core or authentication table needs explicit repair. Recreating auth_secret automatically
+// could reopen password setup on an existing installation. Additive feature tables can be upgraded.
+const SCHEMA_UPGRADE_BASE = ['hosts', 'source_rules', 'objects', 'multipart_sessions', 'auth_secret', 'auth_attempts'];
+const schemaUpgrades = new WeakMap<D1Database, Promise<{ ready: boolean; missing: string[] }>>();
+
 /**
- * Whether the database has everything the Worker needs, cached for the life of the request.
- *
- * The guard exists because a missing migration used to surface as a 500 whose body carried a stack trace
- * and the failing SQL — internal detail handed to an anonymous caller, and a message that told the
- * operator nothing about what to do. A deployment with an unapplied migration is a configuration state,
- * not a crash, and it is reported as one.
+ * Called by the page, API guard and /dav guard before reading application tables. /api/status calls
+ * schemaStatus directly and stays read-only. Concurrent requests on one binding share an upgrade;
+ * other isolates can repeat CREATE IF NOT EXISTS safely. Failures keep routes blocked and clear the
+ * pending attempt so the next request can resume. No cross-batch transaction is required.
  */
 async function schemaReady(env: Env): Promise<{ ready: boolean; missing: string[] }> {
-	return await schemaStatus(env);
+	const pending = schemaUpgrades.get(env.DB);
+	if (pending) return pending;
+	const state = await schemaStatus(env);
+	if (state.ready || SCHEMA_UPGRADE_BASE.some((name) => state.missing.includes(name))) return state;
+	const racing = schemaUpgrades.get(env.DB);
+	if (racing) return racing;
+	const upgrade = (async () => {
+		try {
+			await applySchema(env);
+			return await schemaStatus(env);
+		} catch {
+			console.log(JSON.stringify({ at: 'schema-upgrade-failed', missing: state.missing }));
+			return state;
+		} finally {
+			schemaUpgrades.delete(env.DB);
+		}
+	})();
+	schemaUpgrades.set(env.DB, upgrade);
+	return upgrade;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1300,6 +1321,8 @@ export default {
 		const method = request.method;
 
 		try {
+			// Upgrade before the UI asks for status, so an ordinary page visit repairs new feature tables.
+			if (path === '/' && method === 'GET') await schemaReady(env);
 			// --- schema, before anything reads a table -----------------------------------------
 			// This comes FIRST, ahead of the auth routes, and the ordering is a fix rather than a preference.
 			//

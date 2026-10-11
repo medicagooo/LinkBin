@@ -91,7 +91,8 @@
     "1008-r2-file-manager-e006: push verified feature main to origin (predeclared)",
     "1008-ui-layout-repair-e005: integrate reviewed UI into main preserving original ledger delta (predeclared)",
     "1008-ui-layout-repair-e006: push reviewed main to GitHub (predeclared)",
-    "1010-webdav-smb-e006: merge verified main checkpoint into the existing task worktree (predeclared)"
+    "1010-webdav-smb-e007: integrate automatic schema upgrade repair into main (predeclared)",
+    "1010-webdav-smb-e008: push main non-force (predeclared)"
   ],
   "remote": {
     "origin": "git@github.com:medicagooo/LinkBin.git",
@@ -366,18 +367,19 @@
       "domain": "schema readiness / compatible upgrades",
       "request": "1010-webdav-smb-e005",
       "requirement_date": "2026-10-11",
-      "implementation_date": null,
+      "implementation_date": "2026-10-11",
       "main_integration_date": null,
       "deployment_date": null,
       "before": "A code release adding source_profiles blocks all guarded APIs until an operator applies schema manually",
       "after": "Initialized deployments automatically create missing additive schema objects; fresh or damaged core/auth schema stays explicit",
       "rules": "CREATE IF NOT EXISTS only; preserve all rows, credentials and R2; no write in /api/status; retry partial failures without transactions",
-      "status": "live missing-table incident repaired; automatic upgrade implementation pending",
+      "status": "implemented and verified offline; live missing-table incident repaired; main push predeclared; automatic upgrade deployment unverified",
       "evidence": [
         "src/index.ts",
         "src/migrations.ts",
         "test/schema-upgrade.test.ts",
-        ".branch-records/1010-webdav-smb/state.json"
+        ".branch-records/1010-webdav-smb/state.json",
+        "48 Workers test files / 756 tests; UI 23 tests; template/migration guards and Wrangler dry-run passed; strengthened 9-case regression suite passed; Standards and Spec reviews found no blocking defects"
       ]
     }
   ],
