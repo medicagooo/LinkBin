@@ -6,7 +6,8 @@
     "WebDAV clients can list, read, write, delete, copy and move files with Basic authentication tied to the existing operator password",
     "WebDAV source adapter supports collection and write-back through PROPFIND/GET/PUT/DELETE/MOVE/COPY",
     "Path traversal, host redirects, size limits, R2 budget and write conflicts are rejected safely",
-    "No SMB server route or second deployment secret is introduced"
+    "No SMB server route or second deployment secret is introduced",
+    "Existing initialized deployments automatically apply additive missing schema objects before serving the UI, guarded APIs and WebDAV; status stays read-only; missing core/auth tables still require explicit repair"
   ],
   "constraints": [
     "Cloudflare Worker only; no VPS gateway or installed agent",
@@ -19,7 +20,8 @@
     "R2 and D1 state remain recoverable after partial failures",
     "WebDAV source writes are protected by ETag/If-Match and root path confinement",
     "Offline tests, migration/template guards and Wrangler dry-run pass",
-    "Review findings are repaired before non-force push to origin/main"
+    "Review findings are repaired before non-force push to origin/main",
+    "Regression tests reproduce missing source_profiles, preserve existing rows/auth/R2, cover concurrent upgrade and retry after partial failure"
   ],
   "status": "active",
   "integration": "unmerged",
@@ -27,9 +29,11 @@
     "user instruction on 2026-10-10: implement, review, repair and push main",
     "existing SSH-only remote interface and R2/D1 storage modules inspected",
     "offline verification: 47 Vitest files / 748 tests, UI behavior 23 tests, migration/template guards and Wrangler dry-run passed",
-    "review repairs: virtual uploads root, serialized budget measurement, HTTPS-only source endpoints, D1 host compensation, source COPY/MOVE preconditions, bounded remote writes, DAV class-1 capability declaration, UTF-8 Basic auth and WebDAV root listing"
+    "review repairs: virtual uploads root, serialized budget measurement, HTTPS-only source endpoints, D1 host compensation, source COPY/MOVE preconditions, bounded remote writes, DAV class-1 capability declaration, UTF-8 Basic auth and WebDAV root listing",
+    "local main integration verified: 339648e and c5e96bb transferred as c7da7e8 and 1d9ca1b; original BRANCHES.md user delta remains unstaged",
+    "2026-10-11 live incident repaired through existing schema endpoint; missing source_profiles became ready; 7 hosts remain; existing password remains configured"
   ],
-  "next": "Execute predeclared e003 local main integration, verify tests and refs, then execute e004 non-force push and verify origin/main SHA.",
-  "created_at": "2026-10-10T22:00:00+08:00",
-  "updated_at": "2026-10-11T00:08:00+08:00"
+  "next": "Merge verified main checkpoint, add upgrade regression tests, implement and validate automatic compatible migration, then integrate and push under existing authorization.",
+  "created_at": "2026-10-10T10:00:00-04:00",
+  "updated_at": "2026-10-11T18:05:35+08:00"
 }

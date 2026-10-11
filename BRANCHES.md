@@ -91,8 +91,7 @@
     "1008-r2-file-manager-e006: push verified feature main to origin (predeclared)",
     "1008-ui-layout-repair-e005: integrate reviewed UI into main preserving original ledger delta (predeclared)",
     "1008-ui-layout-repair-e006: push reviewed main to GitHub (predeclared)",
-    "1010-webdav-smb-e003: integrate reviewed WebDAV implementation into local main preserving the original BRANCHES.md delta (predeclared)",
-    "1010-webdav-smb-e004: push verified local main to origin/main non-force (predeclared)"
+    "1010-webdav-smb-e006: merge verified main checkpoint into the existing task worktree (predeclared)"
   ],
   "remote": {
     "origin": "git@github.com:medicagooo/LinkBin.git",
@@ -110,12 +109,12 @@
       "request": "1010-webdav-smb-e001",
       "requirement_date": "2026-10-10",
       "implementation_date": "2026-10-11",
-      "main_integration_date": null,
+      "main_integration_date": "2026-10-11",
       "deployment_date": null,
       "before": "LinkBin exposed stored files through its existing HTTP management/download flows and had no WebDAV source profile or WebDAV file service; SMB was not a supported Worker access path.",
       "after": "The Worker serves DAV class 1 at /dav for R2-backed files with listing, read, write, delete, copy and move, and proxies configured HTTPS WebDAV sources with write-back to the original source. SMB access remains explicitly unavailable.",
       "rules": "Basic authentication reuses the operator session password with rate limiting. Source endpoints reject HTTP, URL-embedded credentials, query/fragment and redirects. Paths reject traversal, writes enforce 100 MiB/file and 10 GiB/R2 limits, and If-Match/Overwrite protect concurrent changes. No gateway, VPS agent or deployment secret is added.",
-      "status": "implemented and verified offline; local main integration and push predeclared; deployment and live remote WebDAV behavior unverified",
+      "status": "implemented and verified offline; integrated into local main at 1d9ca1b; push predeclared; deployment and live remote WebDAV behavior unverified",
       "evidence": [
         "src/webdav.ts",
         "src/webdav-remote.ts",
@@ -360,6 +359,25 @@
         "test/ui-behavior.test.mjs",
         "1008-ui-layout-repair-e004",
         ".scratch/ui-layout-repair/STATE.md"
+      ]
+    },
+    {
+      "id": "C-014",
+      "domain": "schema readiness / compatible upgrades",
+      "request": "1010-webdav-smb-e005",
+      "requirement_date": "2026-10-11",
+      "implementation_date": null,
+      "main_integration_date": null,
+      "deployment_date": null,
+      "before": "A code release adding source_profiles blocks all guarded APIs until an operator applies schema manually",
+      "after": "Initialized deployments automatically create missing additive schema objects; fresh or damaged core/auth schema stays explicit",
+      "rules": "CREATE IF NOT EXISTS only; preserve all rows, credentials and R2; no write in /api/status; retry partial failures without transactions",
+      "status": "live missing-table incident repaired; automatic upgrade implementation pending",
+      "evidence": [
+        "src/index.ts",
+        "src/migrations.ts",
+        "test/schema-upgrade.test.ts",
+        ".branch-records/1010-webdav-smb/state.json"
       ]
     }
   ],
