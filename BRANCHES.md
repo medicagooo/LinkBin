@@ -91,7 +91,8 @@
     "1008-r2-file-manager-e006: push verified feature main to origin (predeclared)",
     "1008-ui-layout-repair-e005: integrate reviewed UI into main preserving original ledger delta (predeclared)",
     "1008-ui-layout-repair-e006: push reviewed main to GitHub (predeclared)",
-    "1010-webdav-smb-e002: create isolated implementation worktree from latest main (predeclared)"
+    "1010-webdav-smb-e003: integrate reviewed WebDAV implementation into local main preserving the original BRANCHES.md delta (predeclared)",
+    "1010-webdav-smb-e004: push verified local main to origin/main non-force (predeclared)"
   ],
   "remote": {
     "origin": "git@github.com:medicagooo/LinkBin.git",
@@ -103,6 +104,27 @@
   },
   "read": [],
   "changes": [
+    {
+      "id": "C-013",
+      "domain": "WebDAV service / source write-back",
+      "request": "1010-webdav-smb-e001",
+      "requirement_date": "2026-10-10",
+      "implementation_date": "2026-10-11",
+      "main_integration_date": null,
+      "deployment_date": null,
+      "before": "LinkBin exposed stored files through its existing HTTP management/download flows and had no WebDAV source profile or WebDAV file service; SMB was not a supported Worker access path.",
+      "after": "The Worker serves DAV class 1 at /dav for R2-backed files with listing, read, write, delete, copy and move, and proxies configured HTTPS WebDAV sources with write-back to the original source. SMB access remains explicitly unavailable.",
+      "rules": "Basic authentication reuses the operator session password with rate limiting. Source endpoints reject HTTP, URL-embedded credentials, query/fragment and redirects. Paths reject traversal, writes enforce 100 MiB/file and 10 GiB/R2 limits, and If-Match/Overwrite protect concurrent changes. No gateway, VPS agent or deployment secret is added.",
+      "status": "implemented and verified offline; local main integration and push predeclared; deployment and live remote WebDAV behavior unverified",
+      "evidence": [
+        "src/webdav.ts",
+        "src/webdav-remote.ts",
+        "src/index.ts:upsertSourceProfile/connectSource",
+        "migrations/0006_source_profiles.sql",
+        "test/webdav.test.ts",
+        "1010-webdav-smb-e001"
+      ]
+    },
     {
       "id": "C-012",
       "domain": "management UI / explicit merge generation",
