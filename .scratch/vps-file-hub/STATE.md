@@ -1,3 +1,11 @@
+# 最新执行检查点：WebDAV 服务与 WebDAV 来源回写（2026-10-10）
+
+- **目标与授权**：用户要求完整 WebDAV（Worker 作为 R2 服务端，同时可配置 WebDAV 来源并回写原始来源），SMB 不提供访问入口；已授权修复、离线测试、提交、合入本地 `main` 和非强制推送 `origin/main`。未授权手工部署、线上迁移或直接云数据管理。
+- **实现事实**：`src/webdav.ts` 提供 `/dav` 的 PROPFIND/GET/HEAD/PUT/DELETE/COPY/MOVE（DAV class 1；不虚报无状态 LOCK/UNLOCK）；`src/webdav-remote.ts` 提供远端 WebDAV PROPFIND/GET/PUT/DELETE/COPY/MOVE；`0006_source_profiles.sql` 保存 WebDAV 来源配置。现有 SSH 来源路径继续可用；SMB 配置明确返回 501。
+- **安全与约束**：复用现有操作员密码的 Basic Auth 和限流；路径拒绝 `.`/`..`/反斜杠/NUL；来源端点只接受 HTTPS、拒绝 URL 内凭据和重定向，并限制 root；R2 上传受 100 MiB/10 GiB 与串行写锁保护；If-Match 防止覆盖冲突；不增加部署 secret、不引入网关。
+- **验证事实**：47 个 Vitest 文件 / 748 个测试通过；UI 行为 23/23；迁移守卫、模板守卫、Wrangler dry-run 通过。完整协议写入、读回、列目录、复制、移动、删除、ETag 冲突、路径遍历和 SMB 501 有回归覆盖。真实远端 WebDAV 与线上部署尚未验证。
+- **下一动作**：提交任务代码与登记；预声明并执行本地 main 合入及非强制推送，最后核对远端 SHA。
+
 # 最新执行检查点：文件操作修复准备推送 main（2026-10-10）
 
 - 目标与阶段：第5步 implement 的文件操作修复和离线验收已完成。用户明确要求 push 到 main，允许合入、提交和非强制推送；没有手工部署、迁移或直接云数据写入授权。

@@ -25,9 +25,11 @@
   "integration": "unmerged",
   "evidence": [
     "user instruction on 2026-10-10: implement, review, repair and push main",
-    "existing SSH-only remote interface and R2/D1 storage modules inspected"
+    "existing SSH-only remote interface and R2/D1 storage modules inspected",
+    "offline verification: 47 Vitest files / 748 tests, UI behavior 23 tests, migration/template guards and Wrangler dry-run passed",
+    "review repairs: virtual uploads root, serialized budget measurement, HTTPS-only source endpoints, D1 host compensation, source COPY/MOVE preconditions, bounded remote writes, DAV class-1 capability declaration, UTF-8 Basic auth and WebDAV root listing"
   ],
-  "next": "Create the isolated worktree, implement the feature, run review and offline verification, then integrate and push main with live SHA verification.",
+  "next": "Commit the reviewed implementation, predeclare integration and push, then fast-forward local main and verify origin/main SHA.",
   "created_at": "2026-10-10T22:00:00+08:00",
-  "updated_at": "2026-10-10T22:00:00+08:00"
+  "updated_at": "2026-10-11T00:08:00+08:00"
 }

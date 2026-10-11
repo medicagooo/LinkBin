@@ -18,6 +18,7 @@ import usageIndexSql from '../migrations/0002_usage_index.sql';
 import receiptsSql from '../migrations/0003_receipts_importance_and_sources.sql';
 import derivedRulesSql from '../migrations/0004_derived_rules.sql';
 import fileLinksSql from '../migrations/0005_file_links.sql';
+import sourceProfilesSql from '../migrations/0006_source_profiles.sql';
 
 export interface Migration {
 	name: string;
@@ -37,6 +38,7 @@ export const SCHEMA_MIGRATIONS: Migration[] = [
 	{ name: '0003_receipts_importance_and_sources', sql: receiptsSql },
 	{ name: '0004_derived_rules', sql: derivedRulesSql },
   { name: '0005_file_links', sql: fileLinksSql },
+	{ name: '0006_source_profiles', sql: sourceProfilesSql },
 ];
 
 /**
@@ -80,6 +82,7 @@ export const REQUIRED_SCHEMA = [
 	'shares',
   'file_links',
   'idx_file_links_active',
+	'source_profiles',
 ] as const;
 
 /**
