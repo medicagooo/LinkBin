@@ -55,7 +55,8 @@
       "status": "complete",
       "integration": "verified",
       "branch": "1010-author-rewrite"
-    },    {
+    },
+    {
       "task": "1010-file-actions-scripts",
       "state": ".branch-records/1010-file-actions-scripts/state.json",
       "events": ".branch-records/1010-file-actions-scripts/events.jsonl",
@@ -63,6 +64,15 @@
       "status": "active",
       "integration": "unmerged",
       "branch": "1010-file-actions-scripts"
+    },
+    {
+      "task": "1010-webdav-smb",
+      "state": ".branch-records/1010-webdav-smb/state.json",
+      "events": ".branch-records/1010-webdav-smb/events.jsonl",
+      "purpose": "Implement complete WebDAV service and WebDAV source write-back for LinkBin; keep SMB out of the access surface and report Worker runtime limits clearly",
+      "status": "active",
+      "integration": "unmerged",
+      "branch": "1010-webdav-smb"
     }
   ],
   "active": [
@@ -70,7 +80,8 @@
     "ssh-probe",
     "1008-r2-file-manager",
     "1008-ui-layout-repair",
-    "1010-file-actions-scripts"
+    "1010-file-actions-scripts",
+    "1010-webdav-smb"
   ],
   "pending": [
     "vps-file-hub-e038: push main to origin to deploy the UI authentication fix (predeclared; awaiting execution)",
@@ -79,7 +90,8 @@
     "1008-r2-file-manager-e005: integrate reviewed feature into main preserving user delta (predeclared)",
     "1008-r2-file-manager-e006: push verified feature main to origin (predeclared)",
     "1008-ui-layout-repair-e005: integrate reviewed UI into main preserving original ledger delta (predeclared)",
-    "1008-ui-layout-repair-e006: push reviewed main to GitHub (predeclared)"
+    "1008-ui-layout-repair-e006: push reviewed main to GitHub (predeclared)",
+    "1010-webdav-smb-e002: create isolated implementation worktree from latest main (predeclared)"
   ],
   "remote": {
     "origin": "git@github.com:medicagooo/LinkBin.git",

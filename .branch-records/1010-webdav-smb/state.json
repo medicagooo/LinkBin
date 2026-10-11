@@ -1,0 +1,33 @@
+{
+  "task": "1010-webdav-smb",
+  "purpose": "Implement complete WebDAV service and WebDAV source write-back for LinkBin; keep SMB out of the access surface and report Worker runtime limits clearly",
+  "requirements": [
+    "Worker serves WebDAV over HTTPS for R2-backed files",
+    "WebDAV clients can list, read, write, delete, copy and move files with Basic authentication tied to the existing operator password",
+    "WebDAV source adapter supports collection and write-back through PROPFIND/GET/PUT/DELETE/MOVE/COPY",
+    "Path traversal, host redirects, size limits, R2 budget and write conflicts are rejected safely",
+    "No SMB server route or second deployment secret is introduced"
+  ],
+  "constraints": [
+    "Cloudflare Worker only; no VPS gateway or installed agent",
+    "D1 migration statements must be CREATE IF NOT EXISTS and repeatable",
+    "Preserve existing SSH collection and unrelated working-tree edits",
+    "SMB access entry is out of scope; any unsupported Worker-side SMB operation must fail explicitly"
+  ],
+  "acceptance": [
+    "WebDAV protocol routes return RFC-compatible 207/201/204/401/404/412/423/507 responses",
+    "R2 and D1 state remain recoverable after partial failures",
+    "WebDAV source writes are protected by ETag/If-Match and root path confinement",
+    "Offline tests, migration/template guards and Wrangler dry-run pass",
+    "Review findings are repaired before non-force push to origin/main"
+  ],
+  "status": "active",
+  "integration": "unmerged",
+  "evidence": [
+    "user instruction on 2026-10-10: implement, review, repair and push main",
+    "existing SSH-only remote interface and R2/D1 storage modules inspected"
+  ],
+  "next": "Create the isolated worktree, implement the feature, run review and offline verification, then integrate and push main with live SHA verification.",
+  "created_at": "2026-10-10T22:00:00+08:00",
+  "updated_at": "2026-10-10T22:00:00+08:00"
+}
